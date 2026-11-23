@@ -281,18 +281,36 @@ func (o *simOracle) observeServerVerdict(v queue.Verdict) error {
 	return nil
 }
 
-func (o *simOracle) onRunnerExit(r *simRunner) error {
+func (o *simOracle) onRunnerExit(w *simWorld, r *simRunner) error {
 	if r.exitErr == nil {
 		if want, ok := r.sentVerdicts[r.lastOpID]; !ok || r.verdict != want {
 			return fmt.Errorf("oracle: runner %d exited with verdict %q; server sent %q", r.id, r.verdict, want)
 		}
 		return nil
 	}
-	var apiErr *queueapi.APIError
-	if errors.As(r.exitErr, &apiErr) && apiErr.Code == queue.ErrCodeStaleRequest {
-		return fmt.Errorf("oracle: runner %d exited on 409 stale_request instead of looping with a fresh request_id", r.id)
+	var extraErr *queuerunner.ExtraFilesError
+	if errors.As(r.exitErr, &extraErr) {
+		return nil
 	}
-	return nil
+	var apiErr *queueapi.APIError
+	if errors.As(r.exitErr, &apiErr) {
+		if apiErr.HTTPStatus == http.StatusConflict && apiErr.Code == queue.ErrCodeInitConflict {
+			return nil
+		}
+		if apiErr.HTTPStatus == http.StatusConflict && apiErr.Code == queue.ErrCodeLeaseHeld {
+			if w.nowMS-r.startedAtMS >= w.cfg.BuildTimeoutMS {
+				return nil
+			}
+			return fmt.Errorf("oracle: runner %d exited on 409 lease_held after %dms (build_timeout=%dms)", r.id, w.nowMS-r.startedAtMS, w.cfg.BuildTimeoutMS)
+		}
+	}
+	if w.disk.broken[w.buildID] {
+		return nil
+	}
+	if queueapi.IsTransientError(r.exitErr) && r.firstFailMS > 0 && w.nowMS-r.firstFailMS >= 60_000 {
+		return nil
+	}
+	return fmt.Errorf("oracle: runner %d exited with disallowed error %v (elapsedFail=%dms)", r.id, r.exitErr, w.nowMS-r.firstFailMS)
 }
 
 func (o *simOracle) onStatusDone(w *simWorld, sc *simStatusClient, a queuerunner.Action) error {

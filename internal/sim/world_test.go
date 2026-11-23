@@ -228,19 +228,20 @@ func (h *eventHeap) Pop() any {
 }
 
 type simRunner struct {
-	id                                            int
-	machineIdx                                    *int
-	format                                        string
-	machine                                       *queuerunner.Machine
-	clockSkew, runningLeaseID                     int64
-	killed, paused, exited, divergent, cmdStopped bool
-	verdict                                       queue.Verdict
-	exitErr                                       error
-	reportOnDisk                                  map[string]junit.File
-	inFlightFG, inFlightHB, lastOpID              uint64
-	pausedQueue                                   []*simEvent
-	reportSentEpoch                               map[uint64]int
-	sentVerdicts                                  map[uint64]queue.Verdict
+	id                                                  int
+	machineIdx                                          *int
+	format                                              string
+	machine                                             *queuerunner.Machine
+	clockSkew, runningLeaseID, startedAtMS, firstFailMS int64
+	killed, paused, exited, divergent, cmdStopped       bool
+	verdict                                             queue.Verdict
+	exitErr                                             error
+	reportOnDisk                                        map[string]junit.File
+	inFlightFG, inFlightHB, lastOpID                    uint64
+	pausedQueue                                         []*simEvent
+	reorderedLease                                      *simEvent
+	reportSentEpoch                                     map[uint64]int
+	sentVerdicts                                        map[uint64]queue.Verdict
 }
 
 type simStatusClient struct {
@@ -459,6 +460,7 @@ func (w *simWorld) dispatch(ev *simEvent) error {
 	switch ev.kind {
 	case seRunnerStart:
 		if r := w.runners[ev.runnerIdx]; !r.killed && !r.exited {
+			r.startedAtMS = w.nowMS
 			w.trace.logf("t=%d runner=%d start id=%s", w.nowMS, r.id, r.machine.RunnerID()[:8])
 			return w.stepRunner(r, queuerunner.Event{Kind: queuerunner.EvStart})
 		}
@@ -632,6 +634,22 @@ func (w *simWorld) stepRunner(r *simRunner, ev queuerunner.Event) error {
 		}
 		if ev.OpID == r.inFlightFG {
 			r.inFlightFG = 0
+			if ev.Resp.Err == nil {
+				r.firstFailMS = 0
+			} else {
+				var apiErr *queueapi.APIError
+				if errors.As(ev.Resp.Err, &apiErr) && apiErr.HTTPStatus == 409 {
+					switch apiErr.Code {
+					case queue.ErrCodeStaleRequest:
+						w.stats["staleRequest"]++
+					case queue.ErrCodeLeaseHeld:
+						w.stats["leaseHeld"]++
+					}
+				}
+				if r.firstFailMS == 0 && queueapi.IsTransientError(ev.Resp.Err) {
+					r.firstFailMS = w.nowMS
+				}
+			}
 		}
 	}
 	stoppedExpected := false
@@ -699,7 +717,7 @@ func (w *simWorld) stepRunner(r *simRunner, ev queuerunner.Event) error {
 				w.stats["extraFile"]++
 			}
 			w.trace.logf("t=%d runner=%d done verdict=%s err=%t", w.nowMS, r.id, a.Verdict, a.Err != nil)
-			if err := w.oracle.onRunnerExit(r); err != nil {
+			if err := w.oracle.onRunnerExit(w, r); err != nil {
 				return err
 			}
 			if extraErr != nil && !w.faultsActive && !w.disk.broken[w.buildID] && w.oracle.finishedVerdict == "" {
@@ -758,7 +776,12 @@ func (w *simWorld) enqueueNetReq(runnerIdx, statusIdx int, opID uint64, req queu
 	w.sched(w.nowMS+delay, &simEvent{kind: seDeliverReq, runnerIdx: runnerIdx, statusIdx: statusIdx, opID: opID, req: req, wire: wr, token: tok})
 	if w.faultsActive && statusIdx < 0 && w.faults.reqDupPct > 0 && w.rng.IntN(100) < w.faults.reqDupPct {
 		w.stats["reqDup"]++
-		w.sched(w.nowMS+delay+50+w.rng.Int64N(w.cfg.LeaseTTLMS*2), &simEvent{kind: seDeliverReq, runnerIdx: runnerIdx, statusIdx: statusIdx, opID: opID, req: req, wire: wr, token: tok, isDup: true})
+		dupEv := &simEvent{kind: seDeliverReq, runnerIdx: runnerIdx, statusIdx: statusIdx, opID: opID, req: req, wire: wr, token: tok, isDup: true}
+		w.sched(w.nowMS+delay+50+w.rng.Int64N(w.cfg.LeaseTTLMS*2), dupEv)
+		if req.Kind == queuerunner.ReqLease && w.runners[runnerIdx].reorderedLease == nil {
+			cp := *dupEv
+			w.runners[runnerIdx].reorderedLease = &cp
+		}
 	}
 }
 
@@ -812,6 +835,15 @@ func (w *simWorld) handleServerRequest(ev *simEvent) error {
 		dropReply(respDelay, "reset by restart")
 		return nil
 	}
+	// Deliver a previously duplicated earlier Lease packet right after a later
+	// Report closes a lease, modeling network reordering that creates an orphan lease.
+	if w.faultsActive && ev.statusIdx < 0 && ev.req.Kind == queuerunner.ReqReport && status == http.StatusOK {
+		if r := w.runners[ev.runnerIdx]; r.reorderedLease != nil && r.reorderedLease.opID < ev.opID-2 {
+			re := r.reorderedLease
+			r.reorderedLease = nil
+			w.sched(w.nowMS+1, re)
+		}
+	}
 	if w.faultsActive && w.faults.runnerPause && ev.statusIdx < 0 && !ev.isDup && ev.req.Kind == queuerunner.ReqLease &&
 		status == http.StatusOK && w.stats["staleRequest"] == 0 && strings.Contains(string(body), `"status":"leased"`) {
 		dropReply(w.cfg.LeaseTTLMS+400, "lease reply lost past TTL")
@@ -842,19 +874,7 @@ func (w *simWorld) invokeHandler(wr queueapi.WireRequest, tok string) (int, []by
 }
 
 func (w *simWorld) observeRunnerResponse(r *simRunner, ev *simEvent, resp queuerunner.Response) {
-	if resp.Err != nil {
-		var apiErr *queueapi.APIError
-		if errors.As(resp.Err, &apiErr) && apiErr.HTTPStatus == 409 {
-			switch apiErr.Code {
-			case queue.ErrCodeStaleRequest:
-				w.stats["staleRequest"]++
-			case queue.ErrCodeLeaseHeld:
-				w.stats["leaseHeld"]++
-			}
-		}
-		return
-	}
-	if ev.req.Kind != queuerunner.ReqReport || resp.Report == nil {
+	if resp.Err != nil || ev.req.Kind != queuerunner.ReqReport || resp.Report == nil {
 		return
 	}
 	epoch, repSeen := w.oracle.reportedLeases[ev.req.Report.LeaseID]
