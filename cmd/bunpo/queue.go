@@ -213,18 +213,7 @@ func cmdQueue(queueURL string, args []string, stdin io.Reader, stdout io.Writer,
 		LogWarn: con.warn,
 	})
 	if err != nil {
-		var extraErr *queuerunner.ExtraFilesError
-		if errors.As(err, &extraErr) {
-			return checkFailed("%v\nsome runners treat file arguments as patterns; see the guide for your runner", extraErr)
-		}
-		var apiErr *queueapi.APIError
-		if errors.As(err, &apiErr) {
-			if apiErr.HTTPStatus == 400 {
-				return err
-			}
-			return checkFailed("%v", err)
-		}
-		return checkFailed("%v", err)
+		return formatQueueRunError(err)
 	}
 
 	if verdict == queue.VerdictPassed {
@@ -232,6 +221,24 @@ func cmdQueue(queueURL string, args []string, stdin io.Reader, stdout io.Writer,
 		return nil
 	}
 	return checkFailed("build %s finished with verdict %s", *buildID, verdict)
+}
+
+func formatQueueRunError(err error) error {
+	var extraErr *queuerunner.ExtraFilesError
+	if errors.As(err, &extraErr) {
+		return checkFailed("%v\nsome runners treat file arguments as patterns; see the guide for your runner", extraErr)
+	}
+	var apiErr *queueapi.APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.HTTPStatus == 400 {
+			return err
+		}
+		if apiErr.Code == queueapi.ErrCodeAtCapacity {
+			return checkFailed("queue server is at capacity: %s", apiErr.Message)
+		}
+		return checkFailed("%v", err)
+	}
+	return checkFailed("%v", err)
 }
 
 func runQueueStatus(ctx context.Context, client *queueapi.Client, buildID, dir string, con *console) error {

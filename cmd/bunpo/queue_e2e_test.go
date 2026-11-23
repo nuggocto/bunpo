@@ -745,3 +745,44 @@ func TestQueueE2ERealBunpoServerBinarySmoke(t *testing.T) {
 		stopped = true
 	}
 }
+
+func TestQueueAtCapacityRetriesAndFormatsExit1Error(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", queueapi.ContentTypeJSON)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"version":1,"error":{"code":"at_capacity","message":"server is at capacity (64 running builds)"}}`))
+	}))
+	defer srv.Close()
+
+	c, err := queueapi.NewClient(queueapi.ClientConfig{
+		BaseURL:      srv.URL,
+		Token:        e2eWriteTok,
+		HTTPClient:   srv.Client(),
+		RetryBudget:  120 * time.Millisecond,
+		RetryBase:    25 * time.Millisecond,
+		RetryMaxWait: 40 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Init(context.Background(), queue.InitCommand{
+		BuildID:       "cap-1",
+		RunnerID:      "r1",
+		Config:        queue.Config{Machines: 1, LeaseTTLMS: queue.DefaultLeaseTTLMS, BuildTimeoutMS: queue.DefaultBuildTimeoutMS, MaxAttempts: 3, MaxBatch: 1},
+		Tests:         []string{"a.py"},
+		PredictionsMS: []*int64{nil},
+	})
+	if calls < 2 {
+		t.Fatalf("expected 503 at_capacity to be retried before failing, got %d call(s)", calls)
+	}
+	formatted := formatQueueRunError(err)
+	var ee *exitError
+	if !errors.As(formatted, &ee) || ee.code != 1 {
+		t.Fatalf("formatted error %T (%v) is not exit-1 exitError", formatted, formatted)
+	}
+	if !strings.Contains(formatted.Error(), "queue server is at capacity") {
+		t.Fatalf("formatted error = %q; want message saying server is at capacity", formatted.Error())
+	}
+}

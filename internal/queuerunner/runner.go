@@ -139,14 +139,29 @@ func Run(ctx context.Context, cfg RunConfig) (queue.Verdict, error) {
 			RequestID:    reqID,
 		})
 		if err != nil {
+			// A lost lease reply followed by an outage longer than the TTL turns a
+			// retried request_id into 409 stale_request. Ask again with a fresh ID.
+			var apiErr *queueapi.APIError
+			if errors.As(err, &apiErr) && apiErr.HTTPStatus == 409 && apiErr.Code == queue.ErrCodeStaleRequest {
+				logWarn("lease request expired before response arrived; requesting a fresh lease")
+				continue
+			}
 			return "", err
 		}
 
 		switch lease.Status {
 		case queue.LeaseDone:
-			return lease.Verdict, nil
+			switch lease.Verdict {
+			case queue.VerdictPassed, queue.VerdictFailed, queue.VerdictUnresolved:
+				return lease.Verdict, nil
+			default:
+				return "", fmt.Errorf("unexpected done verdict %q", lease.Verdict)
+			}
 
 		case queue.LeaseWait:
+			if lease.RetryAfterMS <= 0 {
+				return "", fmt.Errorf("invalid wait retry_after_ms %d", lease.RetryAfterMS)
+			}
 			wait := time.Duration(lease.RetryAfterMS) * time.Millisecond
 			if jitterMax := wait / 4; jitterMax > 0 {
 				wait += time.Duration(rand.Int64N(int64(jitterMax) + 1))
@@ -172,44 +187,90 @@ func Run(ctx context.Context, cfg RunConfig) (queue.Verdict, error) {
 			return "", fmt.Errorf("removing old report file: %w", err)
 		}
 
-		execRes, err := execBatch(ctx, cfg, runnerID, lease, batchFileAbs, logWarn)
+		done, verdict, err := runOneBatch(ctx, cfg, runnerID, lease, batchFileAbs, logWarn)
 		if err != nil {
-			return "", err
+			return verdict, err
 		}
-		if execRes.lostLease {
-			logWarn("lease %d lost while running; discarding batch and requesting new work", lease.LeaseID)
-			continue
+		if done {
+			return verdict, nil
 		}
+	}
+}
 
-		files, readErr := cfg.ReadReports(cfg.ReportPaths)
-		if readErr != nil {
-			logWarn("lease %d report unreadable (%v); reporting batch as error", lease.LeaseID, readErr)
-		}
+// runOneBatch executes the child command, keeps heartbeats running through
+// report reading and Report retries so a brief outage cannot turn a finished
+// batch stale, and always joins the heartbeat goroutine before returning.
+func runOneBatch(
+	ctx context.Context,
+	cfg RunConfig,
+	runnerID string,
+	lease queueapi.LeaseResponse,
+	batchFileAbs string,
+	logWarn func(string, ...any),
+) (done bool, verdict queue.Verdict, err error) {
+	hbCtx, hbCancel := context.WithCancel(ctx)
+	var lostLease atomic.Bool
+	lostCh := make(chan struct{})
+	var lostOnce sync.Once
+	signalLost := func() {
+		lostLease.Store(true)
+		lostOnce.Do(func() { close(lostCh) })
+	}
 
-		results, extraErr := MapOutcomes(lease.Attempts, execRes.exitCode, execRes.signaled, cfg.Format, files, readErr)
+	var hbWG sync.WaitGroup
+	hbWG.Add(1)
+	go func() {
+		defer hbWG.Done()
+		runHeartbeatLoop(hbCtx, cfg.Client, cfg.BuildID, runnerID, lease.LeaseID, cfg.Config.LeaseTTLMS, signalLost, logWarn)
+	}()
+	defer func() {
+		hbCancel()
+		hbWG.Wait()
+	}()
 
-		rep, err := cfg.Client.Report(ctx, cfg.BuildID, queue.ReportCommand{
-			RunnerID: runnerID,
-			LeaseID:  lease.LeaseID,
-			Results:  results,
-		})
-		if err != nil {
-			return "", err
-		}
+	execRes, err := execBatch(ctx, cfg, batchFileAbs, lostCh, &lostLease, logWarn)
+	if err != nil {
+		return false, "", err
+	}
+	if execRes.lostLease {
+		logWarn("lease %d lost while running; discarding batch and requesting new work", lease.LeaseID)
+		return false, "", nil
+	}
 
-		if extraErr != nil {
-			return rep.Verdict, extraErr
-		}
+	files, readErr := cfg.ReadReports(cfg.ReportPaths)
+	if readErr != nil {
+		logWarn("lease %d report unreadable (%v); reporting batch as error", lease.LeaseID, readErr)
+	}
 
-		for _, d := range rep.Results {
-			if d.Disposition == queue.DispositionStale {
-				logWarn("attempt %s in lease %d was reported stale", d.AttemptID, lease.LeaseID)
-			}
-		}
+	results, extraErr := MapOutcomes(lease.Attempts, execRes.exitCode, execRes.signaled, cfg.Format, files, readErr)
 
-		if rep.Verdict != queue.VerdictRunning {
-			return rep.Verdict, nil
+	// Heartbeats stay alive while Client.Report retries across brief outages.
+	rep, err := cfg.Client.Report(ctx, cfg.BuildID, queue.ReportCommand{
+		RunnerID: runnerID,
+		LeaseID:  lease.LeaseID,
+		Results:  results,
+	})
+	if err != nil {
+		return false, "", err
+	}
+
+	if extraErr != nil {
+		return true, rep.Verdict, extraErr
+	}
+
+	for _, d := range rep.Results {
+		if d.Disposition == queue.DispositionStale {
+			logWarn("attempt %s in lease %d was reported stale", d.AttemptID, lease.LeaseID)
 		}
+	}
+
+	switch rep.Verdict {
+	case queue.VerdictRunning:
+		return false, queue.VerdictRunning, nil
+	case queue.VerdictPassed, queue.VerdictFailed, queue.VerdictUnresolved:
+		return true, rep.Verdict, nil
+	default:
+		return false, "", fmt.Errorf("unexpected report verdict %q", rep.Verdict)
 	}
 }
 
@@ -222,9 +283,9 @@ type batchExecResult struct {
 func execBatch(
 	ctx context.Context,
 	cfg RunConfig,
-	runnerID string,
-	lease queueapi.LeaseResponse,
 	batchFileAbs string,
+	lostCh <-chan struct{},
+	lostLease *atomic.Bool,
 	logWarn func(string, ...any),
 ) (batchExecResult, error) {
 	cmd := exec.Command(cfg.Command[0], cfg.Command[1:]...)
@@ -245,37 +306,16 @@ func execBatch(
 		childDone <- cmd.Wait()
 	}()
 
-	hbCtx, hbCancel := context.WithCancel(ctx)
-	var lostLease atomic.Bool
-	lostCh := make(chan struct{})
-	var lostOnce sync.Once
-	signalLost := func() {
-		lostLease.Store(true)
-		lostOnce.Do(func() { close(lostCh) })
-	}
-
-	var hbWG sync.WaitGroup
-	hbWG.Add(1)
-	go func() {
-		defer hbWG.Done()
-		runHeartbeatLoop(hbCtx, cfg.Client, cfg.BuildID, runnerID, lease.LeaseID, cfg.Config.LeaseTTLMS, signalLost, logWarn)
-	}()
-
 	var waitErr error
 	cancelled := false
 	select {
 	case waitErr = <-childDone:
-		hbCancel()
 	case <-lostCh:
-		hbCancel()
 		waitErr = stopProcessGroup(cmd, childDone, cfg.KillGrace)
 	case <-ctx.Done():
 		cancelled = true
-		hbCancel()
 		_ = stopProcessGroup(cmd, childDone, cfg.KillGrace)
 	}
-	// Always join the heartbeat goroutine before returning so no goroutine leaks.
-	hbWG.Wait()
 
 	if cancelled {
 		return batchExecResult{}, ctx.Err()
@@ -329,10 +369,17 @@ func runHeartbeatLoop(
 			return
 		}
 		if err != nil {
-			// Survive transient heartbeat failures by retrying faster within TTL.
-			logWarn("heartbeat for lease %d failed (%v); retrying", leaseID, err)
-			delay = retryWait
-			continue
+			if queueapi.IsTransientError(err) {
+				// Survive transient heartbeat failures by retrying faster within TTL.
+				logWarn("heartbeat for lease %d failed (%v); retrying", leaseID, err)
+				delay = retryWait
+				continue
+			}
+			// Permanent 4xx (400/401/403/404) or protocol error can never succeed:
+			// treat as a lost lease so the child stops and the next lease call reports it.
+			logWarn("heartbeat for lease %d permanently rejected (%v); stopping batch", leaseID, err)
+			onLost()
+			return
 		}
 		if !resp.Held {
 			onLost()
@@ -475,7 +522,13 @@ func BuildRunReport(ctx context.Context, client *queueapi.Client, buildID string
 		if page.NextCursor == nil {
 			break
 		}
+		if *page.NextCursor <= cursor {
+			return manifest.RunReport{}, false, fmt.Errorf("list tests cursor did not advance (%d -> %d)", cursor, *page.NextCursor)
+		}
 		cursor = *page.NextCursor
+	}
+	if len(report.Tests) != st.Counts.Total {
+		return manifest.RunReport{}, false, fmt.Errorf("incomplete test list from server: got %d tests, status reported %d", len(report.Tests), st.Counts.Total)
 	}
 	return report, true, nil
 }

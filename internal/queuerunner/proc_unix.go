@@ -14,9 +14,11 @@ func configureProcessGroup(cmd *exec.Cmd) {
 }
 
 func stopProcessGroup(cmd *exec.Cmd, done <-chan error, grace time.Duration) error {
+	pgid := 0
 	if cmd.Process != nil {
+		pgid = cmd.Process.Pid
 		// Negative PID signals the entire process group created by Setpgid.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	}
 	if grace <= 0 {
 		grace = 5 * time.Second
@@ -24,15 +26,22 @@ func stopProcessGroup(cmd *exec.Cmd, done <-chan error, grace time.Duration) err
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
 
+	var err error
 	select {
-	case err := <-done:
-		return err
+	case err = <-done:
 	case <-timer.C:
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if pgid > 0 {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		}
-		return <-done
+		err = <-done
 	}
+	// Even after the group leader exits, grandchildren (such as browsers under
+	// a shell wrapper) may have ignored SIGTERM. SIGKILL the whole process group;
+	// pgid cannot be reused while any member lives, and ESRCH is harmless.
+	if pgid > 0 {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+	return err
 }
 
 func processSignaled(ps *os.ProcessState) bool {

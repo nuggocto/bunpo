@@ -266,6 +266,334 @@ func TestHeartbeatSurvivesTransientFailureAndNoGoroutineLeaks(t *testing.T) {
 	}
 }
 
+func TestHeartbeatsKeepLeaseAliveDuringReportRetry(t *testing.T) {
+	const (
+		writeTok = "write-secret-token-0123456789abcdef"
+		readTok  = "read-secret-token-fedcba9876543210"
+	)
+
+	lim := queue.DefaultLimits()
+	lim.MinLeaseTTLMS = 180
+	h, err := queueapi.NewHandler(queueapi.HandlerConfig{
+		WriteToken: writeTok,
+		ReadToken:  readTok,
+		Limits:     lim,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var firstReportNS atomic.Int64
+	var hbDuringRetry atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/report") {
+			now := time.Now().UnixNano()
+			start := firstReportNS.Load()
+			if start == 0 {
+				firstReportNS.CompareAndSwap(0, now)
+				start = firstReportNS.Load()
+			}
+			// Fail /report with 503 for 320ms (> 180ms TTL) so the lease would
+			// expire unless heartbeats keep running while Report retries.
+			if time.Duration(now-start) < 320*time.Millisecond {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+		} else if strings.HasSuffix(r.URL.Path, "/heartbeat") && firstReportNS.Load() != 0 {
+			hbDuringRetry.Add(1)
+		}
+		h.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	client, err := queueapi.NewClient(queueapi.ClientConfig{
+		BaseURL:      srv.URL,
+		Token:        writeTok,
+		HTTPClient:   srv.Client(),
+		RetryBudget:  3 * time.Second,
+		RetryBase:    40 * time.Millisecond,
+		RetryMaxWait: 80 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	reportPath := filepath.Join(dir, "times.txt")
+	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "sleep-pass")
+	t.Setenv("BUNPO_RUNNER_HELPER_REPORT", reportPath)
+	t.Setenv("BUNPO_RUNNER_HELPER_SLEEP_MS", "10")
+
+	verdict, err := Run(context.Background(), RunConfig{
+		Client:        client,
+		BuildID:       "hb-during-report",
+		Config:        queue.Config{Machines: 1, LeaseTTLMS: 180, BuildTimeoutMS: 30_000, MaxAttempts: 1, MaxBatch: 1},
+		Tests:         []string{"tests/a.py"},
+		PredictionsMS: []*int64{nil},
+		Dir:           dir,
+		Command:       []string{os.Args[0], "-test.run=^TestRunnerChildHelper$"},
+		ReportPaths:   []string{reportPath},
+		Format:        "lines",
+		ReadReports: func(paths []string) (map[string]junit.File, error) {
+			f, err := os.Open(paths[0])
+			if err != nil {
+				return nil, err
+			}
+			defer f.Close()
+			rep, err := junit.ReadLines(f)
+			return rep.Files, err
+		},
+	})
+	// With MaxAttempts=1, if the lease had expired during the 320ms report outage,
+	// the test would have become unresolved and the report stale. Passing proves
+	// heartbeats kept the lease alive through the report retry.
+	if err != nil || verdict != queue.VerdictPassed {
+		t.Fatalf("Run = (%q, %v); want (passed, nil)", verdict, err)
+	}
+	if hbDuringRetry.Load() == 0 {
+		t.Fatal("expected at least one heartbeat while Report was retrying")
+	}
+	page, err := client.ListTests(context.Background(), "hb-during-report", queue.ListTestsCommand{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListTests: %v", err)
+	}
+	if len(page.Tests) != 1 || page.Tests[0].Generation != 1 || len(page.Tests[0].Attempts) != 1 {
+		t.Fatalf("expected acceptance on attempt 1, got %+v", page.Tests)
+	}
+}
+
+type statusCaptureWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusCaptureWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func TestLeaseStaleRequestRetriesWithFreshRequestID(t *testing.T) {
+	const (
+		writeTok = "write-secret-token-0123456789abcdef"
+		readTok  = "read-secret-token-fedcba9876543210"
+	)
+
+	lim := queue.DefaultLimits()
+	lim.MinLeaseTTLMS = 150
+	h, err := queueapi.NewHandler(queueapi.HandlerConfig{
+		WriteToken: writeTok,
+		ReadToken:  readTok,
+		Limits:     lim,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var leaseCalls atomic.Int32
+	var firstLeaseNS atomic.Int64
+	var sawStale409 atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/lease") {
+			n := leaseCalls.Add(1)
+			if n == 1 {
+				// Grant lease 1 on the server, then drop the HTTP reply as 503.
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, r)
+				firstLeaseNS.Store(time.Now().UnixNano())
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			if n == 2 {
+				// Stall past the 150ms TTL so retrying the same request_id returns 409 stale_request.
+				if elapsed := time.Since(time.Unix(0, firstLeaseNS.Load())); elapsed < 210*time.Millisecond {
+					time.Sleep(210*time.Millisecond - elapsed)
+				}
+				cw := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
+				h.ServeHTTP(cw, r)
+				if cw.status == http.StatusConflict {
+					sawStale409.Add(1)
+				}
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	client, err := queueapi.NewClient(queueapi.ClientConfig{
+		BaseURL:      srv.URL,
+		Token:        writeTok,
+		HTTPClient:   srv.Client(),
+		RetryBudget:  3 * time.Second,
+		RetryBase:    20 * time.Millisecond,
+		RetryMaxWait: 40 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	reportPath := filepath.Join(dir, "times.txt")
+	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "sleep-pass")
+	t.Setenv("BUNPO_RUNNER_HELPER_REPORT", reportPath)
+	t.Setenv("BUNPO_RUNNER_HELPER_SLEEP_MS", "10")
+
+	verdict, err := Run(context.Background(), RunConfig{
+		Client:        client,
+		BuildID:       "stale-req-retry",
+		Config:        queue.Config{Machines: 1, LeaseTTLMS: 150, BuildTimeoutMS: 30_000, MaxAttempts: 2, MaxBatch: 1},
+		Tests:         []string{"tests/a.py"},
+		PredictionsMS: []*int64{nil},
+		Dir:           dir,
+		Command:       []string{os.Args[0], "-test.run=^TestRunnerChildHelper$"},
+		ReportPaths:   []string{reportPath},
+		Format:        "lines",
+		ReadReports: func(paths []string) (map[string]junit.File, error) {
+			f, err := os.Open(paths[0])
+			if err != nil {
+				return nil, err
+			}
+			defer f.Close()
+			rep, err := junit.ReadLines(f)
+			return rep.Files, err
+		},
+	})
+	if err != nil || verdict != queue.VerdictPassed {
+		t.Fatalf("Run = (%q, %v); want (passed, nil)", verdict, err)
+	}
+	if sawStale409.Load() == 0 {
+		t.Fatal("expected retried lease request to hit 409 stale_request")
+	}
+	if leaseCalls.Load() < 3 {
+		t.Fatalf("expected >= 3 lease calls (dropped, 409 stale, fresh request_id), got %d", leaseCalls.Load())
+	}
+}
+
+func TestHeartbeatPermanent4xxStopsBatchAndSurfacesError(t *testing.T) {
+	const (
+		writeTok = "write-secret-token-0123456789abcdef"
+		readTok  = "read-secret-token-fedcba9876543210"
+	)
+
+	lim := queue.DefaultLimits()
+	lim.MinLeaseTTLMS = 180
+	h, err := queueapi.NewHandler(queueapi.HandlerConfig{
+		WriteToken: writeTok,
+		ReadToken:  readTok,
+		Limits:     lim,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var hbCalls atomic.Int32
+	var revoked atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/heartbeat") {
+			hbCalls.Add(1)
+			revoked.Store(true)
+			w.Header().Set("Content-Type", queueapi.ContentTypeJSON)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"version":1,"error":{"code":"unauthorized","message":"token revoked"}}`))
+			return
+		}
+		if revoked.Load() && strings.HasSuffix(r.URL.Path, "/lease") {
+			w.Header().Set("Content-Type", queueapi.ContentTypeJSON)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"version":1,"error":{"code":"unauthorized","message":"token revoked"}}`))
+			return
+		}
+		h.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	client, err := queueapi.NewClient(queueapi.ClientConfig{
+		BaseURL:      srv.URL,
+		Token:        writeTok,
+		HTTPClient:   srv.Client(),
+		RetryBudget:  2 * time.Second,
+		RetryBase:    20 * time.Millisecond,
+		RetryMaxWait: 40 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	reportPath := filepath.Join(dir, "times.txt")
+	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "sleep-pass")
+	t.Setenv("BUNPO_RUNNER_HELPER_REPORT", reportPath)
+	t.Setenv("BUNPO_RUNNER_HELPER_SLEEP_MS", "5000")
+
+	start := time.Now()
+	_, err = Run(context.Background(), RunConfig{
+		Client:        client,
+		BuildID:       "hb-perm-401",
+		Config:        queue.Config{Machines: 1, LeaseTTLMS: 300, BuildTimeoutMS: 30_000, MaxAttempts: 2, MaxBatch: 1},
+		Tests:         []string{"tests/a.py"},
+		PredictionsMS: []*int64{nil},
+		Dir:           dir,
+		Command:       []string{os.Args[0], "-test.run=^TestRunnerChildHelper$"},
+		ReportPaths:   []string{reportPath},
+		Format:        "lines",
+		ReadReports:   func([]string) (map[string]junit.File, error) { return nil, errors.New("unused") },
+		KillGrace:     200 * time.Millisecond,
+	})
+	elapsed := time.Since(start)
+
+	var apiErr *queueapi.APIError
+	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != http.StatusUnauthorized {
+		t.Fatalf("Run err = %v; want 401 APIError", err)
+	}
+	if hbCalls.Load() != 1 {
+		t.Fatalf("expected 1 heartbeat call (permanent 401 must not retry), got %d", hbCalls.Load())
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("permanent 401 took %v to stop child; expected prompt termination", elapsed)
+	}
+}
+
+func TestBuildRunReportRejectsStuckCursorAndShortRead(t *testing.T) {
+	status := queueapi.StatusResponse{
+		Version: queue.ProtocolVersion,
+		StatusResponse: queue.StatusResponse{
+			BuildID: "b-page",
+			Verdict: queue.VerdictPassed,
+			Counts:  queue.Counts{Total: 2, Passed: 2},
+		},
+	}
+
+	t.Run("stuck cursor", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", queueapi.ContentTypeJSON)
+			_, _ = w.Write([]byte(`{"version":1,"build_id":"b-page","verdict":"passed","tests":[{"test":"a.py","index":0,"state":"passed","generation":1,"timed":true,"duration_ms":10,"attempts":[]}],"next_cursor":0}`))
+		}))
+		defer srv.Close()
+		c, err := queueapi.NewClient(queueapi.ClientConfig{BaseURL: srv.URL, Token: "tok", HTTPClient: srv.Client()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := BuildRunReport(context.Background(), c, "b-page", status); err == nil || !strings.Contains(err.Error(), "cursor did not advance") {
+			t.Fatalf("BuildRunReport stuck cursor err = %v; want cursor-did-not-advance error", err)
+		}
+	})
+
+	t.Run("short read", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", queueapi.ContentTypeJSON)
+			_, _ = w.Write([]byte(`{"version":1,"build_id":"b-page","verdict":"passed","tests":[{"test":"a.py","index":0,"state":"passed","generation":1,"timed":true,"duration_ms":10,"attempts":[]}],"next_cursor":null}`))
+		}))
+		defer srv.Close()
+		c, err := queueapi.NewClient(queueapi.ClientConfig{BaseURL: srv.URL, Token: "tok", HTTPClient: srv.Client()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := BuildRunReport(context.Background(), c, "b-page", status); err == nil || !strings.Contains(err.Error(), "incomplete test list") {
+			t.Fatalf("BuildRunReport short read err = %v; want incomplete-test-list error", err)
+		}
+	})
+}
+
 func TestRunnerChildHelper(t *testing.T) {
 	mode := os.Getenv("BUNPO_RUNNER_HELPER_MODE")
 	if mode == "" {
