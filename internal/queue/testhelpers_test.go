@@ -1,12 +1,24 @@
 package queue_test
 
 import (
+	"crypto/sha256"
 	"encoding/json/v2"
 	"reflect"
 	"testing"
 
 	"github.com/nuggocto/bunpo/internal/queue"
 )
+
+// stateHash hashes the deterministic JSON encoding of s without allocating a
+// decoded copy. Any mutation to any exported field changes the hash.
+func stateHash(t testing.TB, s *queue.State) [sha256.Size]byte {
+	t.Helper()
+	h := sha256.New()
+	if err := json.MarshalWrite(h, s, json.Deterministic(true)); err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	return [sha256.Size]byte(h.Sum(nil))
+}
 
 // cloneState deep-copies s via JSON so adding a field to State cannot be
 // silently forgotten in a hand-written clone helper.
