@@ -1,9 +1,11 @@
 package sim_test
 
 import (
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/nuggocto/bunpo/internal/junit"
 	"github.com/nuggocto/bunpo/internal/queue"
@@ -12,151 +14,184 @@ import (
 )
 
 type oracleExec struct {
-	leaseID        int64
-	runnerID       int
-	format         string
-	attempts       []queue.LeasedAttemptView
-	plannedReadErr error
-	hadStaleOnDisk bool
-	completed      bool
-	stopped        bool
-	exitCode       int
-	signaled       bool
-	filesWritten   map[string]junit.File
-	readErr        error
+	leaseID                      int64
+	runnerID, exitCode           int
+	format                       string
+	attempts                     []queue.LeasedAttemptView
+	plannedReadErr, readErr      error
+	completed, stopped, signaled bool
+	filesWritten                 map[string]junit.File
 }
 
 type acceptedTruth struct {
-	leaseID    int64
-	attemptID  string
-	outcome    queue.Outcome
-	timed      bool
-	durationMS int64
+	leaseID, durationMS int64
+	attemptID           string
+	outcome             queue.Outcome
+	timed               bool
 }
 
-// simOracle tracks ground-truth command execution independently of queue logic
-// and verifies safety, liveness, replay, status/slowest/runner counts, and bounds.
+type leaseReq struct {
+	reqID   string
+	leaseID int64
+}
+
+// simOracle tracks ground-truth command execution independently of queue logic,
+// applies stored events incrementally on every step, and performs a full disk
+// replay check at build completion (and on broken builds after restart).
 type simOracle struct {
-	buildID             string
-	tests               []string
-	cfg                 queue.Config
-	expectCleanPass     bool
-	initialized         bool
-	hadInitConflict     bool
-	finishedVerdict     queue.Verdict
-	execs               map[int64]*oracleExec
-	accepted            map[string]acceptedTruth
-	acceptedAttempt     map[string]acceptedTruth
-	lastLeaseReq        map[string]struct{ reqID string; leaseID int64 }
-	reportedLeases      map[int64]int
-	runnerLeases        map[string]int
+	buildID                                       string
+	lim                                           queue.Limits
+	expectCleanPass, initialized, hadInitConflict bool
+	tests                                         []string
+	cfg                                           queue.Config
+	finishedVerdict                               queue.Verdict
+	shadow                                        *queue.State
+	storedEvents                                  int
+	execs                                         map[int64]*oracleExec
+	accepted, acceptedAttempt                     map[string]acceptedTruth
+	lastLeaseReq                                  map[string]leaseReq
+	reportedLeases                                map[int64]int
+	runnerLeases                                  map[string]int
+	hbOpLease                                     map[uint64]int64
+	leaseLostWhileRunning                         map[int64]bool
 }
 
-func newSimOracle(buildID string, tests []string, cfg queue.Config, expectCleanPass bool) *simOracle {
+func newSimOracle(buildID string, lim queue.Limits, expectCleanPass bool) *simOracle {
 	return &simOracle{
-		buildID: buildID, tests: tests, cfg: cfg, expectCleanPass: expectCleanPass,
+		buildID: buildID, lim: lim, expectCleanPass: expectCleanPass, shadow: queue.NewState(lim),
 		execs: make(map[int64]*oracleExec), accepted: make(map[string]acceptedTruth),
-		acceptedAttempt: make(map[string]acceptedTruth),
-		lastLeaseReq:    make(map[string]struct{ reqID string; leaseID int64 }),
-		reportedLeases:  make(map[int64]int), runnerLeases: make(map[string]int),
+		acceptedAttempt: make(map[string]acceptedTruth), lastLeaseReq: make(map[string]leaseReq),
+		reportedLeases: make(map[int64]int), runnerLeases: make(map[string]int),
+		hbOpLease: make(map[uint64]int64), leaseLostWhileRunning: make(map[int64]bool),
 	}
 }
 
-func (o *simOracle) recordCommandStart(leaseID int64, runnerID int, format string, attempts []queue.LeasedAttemptView, plannedReadErr error, hadStaleOnDisk bool) error {
+func (o *simOracle) recordCommandStart(leaseID int64, runnerID int, format string, attempts []queue.LeasedAttemptView, plannedReadErr error) error {
 	if prev, dup := o.execs[leaseID]; dup {
 		return fmt.Errorf("oracle: runner %d started lease %d twice (prev runner %d) — stale lease response applied", runnerID, leaseID, prev.runnerID)
 	}
-	o.execs[leaseID] = &oracleExec{
-		leaseID: leaseID, runnerID: runnerID, format: format,
-		attempts: attempts, plannedReadErr: plannedReadErr, hadStaleOnDisk: hadStaleOnDisk,
-	}
+	o.execs[leaseID] = &oracleExec{leaseID: leaseID, runnerID: runnerID, format: format, attempts: attempts, plannedReadErr: plannedReadErr}
 	return nil
-}
-
-func (o *simOracle) plannedReadErr(leaseID int64) error {
-	if ex, ok := o.execs[leaseID]; ok {
-		return ex.plannedReadErr
-	}
-	return nil
-}
-
-func (o *simOracle) markCommandCompleted(leaseID int64, exitCode int, signaled bool, files map[string]junit.File, readErr error) {
-	if ex, ok := o.execs[leaseID]; ok {
-		ex.completed, ex.exitCode, ex.signaled = true, exitCode, signaled
-		ex.filesWritten, ex.readErr = cloneFiles(files), readErr
-	}
-}
-
-func (o *simOracle) markCommandStopped(leaseID int64) {
-	if ex, ok := o.execs[leaseID]; ok {
-		ex.stopped = true
-	}
-}
-
-func (o *simOracle) reportRetryAfterRestart(leaseID int64) bool {
-	epoch, ok := o.reportedLeases[leaseID]
-	return ok && epoch == 0
 }
 
 func (o *simOracle) onServerHandled(w *simWorld, req queuerunner.Request, status int, body []byte, newEvents []queue.Event) error {
-	switch req.Kind {
-	case queuerunner.ReqInit:
-		if status == http.StatusOK {
-			o.initialized = true
-		} else if status == http.StatusConflict {
+	for _, ev := range newEvents {
+		if err := o.shadow.Apply(ev); err != nil {
+			return fmt.Errorf("oracle: incremental replay failed on %s: %w", ev.Type, err)
+		}
+		o.storedEvents++
+		switch ev.Type {
+		case queue.EventInitialized:
+			if ev.Initialized != nil {
+				o.initialized, o.tests, o.cfg = true, slices.Clone(ev.Initialized.Tests), ev.Initialized.Config
+			}
+		case queue.EventConflicted:
+			o.hadInitConflict = true
+		case queue.EventLeased:
+			if ev.Leased != nil {
+				if prev, seen := o.lastLeaseReq[ev.Leased.RunnerID]; seen && prev.reqID == ev.Leased.RequestID {
+					return fmt.Errorf("oracle: repeated request_id %q emitted new lease %d (prev %d)", ev.Leased.RequestID, ev.Leased.LeaseID, prev.leaseID)
+				}
+				o.runnerLeases[ev.Leased.RunnerID]++
+				o.lastLeaseReq[ev.Leased.RunnerID] = leaseReq{ev.Leased.RequestID, ev.Leased.LeaseID}
+			}
+		case queue.EventReported:
+			if ev.Reported == nil {
+				continue
+			}
+			ex := o.execs[ev.Reported.LeaseID]
+			for _, ra := range ev.Reported.Results {
+				if ra.Disposition != queue.DispositionAccepted {
+					continue
+				}
+				attID, testPath := queue.FormatAttemptID(ra.TestIndex, ra.Generation), o.tests[ra.TestIndex]
+				if ra.Outcome == queue.OutcomeError {
+					o.acceptedAttempt[attID] = acceptedTruth{leaseID: ev.Reported.LeaseID, attemptID: attID, outcome: queue.OutcomeError}
+					continue
+				}
+				if prev, dup := o.accepted[testPath]; dup {
+					return fmt.Errorf("oracle: test %s accepted twice (prev=%+v, new=%s)", testPath, prev, attID)
+				}
+				sub := queue.ReportResult{AttemptID: attID, TestIndex: ra.TestIndex, Generation: ra.Generation, Outcome: ra.Outcome, Timed: ra.Timed, DurationMS: ra.DurationMS}
+				if err := verifyOutcomeTruth(testPath, sub, ex); err != nil {
+					return err
+				}
+				truth := acceptedTruth{leaseID: ev.Reported.LeaseID, attemptID: attID, outcome: ra.Outcome, timed: ra.Timed, durationMS: ra.DurationMS}
+				o.accepted[testPath], o.acceptedAttempt[attID] = truth, truth
+			}
+		}
+	}
+	if o.initialized && !w.disk.broken[w.buildID] && len(newEvents) > 0 {
+		if err := o.checkShadowBounds(); err != nil {
+			return err
+		}
+	}
+	if status != http.StatusOK {
+		if req.Kind == queuerunner.ReqInit && status == http.StatusConflict {
 			o.hadInitConflict = true
 			if o.finishedVerdict == queue.VerdictPassed {
-				w.stats[stConflictAfterPassed]++
+				w.stats["conflictAfterPassed"]++
 				o.finishedVerdict = queue.VerdictUnresolved
 			}
 		}
-
+		return nil
+	}
+	switch req.Kind {
 	case queuerunner.ReqLease:
-		if status != http.StatusOK {
-			return nil
-		}
 		resp, err := queueapi.ParseLeaseResponse(status, body)
 		if err != nil {
 			return fmt.Errorf("oracle: invalid 200 lease response: %w", err)
 		}
 		if resp.Status == queue.LeaseGranted {
-			prev, seen := o.lastLeaseReq[req.Lease.RunnerID]
-			if seen && prev.reqID == req.Lease.RequestID {
-				if resp.LeaseID != prev.leaseID {
-					return fmt.Errorf("oracle: repeated request_id %q got new lease %d (prev %d)", req.Lease.RequestID, resp.LeaseID, prev.leaseID)
-				}
-				for _, ev := range newEvents {
-					if ev.Type == queue.EventLeased {
-						return fmt.Errorf("oracle: repeated active request_id %q emitted leased event", req.Lease.RequestID)
-					}
-				}
-			} else {
-				o.lastLeaseReq[req.Lease.RunnerID] = struct {
-					reqID   string
-					leaseID int64
-				}{req.Lease.RequestID, resp.LeaseID}
-				o.runnerLeases[req.Lease.RunnerID]++
+			if prev, seen := o.lastLeaseReq[req.Lease.RunnerID]; seen && prev.reqID == req.Lease.RequestID && resp.LeaseID != prev.leaseID {
+				return fmt.Errorf("oracle: repeated request_id %q got new lease %d (prev %d)", req.Lease.RequestID, resp.LeaseID, prev.leaseID)
 			}
 		} else if resp.Status == queue.LeaseDone {
-			return o.observeVerdict(resp.Verdict)
+			return o.observeServerVerdict(resp.Verdict)
 		}
-
 	case queuerunner.ReqReport:
-		if status != http.StatusOK {
-			return nil
-		}
 		resp, err := queueapi.ParseReportResponse(status, body)
 		if err != nil {
 			return fmt.Errorf("oracle: invalid 200 report response: %w", err)
 		}
-		cmd := req.Report
-		if _, seen := o.reportedLeases[cmd.LeaseID]; !seen {
-			o.reportedLeases[cmd.LeaseID] = w.srvEpoch
+		if _, seen := o.reportedLeases[req.Report.LeaseID]; !seen {
+			o.reportedLeases[req.Report.LeaseID] = w.srvEpoch
 		}
-		if err := o.verifyReport(cmd, resp, newEvents); err != nil {
+		if err := o.verifyReport(req.Report, resp, newEvents); err != nil {
 			return err
 		}
-		return o.observeVerdict(resp.Verdict)
+		return o.observeServerVerdict(resp.Verdict)
+	case queuerunner.ReqStatus:
+		if resp, err := queueapi.ParseStatusResponse(status, body); err == nil {
+			return o.observeServerVerdict(resp.Verdict)
+		}
+	}
+	return nil
+}
+
+func (o *simOracle) checkShadowBounds() error {
+	if bound := 10 + len(o.tests)*(3*o.cfg.MaxAttempts+8); o.storedEvents > bound {
+		return fmt.Errorf("oracle: persisted events %d > bound %d", o.storedEvents, bound)
+	}
+	if len(o.shadow.Conflicts) > queue.MaxInitConflicts {
+		return fmt.Errorf("oracle: conflicts %d > %d", len(o.shadow.Conflicts), queue.MaxInitConflicts)
+	}
+	if slices.ContainsFunc(o.shadow.Tests, func(t queue.TestState) bool { return len(t.History) > queue.MaxTestHistory }) {
+		return fmt.Errorf("oracle: test history exceeded %d", queue.MaxTestHistory)
+	}
+	seenR, seenT := make(map[string]int64), make(map[int]int64)
+	for _, lid := range o.shadow.ActiveLeases {
+		l := o.shadow.Leases[lid-1]
+		if prev, dup := seenR[l.RunnerID]; dup {
+			return fmt.Errorf("oracle: runner %s holds active leases %d and %d", l.RunnerID, prev, lid)
+		}
+		seenR[l.RunnerID] = lid
+		for _, a := range l.Attempts {
+			if prev, dup := seenT[a.TestIndex]; dup {
+				return fmt.Errorf("oracle: test %d in active leases %d and %d", a.TestIndex, prev, lid)
+			}
+			seenT[a.TestIndex] = lid
+		}
 	}
 	return nil
 }
@@ -166,44 +201,20 @@ func (o *simOracle) verifyReport(cmd *queue.ReportCommand, resp queueapi.ReportR
 	for _, r := range cmd.Results {
 		resByID[r.AttemptID] = r
 	}
-	ex := o.execs[cmd.LeaseID]
 	allDup := true
 	for _, d := range resp.Results {
 		sub, ok := resByID[d.AttemptID]
 		if !ok {
 			return fmt.Errorf("oracle: response named unknown attempt %s", d.AttemptID)
 		}
-		testPath := o.tests[sub.TestIndex]
-		if prev, wasAcc := o.acceptedAttempt[d.AttemptID]; wasAcc && prev.outcome == sub.Outcome && prev.timed == sub.Timed && prev.durationMS == sub.DurationMS {
-			if d.Disposition != queue.DispositionDuplicate {
-				return fmt.Errorf("oracle: identical resend of accepted attempt %s got %q; want duplicate", d.AttemptID, d.Disposition)
-			}
+		if prev, wasAcc := o.acceptedAttempt[d.AttemptID]; wasAcc && prev.outcome == sub.Outcome && prev.timed == sub.Timed && prev.durationMS == sub.DurationMS &&
+			d.Disposition != queue.DispositionDuplicate && d.Disposition != queue.DispositionAccepted {
+			return fmt.Errorf("oracle: identical resend of accepted attempt %s got %q; want duplicate", d.AttemptID, d.Disposition)
 		}
-		if d.Disposition != queue.DispositionDuplicate {
-			allDup = false
-		}
-		if d.Disposition == queue.DispositionAccepted {
-			if sub.Outcome == queue.OutcomePassed || sub.Outcome == queue.OutcomeFailed || sub.Outcome == queue.OutcomeSkipped {
-				if prev, dup := o.accepted[testPath]; dup {
-					return fmt.Errorf("oracle: test %s accepted twice (prev=%+v, new=%s)", testPath, prev, d.AttemptID)
-				}
-				if err := verifyOutcomeTruth(testPath, sub, ex); err != nil {
-					return err
-				}
-				truth := acceptedTruth{leaseID: cmd.LeaseID, attemptID: d.AttemptID, outcome: sub.Outcome, timed: sub.Timed, durationMS: sub.DurationMS}
-				o.accepted[testPath] = truth
-				o.acceptedAttempt[d.AttemptID] = truth
-			} else {
-				o.acceptedAttempt[d.AttemptID] = acceptedTruth{leaseID: cmd.LeaseID, attemptID: d.AttemptID, outcome: queue.OutcomeError}
-			}
-		}
+		allDup = allDup && d.Disposition == queue.DispositionDuplicate
 	}
-	if allDup && len(resp.Results) > 0 {
-		for _, ev := range newEvents {
-			if ev.Type == queue.EventReported {
-				return fmt.Errorf("oracle: all-duplicate report for lease %d emitted reported event", cmd.LeaseID)
-			}
-		}
+	if allDup && len(resp.Results) > 0 && slices.ContainsFunc(newEvents, func(ev queue.Event) bool { return ev.Type == queue.EventReported }) {
+		return fmt.Errorf("oracle: all-duplicate report for lease %d emitted reported event", cmd.LeaseID)
 	}
 	return nil
 }
@@ -212,12 +223,8 @@ func verifyOutcomeTruth(testPath string, sub queue.ReportResult, ex *oracleExec)
 	if ex == nil || !ex.completed || ex.stopped || ex.readErr != nil || ex.filesWritten == nil {
 		return fmt.Errorf("oracle: accepted %s for %s without clean completed report", sub.Outcome, testPath)
 	}
-	assigned := make(map[string]bool, len(ex.attempts))
-	for _, a := range ex.attempts {
-		assigned[a.Test] = true
-	}
 	for f := range ex.filesWritten {
-		if !assigned[f] {
+		if !slices.ContainsFunc(ex.attempts, func(a queue.LeasedAttemptView) bool { return a.Test == f }) {
 			return fmt.Errorf("oracle: accepted %s for %s despite extra unassigned file %s", sub.Outcome, testPath, f)
 		}
 	}
@@ -232,43 +239,30 @@ func verifyOutcomeTruth(testPath string, sub queue.ReportResult, ex *oracleExec)
 		}
 	case queue.OutcomeSkipped:
 		if ex.signaled || ex.exitCode != 0 || f.Failed || f.Cases == 0 || f.Skipped != f.Cases || sub.Timed || sub.DurationMS != 0 {
-			return fmt.Errorf("oracle: accepted skipped for %s on exit=%d sig=%t cases=%d skipped=%d failed=%t",
-				testPath, ex.exitCode, ex.signaled, f.Cases, f.Skipped, f.Failed)
+			return fmt.Errorf("oracle: accepted skipped for %s on exit=%d sig=%t", testPath, ex.exitCode, ex.signaled)
 		}
 	case queue.OutcomePassed:
 		if ex.signaled || f.Failed || f.Cases == 0 || f.Skipped == f.Cases {
-			return fmt.Errorf("oracle: invalid passed for %s", testPath)
+			return fmt.Errorf("oracle: invalid passed for %s (signaled=%t)", testPath, ex.signaled)
 		}
 		if ex.exitCode == 0 {
 			if !sub.Timed || sub.DurationMS != f.MS() {
-				return fmt.Errorf("oracle: passed %s on exit 0 got timed=%t ms=%d; want true/%d", testPath, sub.Timed, sub.DurationMS, f.MS())
+				return fmt.Errorf("oracle: exit-0 passed %s timed=%t ms=%d want true/%d", testPath, sub.Timed, sub.DurationMS, f.MS())
 			}
-		} else {
-			if ex.format != "junit" || f.Skipped != 0 || sub.Timed || sub.DurationMS != 0 {
-				return fmt.Errorf("oracle: non-zero passed %s invalid", testPath)
-			}
-			siblingFailed := false
-			for _, a := range ex.attempts {
-				if sf, ok := ex.filesWritten[a.Test]; ok && sf.Failed {
-					siblingFailed = true
-					break
-				}
-			}
-			if !siblingFailed {
-				return fmt.Errorf("oracle: non-zero passed %s without failed sibling", testPath)
-			}
+		} else if anyFail := slices.ContainsFunc(ex.attempts, func(a queue.LeasedAttemptView) bool { return ex.filesWritten[a.Test].Failed }); ex.format != "junit" || !anyFail || f.Skipped > 0 || sub.Timed || sub.DurationMS != 0 {
+			return fmt.Errorf("oracle: invalid non-zero passed for %s", testPath)
 		}
 	}
 	return nil
 }
 
-func (o *simOracle) observeVerdict(v queue.Verdict) error {
+func (o *simOracle) observeServerVerdict(v queue.Verdict) error {
 	if v == queue.VerdictRunning || v == "" {
 		return nil
 	}
 	if o.finishedVerdict == "" {
 		o.finishedVerdict = v
-	} else if v != o.finishedVerdict {
+	} else if o.finishedVerdict != v {
 		if !(o.finishedVerdict == queue.VerdictPassed && v == queue.VerdictUnresolved && o.hadInitConflict) {
 			return fmt.Errorf("oracle: illegal verdict transition %s -> %s (hadInitConflict=%t)", o.finishedVerdict, v, o.hadInitConflict)
 		}
@@ -288,167 +282,142 @@ func (o *simOracle) observeVerdict(v queue.Verdict) error {
 }
 
 func (o *simOracle) onRunnerExit(r *simRunner) error {
-	if r.exitErr == nil && r.verdict == queue.VerdictPassed {
-		if err := o.observeVerdict(queue.VerdictPassed); err != nil {
-			return err
+	if r.exitErr == nil {
+		if want, ok := r.sentVerdicts[r.lastOpID]; !ok || r.verdict != want {
+			return fmt.Errorf("oracle: runner %d exited with verdict %q; server sent %q", r.id, r.verdict, want)
 		}
+		return nil
 	}
-	if r.exitErr != nil {
-		var apiErr *queueapi.APIError
-		if errors.As(r.exitErr, &apiErr) {
-			if apiErr.Code == queue.ErrCodeStaleRequest {
-				return fmt.Errorf("oracle: runner %d exited on 409 stale_request instead of looping with a fresh request_id", r.id)
-			}
-			if apiErr.Code == queue.ErrCodeLeaseHeld {
-				return fmt.Errorf("oracle: runner %d exited on 409 lease_held (active lease abandoned after late/stale response)", r.id)
-			}
-		}
+	var apiErr *queueapi.APIError
+	if errors.As(r.exitErr, &apiErr) && apiErr.Code == queue.ErrCodeStaleRequest {
+		return fmt.Errorf("oracle: runner %d exited on 409 stale_request instead of looping with a fresh request_id", r.id)
 	}
 	return nil
 }
 
-func (o *simOracle) onStatusDone(w *simWorld, a queuerunner.Action) error {
+func (o *simOracle) onStatusDone(w *simWorld, sc *simStatusClient, a queuerunner.Action) error {
 	if a.Err != nil {
-		if w.disk.broken[w.buildID] {
-			return nil
-		}
 		var apiErr *queueapi.APIError
-		if errors.As(a.Err, &apiErr) && apiErr.HTTPStatus == http.StatusNotFound && !o.initialized {
+		if w.disk.broken[w.buildID] || (errors.As(a.Err, &apiErr) && apiErr.HTTPStatus == http.StatusNotFound && sc.uninit404[sc.lastOpID]) {
 			return nil
 		}
 		return fmt.Errorf("oracle: status failed unexpectedly: %v", a.Err)
 	}
-	if a.Status != nil {
-		if err := o.observeVerdict(a.Status.Verdict); err != nil {
-			return err
-		}
+	if want, ok := sc.sentVerdicts[sc.lastOpID]; ok && a.Verdict != want {
+		return fmt.Errorf("oracle: status returned verdict %q; server sent %q", a.Verdict, want)
 	}
-	if a.HasReport && a.Report != nil {
-		st := a.Status
-		if st.Verdict == queue.VerdictRunning || st.Counts.Unresolved > 0 || len(st.Conflicts) > 0 || len(a.Report.Tests) != len(o.tests) {
-			return fmt.Errorf("oracle: invalid RunReport emission (verdict=%s tests=%d/%d)", st.Verdict, len(a.Report.Tests), len(o.tests))
-		}
-		for _, p := range o.tests {
-			obs, ok := a.Report.Tests[p]
-			acc, accOK := o.accepted[p]
-			if !ok || !accOK {
-				return fmt.Errorf("oracle: RunReport missing/unaccepted %s", p)
-			}
-			wantTimed := acc.outcome == queue.OutcomePassed && acc.timed
-			wantMS := int64(0)
-			if wantTimed {
-				wantMS = acc.durationMS
-			}
-			if obs.Timed != wantTimed || obs.MS != wantMS {
-				return fmt.Errorf("oracle: RunReport[%s]=%+v want timed=%t ms=%d", p, obs, wantTimed, wantMS)
-			}
-		}
-	}
-	return nil
-}
-
-func (o *simOracle) checkStep(w *simWorld) error {
-	if !o.initialized || w.disk.broken[w.buildID] {
+	if !a.HasReport || a.Report == nil {
 		return nil
 	}
-	st, nEvents, err := w.disk.replayBuild(w.buildID, w.lim)
-	if err != nil {
-		return fmt.Errorf("oracle: disk replay failed: %w", err)
+	st := a.Status
+	if st.Verdict == queue.VerdictRunning || st.Counts.Unresolved > 0 || len(st.Conflicts) > 0 || len(a.Report.Tests) != len(o.tests) {
+		return fmt.Errorf("oracle: invalid RunReport emission (verdict=%s tests=%d/%d)", st.Verdict, len(a.Report.Tests), len(o.tests))
 	}
-	if bound := 10 + len(o.tests)*(3*o.cfg.MaxAttempts+8); nEvents > bound {
-		return fmt.Errorf("oracle: persisted events %d > bound %d", nEvents, bound)
-	}
-	if len(st.Conflicts) > queue.MaxInitConflicts {
-		return fmt.Errorf("oracle: conflicts %d > %d", len(st.Conflicts), queue.MaxInitConflicts)
-	}
-	for _, t := range st.Tests {
-		if len(t.History) > queue.MaxTestHistory {
-			return fmt.Errorf("oracle: test %s history %d > %d", t.Path, len(t.History), queue.MaxTestHistory)
+	for _, p := range o.tests {
+		obs, ok := a.Report.Tests[p]
+		acc, accOK := o.accepted[p]
+		wantTimed, wantMS := acc.outcome == queue.OutcomePassed && acc.timed, int64(0)
+		if wantTimed {
+			wantMS = acc.durationMS
 		}
-	}
-	seenR, seenT := make(map[string]int64), make(map[int]int64)
-	for _, lid := range st.ActiveLeases {
-		l := st.Leases[lid-1]
-		if prev, dup := seenR[l.RunnerID]; dup {
-			return fmt.Errorf("oracle: runner %s holds active leases %d and %d", l.RunnerID, prev, lid)
-		}
-		seenR[l.RunnerID] = lid
-		for _, a := range l.Attempts {
-			if prev, dup := seenT[a.TestIndex]; dup {
-				return fmt.Errorf("oracle: test %d in active leases %d and %d", a.TestIndex, prev, lid)
-			}
-			seenT[a.TestIndex] = lid
+		if !ok || !accOK || obs.Timed != wantTimed || obs.MS != wantMS {
+			return fmt.Errorf("oracle: RunReport[%s]=%+v (ok=%t) want timed=%t ms=%d", p, obs, ok && accOK, wantTimed, wantMS)
 		}
 	}
 	return nil
 }
 
 func (o *simOracle) checkFinal(w *simWorld) error {
+	queryStatus := func() (queueapi.StatusResponse, int, error) {
+		code, body := w.invokeHandler(queueapi.EncodeStatus(w.buildID), simReadTok)
+		if code != http.StatusOK {
+			return queueapi.StatusResponse{}, code, nil
+		}
+		resp, err := queueapi.ParseStatusResponse(code, body)
+		return resp, code, err
+	}
 	if w.disk.broken[w.buildID] {
+		if _, code, err := queryStatus(); err != nil || code != http.StatusInternalServerError {
+			return fmt.Errorf("oracle: broken build answered HTTP %d (err=%v); want 500", code, err)
+		}
+		if err := w.restartServer(); err != nil {
+			return err
+		}
+		stResp, code, err := queryStatus()
+		if err != nil {
+			return err
+		}
+		replayed, err := w.disk.replayBuild(w.buildID, w.lim)
+		if err != nil {
+			return fmt.Errorf("oracle: broken-build disk replay failed: %w", err)
+		}
+		if !replayed.Initialized {
+			if code != http.StatusNotFound {
+				return fmt.Errorf("oracle: uninitialized restarted broken build status=%d; want 404", code)
+			}
+			return nil
+		}
+		if code != http.StatusOK || stResp.Verdict != replayed.Verdict() || stResp.Counts != replayed.Counts {
+			return fmt.Errorf("oracle: restarted broken build mismatch: http=%d live=(%s %+v) replay=(%s %+v)", code, stResp.Verdict, stResp.Counts, replayed.Verdict(), replayed.Counts)
+		}
 		return nil
 	}
 	if !o.initialized {
 		return fmt.Errorf("oracle: build never initialized")
 	}
-	stResp, httpStatus, err := w.queryServerStatus()
-	if err != nil || httpStatus != http.StatusOK || stResp.Verdict == queue.VerdictRunning {
-		return fmt.Errorf("oracle: final status invalid (http=%d verdict=%s counts=%+v err=%v)", httpStatus, stResp.Verdict, stResp.Counts, err)
+	stResp, code, err := queryStatus()
+	if err != nil || code != http.StatusOK || stResp.Verdict == queue.VerdictRunning {
+		return fmt.Errorf("oracle: final status invalid (http=%d verdict=%s counts=%+v err=%v)", code, stResp.Verdict, stResp.Counts, err)
 	}
-	if err := o.observeVerdict(stResp.Verdict); err != nil {
+	if err := o.observeServerVerdict(stResp.Verdict); err != nil {
 		return err
 	}
-	switch stResp.Verdict {
-	case queue.VerdictPassed:
-		w.stats[stPassed]++
-	case queue.VerdictFailed:
-		w.stats[stFailed]++
-	case queue.VerdictUnresolved:
-		w.stats[stUnresolved]++
-	}
+	w.stats[string(stResp.Verdict)]++
 	if o.expectCleanPass && stResp.Verdict != queue.VerdictPassed {
 		return fmt.Errorf("oracle: clean report-outage build finished %s; want passed (heartbeats must keep lease alive during Report retry)", stResp.Verdict)
 	}
-	for _, r := range w.runners {
-		if !r.killed && !r.exited {
-			return fmt.Errorf("oracle: liveness failure: runner %d never exited", r.id)
-		}
+	if slices.ContainsFunc(w.runners, func(r *simRunner) bool { return !r.killed && !r.exited }) {
+		return fmt.Errorf("oracle: liveness failure: a live runner never exited")
 	}
-
-	// Verify runner lease counts, slowest list (only timed passed, descending), and timestamps.
 	if stResp.CreatedAtMS <= 0 || stResp.FinishedAtMS == nil || *stResp.FinishedAtMS < stResp.CreatedAtMS {
 		return fmt.Errorf("oracle: invalid build timestamps created=%d finished=%v", stResp.CreatedAtMS, stResp.FinishedAtMS)
 	}
 	for _, rs := range stResp.Runners {
-		if rs.Leases != o.runnerLeases[rs.RunnerID] {
-			return fmt.Errorf("oracle: runner %s leases=%d; oracle counted %d", rs.RunnerID, rs.Leases, o.runnerLeases[rs.RunnerID])
+		if rs.Leases != o.runnerLeases[rs.RunnerID] || rs.ActiveLeaseID != 0 {
+			return fmt.Errorf("oracle: runner %s leases=%d (want %d) active=%d", rs.RunnerID, rs.Leases, o.runnerLeases[rs.RunnerID], rs.ActiveLeaseID)
 		}
 	}
 	for i, sl := range stResp.Slowest {
 		acc, ok := o.accepted[sl.Test]
-		if !ok || acc.outcome != queue.OutcomePassed || !acc.timed || acc.durationMS != sl.DurationMS {
-			return fmt.Errorf("oracle: slowest[%d]=%+v does not match timed passed truth %+v", i, sl, acc)
-		}
-		if i > 0 && stResp.Slowest[i-1].DurationMS < sl.DurationMS {
-			return fmt.Errorf("oracle: slowest list not sorted descending at %d", i)
+		if !ok || acc.outcome != queue.OutcomePassed || !acc.timed || acc.durationMS != sl.DurationMS || (i > 0 && stResp.Slowest[i-1].DurationMS < sl.DurationMS) {
+			return fmt.Errorf("oracle: slowest[%d]=%+v invalid vs %+v", i, sl, acc)
 		}
 	}
-
-	replayed, _, err := w.disk.replayBuild(w.buildID, w.lim)
-	if err != nil {
-		return fmt.Errorf("oracle: final disk replay failed: %w", err)
-	}
-	if replayed.Verdict() != stResp.Verdict || replayed.Counts != stResp.Counts ||
+	replayed, err := w.disk.replayBuild(w.buildID, w.lim)
+	if err != nil || replayed.Verdict() != stResp.Verdict || replayed.Counts != stResp.Counts ||
 		len(replayed.Conflicts) != len(stResp.Conflicts) || replayed.ConflictsTruncated != stResp.ConflictsTruncated {
-		return fmt.Errorf("oracle: replay mismatch vs live status")
+		return fmt.Errorf("oracle: final replay mismatch (err=%v)", err)
 	}
 	for _, raw := range w.disk.durable[w.buildID] {
 		if ev, err := queue.DecodeEvent(raw); err == nil && ev.Type == queue.EventFinalized {
-			w.stats[stDeadline]++
+			w.stats["deadline"]++
 		}
 	}
-	liveTests, err := w.queryAllServerTests()
-	if err != nil {
-		return err
+	var liveTests []queue.TestView
+	for cursor := 0; ; {
+		c, body := w.invokeHandler(queueapi.EncodeListTests(w.buildID, queue.ListTestsCommand{Cursor: cursor, Limit: 200}), simReadTok)
+		var page queueapi.ListTestsResponse
+		if c != http.StatusOK || json.Unmarshal(body, &page) != nil {
+			return fmt.Errorf("list tests failed status=%d", c)
+		}
+		liveTests = append(liveTests, page.Tests...)
+		if page.NextCursor == nil {
+			break
+		}
+		if *page.NextCursor <= cursor {
+			return fmt.Errorf("cursor did not advance: %d -> %d", cursor, *page.NextCursor)
+		}
+		cursor = *page.NextCursor
 	}
 	if len(liveTests) != len(o.tests) {
 		return fmt.Errorf("oracle: live test count %d != %d", len(liveTests), len(o.tests))
@@ -460,12 +429,10 @@ func (o *simOracle) checkFinal(w *simWorld) error {
 			return fmt.Errorf("oracle: test %s replay mismatch", tv.Test)
 		}
 		if tv.State == queue.StatusUnresolved && tv.Generation >= o.cfg.MaxAttempts {
-			w.stats[stExhausted]++
+			w.stats["exhausted"]++
 		}
-		for _, a := range tv.Attempts {
-			if a.Status == queue.AttemptLeased || a.FinishedAtMS == 0 {
-				return fmt.Errorf("oracle: finished attempt %s has status=%s finished_at=%d", a.AttemptID, a.Status, a.FinishedAtMS)
-			}
+		if slices.ContainsFunc(tv.Attempts, func(a queue.AttemptRecord) bool { return a.Status == queue.AttemptLeased || a.FinishedAtMS == 0 }) {
+			return fmt.Errorf("oracle: test %s has unfinished attempt", tv.Test)
 		}
 	}
 	return nil
