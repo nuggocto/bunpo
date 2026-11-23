@@ -264,17 +264,6 @@ func (c *Client) ListTests(ctx context.Context, buildID string, cmd queue.ListTe
 	return resp, nil
 }
 
-func (c *Client) ListBuilds(ctx context.Context) (ListBuildsResponse, error) {
-	var resp ListBuildsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/builds", nil, &resp, true); err != nil {
-		return ListBuildsResponse{}, err
-	}
-	if err := checkRespVersion(resp.Version, "list_builds"); err != nil {
-		return ListBuildsResponse{}, err
-	}
-	return resp, nil
-}
-
 func (c *Client) doJSON(ctx context.Context, method, path string, reqBody any, respOut any, retry bool) error {
 	var payload []byte
 	if reqBody != nil {

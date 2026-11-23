@@ -1,6 +1,20 @@
 package main
 
-import "testing"
+import (
+	"net"
+	"testing"
+)
+
+func validTestEnv(k string) string {
+	switch k {
+	case "BUNPO_QUEUE_TOKEN":
+		return "write-secret-token-0123456789abcdef"
+	case "BUNPO_QUEUE_READ_TOKEN":
+		return "read-secret-token-fedcba9876543210"
+	default:
+		return ""
+	}
+}
 
 func TestRunRejectsBadConfig(t *testing.T) {
 	noEnv := func(string) string { return "" }
@@ -28,5 +42,17 @@ func TestRunRejectsBadConfig(t *testing.T) {
 	}
 	if code := run([]string{"-h"}, noEnv); code != 0 {
 		t.Fatalf("-h: code = %d; want 0", code)
+	}
+}
+
+func TestRunPortAlreadyInUseExits1(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	if code := run([]string{"--addr", ln.Addr().String()}, validTestEnv); code != 1 {
+		t.Fatalf("port in use: code = %d; want 1", code)
 	}
 }

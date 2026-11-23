@@ -166,11 +166,24 @@ func TestHeartbeatSurvivesTransientFailureAndNoGoroutineLeaks(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	dir := t.TempDir()
+	reportPath := filepath.Join(dir, "times.txt")
+	releaseFile := filepath.Join(dir, "release-hb")
+
 	var hbCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Fail the first two heartbeats with 503 to verify the heartbeat loop retries within TTL.
-		if strings.HasSuffix(r.URL.Path, "/heartbeat") && hbCalls.Add(1) <= 2 {
-			w.WriteHeader(http.StatusServiceUnavailable)
+		if strings.HasSuffix(r.URL.Path, "/heartbeat") {
+			n := hbCalls.Add(1)
+			if n <= 2 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			h.ServeHTTP(w, r)
+			if n == 3 {
+				// Release the child only after the third heartbeat actually succeeded.
+				_ = os.WriteFile(releaseFile, []byte("ok"), 0o644)
+			}
 			return
 		}
 		h.ServeHTTP(w, r)
@@ -193,15 +206,12 @@ func TestHeartbeatSurvivesTransientFailureAndNoGoroutineLeaks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dir := t.TempDir()
-	reportPath := filepath.Join(dir, "times.txt")
-
-	// Child sleeps 350ms (> 180ms TTL, so it MUST survive via heartbeats despite the first 2 failing)
-	// and writes a lines report for tests/a.py.
+	// Child waits on releaseFile (written after 2 failed + 1 successful heartbeat)
+	// and then writes a lines report for tests/a.py.
 	helperCmd := []string{os.Args[0], "-test.run=^TestRunnerChildHelper$"}
-	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "sleep-pass")
+	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "pass")
 	t.Setenv("BUNPO_RUNNER_HELPER_REPORT", reportPath)
-	t.Setenv("BUNPO_RUNNER_HELPER_SLEEP_MS", "350")
+	t.Setenv("BUNPO_RUNNER_HELPER_WAIT_FILE", releaseFile)
 
 	verdict, err := Run(context.Background(), RunConfig{
 		Client:        client,
@@ -231,7 +241,8 @@ func TestHeartbeatSurvivesTransientFailureAndNoGoroutineLeaks(t *testing.T) {
 	}
 
 	// Test cancelled exit path (SIGINT/SIGTERM) leaves zero leaked goroutines.
-	t.Setenv("BUNPO_RUNNER_HELPER_SLEEP_MS", "5000")
+	// Child waits on a file that is never created so cancellation always interrupts it.
+	t.Setenv("BUNPO_RUNNER_HELPER_WAIT_FILE", filepath.Join(dir, "never-created"))
 	cancelCtx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
 	defer cancel()
 	_, err = Run(cancelCtx, RunConfig{
@@ -293,9 +304,9 @@ func TestHeartbeatsKeepLeaseAliveDuringReportRetry(t *testing.T) {
 				firstReportNS.CompareAndSwap(0, now)
 				start = firstReportNS.Load()
 			}
-			// Fail /report with 503 for 320ms (> 180ms TTL) so the lease would
-			// expire unless heartbeats keep running while Report retries.
-			if time.Duration(now-start) < 320*time.Millisecond {
+			// Fail /report with 503 until both > 180ms TTL has passed AND at least
+			// two heartbeats have landed during Report retries.
+			if time.Duration(now-start) < 220*time.Millisecond || hbDuringRetry.Load() < 2 {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
@@ -320,9 +331,9 @@ func TestHeartbeatsKeepLeaseAliveDuringReportRetry(t *testing.T) {
 
 	dir := t.TempDir()
 	reportPath := filepath.Join(dir, "times.txt")
-	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "sleep-pass")
+	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "pass")
 	t.Setenv("BUNPO_RUNNER_HELPER_REPORT", reportPath)
-	t.Setenv("BUNPO_RUNNER_HELPER_SLEEP_MS", "10")
+	t.Setenv("BUNPO_RUNNER_HELPER_WAIT_FILE", "")
 
 	verdict, err := Run(context.Background(), RunConfig{
 		Client:        client,
@@ -378,36 +389,36 @@ func TestLeaseStaleRequestRetriesWithFreshRequestID(t *testing.T) {
 		readTok  = "read-secret-token-fedcba9876543210"
 	)
 
+	var fakeNow atomic.Int64
+	fakeNow.Store(1_000_000)
+
 	lim := queue.DefaultLimits()
 	lim.MinLeaseTTLMS = 150
 	h, err := queueapi.NewHandler(queueapi.HandlerConfig{
 		WriteToken: writeTok,
 		ReadToken:  readTok,
 		Limits:     lim,
+		Clock:      func() int64 { return fakeNow.Load() },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var leaseCalls atomic.Int32
-	var firstLeaseNS atomic.Int64
 	var sawStale409 atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/lease") {
 			n := leaseCalls.Add(1)
 			if n == 1 {
-				// Grant lease 1 on the server, then drop the HTTP reply as 503.
+				// Grant lease 1 on the server, advance the server clock past the
+				// 150ms TTL, then drop the HTTP reply as 503.
 				rec := httptest.NewRecorder()
 				h.ServeHTTP(rec, r)
-				firstLeaseNS.Store(time.Now().UnixNano())
+				fakeNow.Add(200)
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
 			if n == 2 {
-				// Stall past the 150ms TTL so retrying the same request_id returns 409 stale_request.
-				if elapsed := time.Since(time.Unix(0, firstLeaseNS.Load())); elapsed < 210*time.Millisecond {
-					time.Sleep(210*time.Millisecond - elapsed)
-				}
 				cw := &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
 				h.ServeHTTP(cw, r)
 				if cw.status == http.StatusConflict {
@@ -434,9 +445,9 @@ func TestLeaseStaleRequestRetriesWithFreshRequestID(t *testing.T) {
 
 	dir := t.TempDir()
 	reportPath := filepath.Join(dir, "times.txt")
-	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "sleep-pass")
+	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "pass")
 	t.Setenv("BUNPO_RUNNER_HELPER_REPORT", reportPath)
-	t.Setenv("BUNPO_RUNNER_HELPER_SLEEP_MS", "10")
+	t.Setenv("BUNPO_RUNNER_HELPER_WAIT_FILE", "")
 
 	verdict, err := Run(context.Background(), RunConfig{
 		Client:        client,
@@ -521,9 +532,9 @@ func TestHeartbeatPermanent4xxStopsBatchAndSurfacesError(t *testing.T) {
 
 	dir := t.TempDir()
 	reportPath := filepath.Join(dir, "times.txt")
-	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "sleep-pass")
+	t.Setenv("BUNPO_RUNNER_HELPER_MODE", "pass")
 	t.Setenv("BUNPO_RUNNER_HELPER_REPORT", reportPath)
-	t.Setenv("BUNPO_RUNNER_HELPER_SLEEP_MS", "5000")
+	t.Setenv("BUNPO_RUNNER_HELPER_WAIT_FILE", filepath.Join(dir, "never-created"))
 
 	start := time.Now()
 	_, err = Run(context.Background(), RunConfig{
@@ -599,14 +610,13 @@ func TestRunnerChildHelper(t *testing.T) {
 	if mode == "" {
 		return
 	}
-	sleepMS := 0
-	if raw := os.Getenv("BUNPO_RUNNER_HELPER_SLEEP_MS"); raw != "" {
-		if d, err := time.ParseDuration(raw + "ms"); err == nil {
-			sleepMS = int(d.Milliseconds())
+	if waitFile := os.Getenv("BUNPO_RUNNER_HELPER_WAIT_FILE"); waitFile != "" {
+		for {
+			if _, err := os.Stat(waitFile); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-	}
-	if sleepMS > 0 {
-		time.Sleep(time.Duration(sleepMS) * time.Millisecond)
 	}
 	batchPath := os.Getenv("BUNPO_TESTS_FILE")
 	raw, err := os.ReadFile(batchPath)

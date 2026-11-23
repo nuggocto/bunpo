@@ -35,19 +35,25 @@ func TestQueueE2ESIGSTOPPastTTLThenSIGCONT(t *testing.T) {
 		"--", self, "-test.run=^TestQueueHelperProcess$",
 	)
 
-	// Wait until runner 0's child wrote its report, then freeze runner 0 past the TTL.
+	// Wait until runner 0's child wrote its report, freeze runner 0 via SIGSTOP,
+	// confirm it is stopped, and only then release its child to exit.
 	_ = waitForMarkerPID(t, filepath.Join(markers, "ready-to-stop"), 5*time.Second)
 	if err := p0.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
 	resumed := false
 	t.Cleanup(func() {
+		_ = os.WriteFile(filepath.Join(markers, "release-paused"), []byte("1"), 0o644)
 		if !resumed && p0.cmd.Process != nil {
 			_ = p0.cmd.Process.Signal(syscall.SIGCONT)
 			_ = p0.cmd.Process.Kill()
 			_ = p0.cmd.Wait()
 		}
 	})
+	waitForProcessStopped(t, p0.cmd.Process.Pid, 5*time.Second)
+	if err := os.WriteFile(filepath.Join(markers, "release-paused"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Runner 1 waits for TTL expiry, takes over attempt 0.2, and finishes the build.
 	rep1 := filepath.Join(work, "r1.xml")
@@ -84,4 +90,24 @@ func TestQueueE2ESIGSTOPPastTTLThenSIGCONT(t *testing.T) {
 	if tv.Generation != 2 || len(tv.History) != 1 || tv.History[0].Disposition != queue.DispositionStale {
 		t.Fatalf("expected generation=2 and 1 stale history record; got gen=%d history=%+v", tv.Generation, tv.History)
 	}
+}
+
+func waitForProcessStopped(t *testing.T, pid int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var ws syscall.WaitStatus
+		wpid, err := syscall.Wait4(pid, &ws, syscall.WUNTRACED|syscall.WNOHANG, nil)
+		if err != nil {
+			t.Fatalf("wait4(%d): %v", pid, err)
+		}
+		if wpid == pid {
+			if ws.Stopped() {
+				return
+			}
+			t.Fatalf("process %d changed state before stopping (status=%#x)", pid, ws)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for process %d to stop on SIGSTOP", pid)
 }

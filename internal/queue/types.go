@@ -300,7 +300,7 @@ type RunnerState struct {
 	LastLeaseID   int64
 }
 
-// InitConflict records a mismatched init attempt while the build was running.
+// InitConflict records a mismatched init attempt.
 type InitConflict struct {
 	RunnerID     string `json:"runner_id"`
 	MachineIndex *int   `json:"machine_index"`

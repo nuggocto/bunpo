@@ -533,7 +533,7 @@ func BuildRunReport(ctx context.Context, client *queueapi.Client, buildID string
 	return report, true, nil
 }
 
-// FilteredChildEnv strips BUNPO_QUEUE_TOKEN and BUNPO_QUEUE_READ_TOKEN from
+// filteredChildEnv strips BUNPO_QUEUE_TOKEN and BUNPO_QUEUE_READ_TOKEN from
 // env and sets BUNPO_TESTS_FILE so untrusted test code does not inherit queue
 // credentials directly.
 func filteredChildEnv(env []string, testsFile string) []string {

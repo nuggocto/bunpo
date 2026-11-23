@@ -358,6 +358,17 @@ func TestClientHardening(t *testing.T) {
 	}
 }
 
+type notifyFirstWriteWriter struct {
+	http.ResponseWriter
+	once   sync.Once
+	notify chan struct{}
+}
+
+func (w *notifyFirstWriteWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.notify) })
+	return w.ResponseWriter.Write(p)
+}
+
 func TestSlowReaderDoesNotHoldBuildLock(t *testing.T) {
 	h, err := queueapi.NewHandler(queueapi.HandlerConfig{
 		WriteToken: testWriteTok,
@@ -366,7 +377,13 @@ func TestSlowReaderDoesNotHoldBuildLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(h)
+	writeStarted := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/tests") {
+			w = &notifyFirstWriteWriter{ResponseWriter: w, notify: writeStarted}
+		}
+		h.ServeHTTP(w, r)
+	}))
 	defer srv.Close()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
@@ -423,8 +440,12 @@ func TestSlowReaderDoesNotHoldBuildLock(t *testing.T) {
 	if _, err := conn.Write([]byte(req)); err != nil {
 		t.Fatal(err)
 	}
-	// Give the server a moment to start writing to the stalled socket.
-	time.Sleep(50 * time.Millisecond)
+	// Wait until the handler has started writing the response to the stalled socket.
+	select {
+	case <-writeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for slow-reader response write to start")
+	}
 
 	// Heartbeat on the exact same build must complete well under 1 second.
 	start := time.Now()
@@ -521,10 +542,7 @@ func TestAbandonedIdleAndBrokenBuildsEvictedUnderPressure(t *testing.T) {
 
 	// Advance past b2's deadline (1_005_000 + 60_000 = 1_065_000): GET /builds finalizes b2 through EventLog!
 	nowMS.Store(1_070_000)
-	list, err := c.ListBuilds(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	list := getListBuilds(t, srv.URL, testWriteTok, srv.Client())
 	foundB2 := false
 	for _, b := range list.Builds {
 		if b.BuildID == "b2" && b.Verdict == queue.VerdictUnresolved {
@@ -551,16 +569,25 @@ func TestAbandonedIdleAndBrokenBuildsEvictedUnderPressure(t *testing.T) {
 }
 
 func TestClientRetriesHTTPTimeoutAndRejectsMalformed200(t *testing.T) {
-	// 1. Server hangs once past http.Client.Timeout, then succeeds on attempt 2.
+	// 1. Server hangs attempt 1 until the client's http.Client.Timeout aborts it,
+	// then succeeds on attempt 2.
 	var calls atomic.Int32
+	releaseHang := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) == 1 {
-			time.Sleep(150 * time.Millisecond)
+			select {
+			case <-r.Context().Done():
+			case <-releaseHang:
+			}
+			return
 		}
 		w.Header().Set("Content-Type", queueapi.ContentTypeJSON)
-		_, _ = w.Write([]byte(`{"version":1,"builds":[]}`))
+		_, _ = w.Write([]byte(`{"version":1,"build_id":"b1","verdict":"running","created_at_ms":1,"deadline_ms":2,"last_seen_ms":1,"counts":{"total":0,"pending":0,"leased":0,"passed":0,"failed":0,"skipped":0,"unresolved":0},"conflicts":[],"conflicts_truncated":false,"runners":[],"slowest":[],"problems":[]}`))
 	}))
-	defer srv.Close()
+	defer func() {
+		close(releaseHang)
+		srv.Close()
+	}()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
 		BaseURL:      srv.URL,
@@ -573,7 +600,7 @@ func TestClientRetriesHTTPTimeoutAndRejectsMalformed200(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.ListBuilds(context.Background()); err != nil {
+	if _, err := c.Status(context.Background(), "b1"); err != nil {
 		t.Fatalf("client did not retry after http.Client.Timeout: %v", err)
 	}
 	if calls.Load() != 2 {
@@ -624,7 +651,20 @@ func TestClientDisconnectDoesNotCancelAppendContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(h)
+	reqCancelled := make(chan struct{})
+	var cancelOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerDone := make(chan struct{})
+		defer close(handlerDone)
+		go func() {
+			select {
+			case <-r.Context().Done():
+				cancelOnce.Do(func() { close(reqCancelled) })
+			case <-handlerDone:
+			}
+		}()
+		h.ServeHTTP(w, r)
+	}))
 	defer srv.Close()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
@@ -652,7 +692,12 @@ func TestClientDisconnectDoesNotCancelAppendContext(t *testing.T) {
 
 	<-log.entered
 	cancel()
-	time.Sleep(40 * time.Millisecond)
+	select {
+	case <-reqCancelled:
+	case <-time.After(5 * time.Second):
+		close(log.release)
+		t.Fatal("timed out waiting for server request context cancellation")
+	}
 	close(log.release)
 	<-done
 

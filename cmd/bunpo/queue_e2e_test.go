@@ -120,8 +120,15 @@ func TestQueueHelperProcess(t *testing.T) {
 		writeJUnit(cases)
 		if runnerTag == "paused" {
 			writeMarker("ready-to-stop")
-			// Wait briefly so SIGSTOP lands before helper exits, or right as bunpo resumes.
-			time.Sleep(80 * time.Millisecond)
+			// Wait for the test to confirm bunpo is stopped via SIGSTOP before exiting,
+			// so bunpo cannot read the report until SIGCONT arrives.
+			release := filepath.Join(markerDir, "release-paused")
+			for {
+				if _, err := os.Stat(release); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 		}
 		os.Exit(0)
 
@@ -404,6 +411,38 @@ func TestQueueE2EKillAfterExecBeforeReport(t *testing.T) {
 	assertBuildIntegrity(t, rc, "e2e-kill-after", queue.VerdictPassed, 2)
 }
 
+type dropFirstListener struct {
+	net.Listener
+	mu      sync.Mutex
+	dropped int
+}
+
+func (l *dropFirstListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		l.mu.Lock()
+		drop := l.dropped == 0
+		if drop {
+			l.dropped++
+		}
+		l.mu.Unlock()
+		if drop {
+			_ = c.Close()
+			continue
+		}
+		return c, nil
+	}
+}
+
+func (l *dropFirstListener) droppedCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.dropped
+}
+
 func TestQueueE2EServerRefusesConnectionsThenRecovers(t *testing.T) {
 	lim := queue.DefaultLimits()
 	lim.MinLeaseTTLMS = 500
@@ -416,38 +455,18 @@ func TestQueueE2EServerRefusesConnectionsThenRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pick a free loopback port, keep it CLOSED for 400ms so the runner hits ECONNREFUSED,
-	// then start serving on that exact address.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// Drop the first accepted TCP connection immediately so the runner is
+	// guaranteed to hit a real transport error and retry until recovery.
+	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	ln := &dropFirstListener{Listener: rawLn}
+	addr := rawLn.Addr().String()
 
-	var srvMu sync.Mutex
-	var srv *http.Server
-	t.Cleanup(func() {
-		srvMu.Lock()
-		s := srv
-		srvMu.Unlock()
-		if s != nil {
-			_ = s.Close()
-		}
-	})
-
-	go func() {
-		time.Sleep(400 * time.Millisecond)
-		l2, err := net.Listen("tcp", addr)
-		if err != nil {
-			return
-		}
-		s := &http.Server{Handler: h}
-		srvMu.Lock()
-		srv = s
-		srvMu.Unlock()
-		_ = s.Serve(l2)
-	}()
+	srv := &http.Server{Handler: h}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
 
 	work := t.TempDir()
 	rep := filepath.Join(work, "r.xml")
@@ -463,6 +482,9 @@ func TestQueueE2EServerRefusesConnectionsThenRecovers(t *testing.T) {
 	)
 	if code := p.wait(t); code != 0 {
 		t.Fatalf("runner failed to recover after server outage (exit %d): %s", code, p.stderr.String())
+	}
+	if ln.droppedCount() < 1 {
+		t.Fatal("expected at least one dropped TCP connection before recovery")
 	}
 }
 

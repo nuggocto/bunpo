@@ -29,6 +29,35 @@ type protocolEnv struct {
 	httpClient *http.Client
 }
 
+func getListBuilds(t *testing.T, baseURL, token string, hc *http.Client) queueapi.ListBuildsResponse {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/v1/builds", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/v1/builds: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read /api/v1/builds: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/builds status = %d: %s", resp.StatusCode, raw)
+	}
+	var out queueapi.ListBuildsResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode /api/v1/builds: %v", err)
+	}
+	if out.Version != queue.ProtocolVersion {
+		t.Fatalf("GET /api/v1/builds version = %d; want %d", out.Version, queue.ProtocolVersion)
+	}
+	return out
+}
+
 // newProtocolEnv connects to an external server when BUNPO_TEST_SERVER_URL is
 // set (so the Cloudflare Worker can run this exact black-box suite), or starts
 // an in-process httptest.Server otherwise.
@@ -422,10 +451,7 @@ func TestProtocolBlackBox(t *testing.T) {
 		if err != nil || len(retried.Tests) != 1 || retried.Tests[0].TestIndex != l1.Attempts[0].TestIndex {
 			t.Fatalf("retried = %+v, err=%v", retried, err)
 		}
-		builds, err := rc.ListBuilds(ctx)
-		if err != nil {
-			t.Fatalf("ListBuilds: %v", err)
-		}
+		builds := getListBuilds(t, env.baseURL, env.readToken, env.httpClient)
 		found := false
 		for _, b := range builds.Builds {
 			if b.BuildID == bid && b.Verdict == queue.VerdictPassed {
