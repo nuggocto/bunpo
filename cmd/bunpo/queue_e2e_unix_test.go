@@ -102,7 +102,11 @@ func waitForProcessStopped(t *testing.T, pid int, timeout time.Duration) {
 			t.Fatalf("wait4(%d): %v", pid, err)
 		}
 		if wpid == pid {
-			if ws.Stopped() {
+			// On Darwin and BSD, Go's syscall.WaitStatus.Stopped() excludes
+			// SIGSTOP (0x117f) and reports it as Continued() instead. Because
+			// WCONTINUED is not set in Wait4 options, Continued() here can only
+			// mean the process stopped on SIGSTOP.
+			if ws.Stopped() || ws.Continued() {
 				return
 			}
 			t.Fatalf("process %d changed state before stopping (status=%#x)", pid, ws)
