@@ -87,7 +87,7 @@ Use static splitting (`bunpo split` / `verify`) when machines are identical and 
 | Request body size | `4 MiB` for `POST .../init`; `1 MiB` for all other `POST` endpoints |
 | Stored `init` conflicts per build | Up to `8` unique `(runner_id, got_digest)` conflicts kept; filling entry 8 sets `conflicts_truncated: true`, and duplicates or further conflicts emit no events |
 | Stored stale/conflict attempt records per test | Up to `8` unique records kept; filling entry 8 sets `history_truncated: true`, and duplicates or further records emit no events |
-| Retained builds (Go server) | Max `200` builds total, max `64` `running` (`503 at_capacity` when full), deleted `7 days` after finishing (oldest finished evicted first if over 200) |
+| Retained builds (Go server) | Max `200` builds total, max `64` `running` (`503 at_capacity` when full), deleted `7 days` after finishing. Capacity scans and `GET /api/v1/builds` finalize builds past their `deadline_ms` through the event log; under capacity pressure, broken builds, oldest finished builds, and running builds idle for `> 2 * lease_ttl_ms` (longest idle first) are evicted (returning `404` so no runner can pass). |
 | Retained builds (Cloudflare) | `BuildIndex` lists at most `200` recent builds; each `BuildDO` calls `deleteAll()` `7 days` after finishing |
 | `GET /builds/{build}` summary caps | Up to `256` runner summaries, `20` slowest timed tests, `50` problem tests (`failed` then `unresolved`) |
 | `GET /builds/{build}/tests` page size | Default `200`, max `1,000` |

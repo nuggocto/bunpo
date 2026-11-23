@@ -108,6 +108,17 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+func validVerdict(v queue.Verdict) bool {
+	return v == queue.VerdictRunning || v == queue.VerdictPassed || v == queue.VerdictFailed || v == queue.VerdictUnresolved
+}
+
+func checkRespVersion(got int64, endpoint string) error {
+	if got != queue.ProtocolVersion {
+		return fmt.Errorf("%s: invalid response protocol version %d (want %d)", endpoint, got, queue.ProtocolVersion)
+	}
+	return nil
+}
+
 func (c *Client) Init(ctx context.Context, cmd queue.InitCommand) (InitResponse, error) {
 	body := initRequestOut{
 		Version:       queue.ProtocolVersion,
@@ -118,8 +129,16 @@ func (c *Client) Init(ctx context.Context, cmd queue.InitCommand) (InitResponse,
 		PredictionsMS: cmd.PredictionsMS,
 	}
 	var resp InitResponse
-	err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(cmd.BuildID)+"/init", body, &resp, true)
-	return resp, err
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(cmd.BuildID)+"/init", body, &resp, true); err != nil {
+		return InitResponse{}, err
+	}
+	if err := checkRespVersion(resp.Version, "init"); err != nil {
+		return InitResponse{}, err
+	}
+	if !validVerdict(resp.Verdict) {
+		return InitResponse{}, fmt.Errorf("init: invalid verdict %q", resp.Verdict)
+	}
+	return resp, nil
 }
 
 func (c *Client) Lease(ctx context.Context, buildID string, cmd queue.LeaseCommand) (LeaseResponse, error) {
@@ -130,8 +149,29 @@ func (c *Client) Lease(ctx context.Context, buildID string, cmd queue.LeaseComma
 		RequestID:    cmd.RequestID,
 	}
 	var resp LeaseResponse
-	err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(buildID)+"/lease", body, &resp, true)
-	return resp, err
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(buildID)+"/lease", body, &resp, true); err != nil {
+		return LeaseResponse{}, err
+	}
+	if err := checkRespVersion(resp.Version, "lease"); err != nil {
+		return LeaseResponse{}, err
+	}
+	switch resp.Status {
+	case queue.LeaseGranted:
+		if resp.LeaseID <= 0 || len(resp.Attempts) == 0 {
+			return LeaseResponse{}, fmt.Errorf("lease: invalid leased response (lease_id=%d attempts=%d)", resp.LeaseID, len(resp.Attempts))
+		}
+	case queue.LeaseWait:
+		if resp.RetryAfterMS <= 0 {
+			return LeaseResponse{}, fmt.Errorf("lease: wait response missing positive retry_after_ms (%d)", resp.RetryAfterMS)
+		}
+	case queue.LeaseDone:
+		if !validVerdict(resp.Verdict) || resp.Verdict == queue.VerdictRunning {
+			return LeaseResponse{}, fmt.Errorf("lease: done response has invalid verdict %q", resp.Verdict)
+		}
+	default:
+		return LeaseResponse{}, fmt.Errorf("lease: unknown status %q", resp.Status)
+	}
+	return resp, nil
 }
 
 // Heartbeat sends a single heartbeat without the multi-minute retry loop; the
@@ -143,8 +183,16 @@ func (c *Client) Heartbeat(ctx context.Context, buildID string, cmd queue.Heartb
 		LeaseID:  cmd.LeaseID,
 	}
 	var resp HeartbeatResponse
-	err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(buildID)+"/heartbeat", body, &resp, false)
-	return resp, err
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(buildID)+"/heartbeat", body, &resp, false); err != nil {
+		return HeartbeatResponse{}, err
+	}
+	if err := checkRespVersion(resp.Version, "heartbeat"); err != nil {
+		return HeartbeatResponse{}, err
+	}
+	if !validVerdict(resp.Verdict) {
+		return HeartbeatResponse{}, fmt.Errorf("heartbeat: invalid verdict %q", resp.Verdict)
+	}
+	return resp, nil
 }
 
 func (c *Client) Report(ctx context.Context, buildID string, cmd queue.ReportCommand) (ReportResponse, error) {
@@ -155,14 +203,30 @@ func (c *Client) Report(ctx context.Context, buildID string, cmd queue.ReportCom
 		Results:  cmd.Results,
 	}
 	var resp ReportResponse
-	err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(buildID)+"/report", body, &resp, true)
-	return resp, err
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(buildID)+"/report", body, &resp, true); err != nil {
+		return ReportResponse{}, err
+	}
+	if err := checkRespVersion(resp.Version, "report"); err != nil {
+		return ReportResponse{}, err
+	}
+	if !validVerdict(resp.Verdict) {
+		return ReportResponse{}, fmt.Errorf("report: invalid verdict %q", resp.Verdict)
+	}
+	return resp, nil
 }
 
 func (c *Client) Status(ctx context.Context, buildID string) (StatusResponse, error) {
 	var resp StatusResponse
-	err := c.doJSON(ctx, http.MethodGet, "/api/v1/builds/"+url.PathEscape(buildID), nil, &resp, true)
-	return resp, err
+	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/builds/"+url.PathEscape(buildID), nil, &resp, true); err != nil {
+		return StatusResponse{}, err
+	}
+	if err := checkRespVersion(resp.Version, "status"); err != nil {
+		return StatusResponse{}, err
+	}
+	if !validVerdict(resp.Verdict) {
+		return StatusResponse{}, fmt.Errorf("status: invalid verdict %q", resp.Verdict)
+	}
+	return resp, nil
 }
 
 func (c *Client) ListTests(ctx context.Context, buildID string, cmd queue.ListTestsCommand) (ListTestsResponse, error) {
@@ -188,14 +252,27 @@ func (c *Client) ListTests(ctx context.Context, buildID string, cmd queue.ListTe
 		path += "?" + enc
 	}
 	var resp ListTestsResponse
-	err := c.doJSON(ctx, http.MethodGet, path, nil, &resp, true)
-	return resp, err
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp, true); err != nil {
+		return ListTestsResponse{}, err
+	}
+	if err := checkRespVersion(resp.Version, "list_tests"); err != nil {
+		return ListTestsResponse{}, err
+	}
+	if !validVerdict(resp.Verdict) {
+		return ListTestsResponse{}, fmt.Errorf("list_tests: invalid verdict %q", resp.Verdict)
+	}
+	return resp, nil
 }
 
 func (c *Client) ListBuilds(ctx context.Context) (ListBuildsResponse, error) {
 	var resp ListBuildsResponse
-	err := c.doJSON(ctx, http.MethodGet, "/api/v1/builds", nil, &resp, true)
-	return resp, err
+	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/builds", nil, &resp, true); err != nil {
+		return ListBuildsResponse{}, err
+	}
+	if err := checkRespVersion(resp.Version, "list_builds"); err != nil {
+		return ListBuildsResponse{}, err
+	}
+	return resp, nil
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, reqBody any, respOut any, retry bool) error {
@@ -212,8 +289,8 @@ func (c *Client) doJSON(ctx context.Context, method, path string, reqBody any, r
 	backoff := c.retryBase
 
 	for attempt := 0; ; attempt++ {
-		err, retryable := c.doOnce(ctx, method, path, payload, respOut)
-		if err == nil || !retry || !retryable {
+		err := c.doOnce(ctx, method, path, payload, respOut)
+		if err == nil || !retry || ctx.Err() != nil || !IsTransientError(err) {
 			return err
 		}
 
@@ -247,14 +324,14 @@ func (c *Client) doJSON(ctx context.Context, method, path string, reqBody any, r
 	}
 }
 
-func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte, respOut any) (error, bool) {
+func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte, respOut any) error {
 	var body io.Reader
 	if payload != nil {
 		body = bytes.NewReader(payload)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err), false
+		return fmt.Errorf("build request: %w", err)
 	}
 	if payload != nil {
 		req.Header.Set("Content-Type", ContentTypeJSON)
@@ -265,47 +342,74 @@ func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err, false
+		// Decide cancellation from the caller's ctx, not errors.Is(err, context.DeadlineExceeded),
+		// because http.Client.Timeout also wraps DeadlineExceeded and must be retried.
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		return fmt.Errorf("queue request %s %s failed: %v", method, path, sanitizeTransportError(err)), true
+		return &transportError{msg: fmt.Sprintf("queue request %s %s failed: %v", method, path, sanitizeTransportError(err))}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return fmt.Errorf("queue server returned redirect %d (redirects are not followed)", resp.StatusCode), false
+		return fmt.Errorf("queue server returned redirect %d (redirects are not followed)", resp.StatusCode)
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
 	if err != nil {
-		return fmt.Errorf("reading queue response: %v", err), true
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &transportError{msg: fmt.Sprintf("reading queue response: %v", err)}
 	}
 	if len(raw) > MaxResponseBytes {
-		return fmt.Errorf("queue response exceeds %d byte limit", MaxResponseBytes), false
+		return fmt.Errorf("queue response exceeds %d byte limit", MaxResponseBytes)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		var env errorEnvelope
 		if decErr := json.Unmarshal(raw, &env); decErr == nil && env.Error.Code != "" {
-			apiErr := &APIError{
+			return &APIError{
 				HTTPStatus: resp.StatusCode,
 				Code:       env.Error.Code,
 				Message:    env.Error.Message,
 			}
-			return apiErr, resp.StatusCode >= 500
 		}
-		apiErr := &APIError{
+		return &APIError{
 			HTTPStatus: resp.StatusCode,
 			Code:       "http_error",
 			Message:    http.StatusText(resp.StatusCode),
 		}
-		return apiErr, resp.StatusCode >= 500
 	}
 
 	if err := json.Unmarshal(raw, respOut); err != nil {
-		return fmt.Errorf("decoding queue response: %w", err), false
+		return fmt.Errorf("decoding queue response: %w", err)
 	}
-	return nil, false
+	return nil
+}
+
+type transportError struct {
+	msg string
+}
+
+func (e *transportError) Error() string { return e.msg }
+
+// IsTransientError reports whether err from Client is a transient network,
+// rate-limit, or 5xx server failure that may succeed on retry. Permanent 4xx
+// responses, protocol/decode errors, and context cancellation return false.
+func IsTransientError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var te *transportError
+	if errors.As(err, &te) {
+		return true
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.HTTPStatus == http.StatusTooManyRequests || apiErr.HTTPStatus >= 500
+	}
+	return false
 }
 
 func sanitizeTransportError(err error) string {

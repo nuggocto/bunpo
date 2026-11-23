@@ -21,7 +21,17 @@ import (
 	"github.com/nuggocto/bunpo/internal/queue"
 )
 
+// ErrAppendUnwritten may be wrapped by an EventLog.Append implementation to
+// prove that nothing was persisted (for example, the write failed before
+// touching storage or was truncated/rolled back cleanly). Any other Append
+// error leaves persistence uncertain, so the handler marks the build broken
+// rather than risking a divergent, unreplayable log.
+var ErrAppendUnwritten = errors.New("event append left storage unchanged")
+
 // EventLog persists decided events before they are applied to in-memory state.
+// One Append call must be all-or-nothing on replay. On error, the log must
+// either prove nothing was written by wrapping ErrAppendUnwritten, or accept
+// that the handler will mark the build broken (500).
 type EventLog interface {
 	Append(ctx context.Context, buildID string, events []queue.Event) error
 }
@@ -53,10 +63,11 @@ const (
 )
 
 type buildEntry struct {
-	mu           sync.Mutex
-	state        *queue.State
-	broken       bool
-	failedCreate bool
+	mu             sync.Mutex
+	state          *queue.State
+	lastActivityMS int64
+	broken         bool
+	failedCreate   bool
 }
 
 // Handler serves Bunpō's live-queue HTTP API.
@@ -310,7 +321,7 @@ func (h *Handler) handleInit(w http.ResponseWriter, r *http.Request, buildID str
 		return
 	}
 
-	entry, created, apiErr := h.getOrCreateBuildLocked(buildID)
+	entry, created, apiErr := h.getOrCreateBuildLocked(r.Context(), buildID)
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
@@ -322,9 +333,10 @@ func (h *Handler) handleInit(w http.ResponseWriter, r *http.Request, buildID str
 	}
 
 	now := h.clock()
+	entry.lastActivityMS = max(entry.lastActivityMS, now)
 	events, resp, err := queue.DecideInit(entry.state, now, cmd)
 	if persistErr := h.persistAndApply(r.Context(), buildID, entry, events); persistErr != nil {
-		if created && !entry.state.Initialized {
+		if created && !entry.state.Initialized && !entry.broken {
 			entry.failedCreate = true
 			entry.mu.Unlock()
 			h.removeFailedCreate(buildID, entry)
@@ -363,29 +375,33 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request, buildID st
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"})
 		return
 	}
-	defer entry.mu.Unlock()
-
 	if entry.broken {
+		entry.mu.Unlock()
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
 		return
 	}
 
+	now := h.clock()
+	entry.lastActivityMS = max(entry.lastActivityMS, now)
 	cmd := queue.LeaseCommand{
 		RunnerID:     *raw.RunnerID,
 		MachineIndex: raw.MachineIndex.Value,
 		RequestID:    *raw.RequestID,
 	}
-	events, resp, err := queue.DecideLease(entry.state, h.clock(), cmd)
-	if persistErr := h.persistAndApply(r.Context(), buildID, entry, events); persistErr != nil {
+	events, resp, err := queue.DecideLease(entry.state, now, cmd)
+	persistErr := h.persistAndApply(r.Context(), buildID, entry, events)
+	if persistErr == nil && err == nil && resp.Status == queue.LeaseGranted {
+		entry.state.ExtendLease(resp.LeaseID, resp.DeadlineMS)
+	}
+	entry.mu.Unlock()
+
+	if persistErr != nil {
 		writeAPIError(w, persistErr)
 		return
 	}
 	if err != nil {
 		writeQueueError(w, err)
 		return
-	}
-	if resp.Status == queue.LeaseGranted {
-		entry.state.ExtendLease(resp.LeaseID, resp.DeadlineMS)
 	}
 	writeJSON(w, http.StatusOK, LeaseResponse{Version: queue.ProtocolVersion, LeaseResponse: resp})
 }
@@ -409,28 +425,32 @@ func (h *Handler) handleHeartbeat(w http.ResponseWriter, r *http.Request, buildI
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"})
 		return
 	}
-	defer entry.mu.Unlock()
-
 	if entry.broken {
+		entry.mu.Unlock()
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
 		return
 	}
 
+	now := h.clock()
+	entry.lastActivityMS = max(entry.lastActivityMS, now)
 	cmd := queue.HeartbeatCommand{
 		RunnerID: *raw.RunnerID,
 		LeaseID:  *raw.LeaseID,
 	}
-	events, resp, err := queue.DecideHeartbeat(entry.state, h.clock(), cmd)
-	if persistErr := h.persistAndApply(r.Context(), buildID, entry, events); persistErr != nil {
+	events, resp, err := queue.DecideHeartbeat(entry.state, now, cmd)
+	persistErr := h.persistAndApply(r.Context(), buildID, entry, events)
+	if persistErr == nil && err == nil && resp.Held {
+		entry.state.ExtendLease(cmd.LeaseID, resp.DeadlineMS)
+	}
+	entry.mu.Unlock()
+
+	if persistErr != nil {
 		writeAPIError(w, persistErr)
 		return
 	}
 	if err != nil {
 		writeQueueError(w, err)
 		return
-	}
-	if resp.Held {
-		entry.state.ExtendLease(cmd.LeaseID, resp.DeadlineMS)
 	}
 	writeJSON(w, http.StatusOK, HeartbeatResponse{Version: queue.ProtocolVersion, HeartbeatResponse: resp})
 }
@@ -478,20 +498,24 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request, buildID s
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"})
 		return
 	}
-	defer entry.mu.Unlock()
-
 	if entry.broken {
+		entry.mu.Unlock()
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
 		return
 	}
 
+	now := h.clock()
+	entry.lastActivityMS = max(entry.lastActivityMS, now)
 	cmd := queue.ReportCommand{
 		RunnerID: *raw.RunnerID,
 		LeaseID:  *raw.LeaseID,
 		Results:  results,
 	}
-	events, resp, err := queue.DecideReport(entry.state, h.clock(), cmd)
-	if persistErr := h.persistAndApply(r.Context(), buildID, entry, events); persistErr != nil {
+	events, resp, err := queue.DecideReport(entry.state, now, cmd)
+	persistErr := h.persistAndApply(r.Context(), buildID, entry, events)
+	entry.mu.Unlock()
+
+	if persistErr != nil {
 		writeAPIError(w, persistErr)
 		return
 	}
@@ -508,15 +532,17 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request, buildID s
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"})
 		return
 	}
-	defer entry.mu.Unlock()
-
 	if entry.broken {
+		entry.mu.Unlock()
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
 		return
 	}
 
 	events, resp, err := queue.DecideStatus(entry.state, h.clock())
-	if persistErr := h.persistAndApply(r.Context(), buildID, entry, events); persistErr != nil {
+	persistErr := h.persistAndApply(r.Context(), buildID, entry, events)
+	entry.mu.Unlock()
+
+	if persistErr != nil {
 		writeAPIError(w, persistErr)
 		return
 	}
@@ -569,15 +595,17 @@ func (h *Handler) handleListTests(w http.ResponseWriter, r *http.Request, buildI
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"})
 		return
 	}
-	defer entry.mu.Unlock()
-
 	if entry.broken {
+		entry.mu.Unlock()
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
 		return
 	}
 
 	events, resp, err := queue.DecideListTests(entry.state, h.clock(), cmd)
-	if persistErr := h.persistAndApply(r.Context(), buildID, entry, events); persistErr != nil {
+	persistErr := h.persistAndApply(r.Context(), buildID, entry, events)
+	entry.mu.Unlock()
+
+	if persistErr != nil {
 		writeAPIError(w, persistErr)
 		return
 	}
@@ -588,7 +616,7 @@ func (h *Handler) handleListTests(w http.ResponseWriter, r *http.Request, buildI
 	writeJSON(w, http.StatusOK, ListTestsResponse{Version: queue.ProtocolVersion, ListTestsResponse: resp})
 }
 
-func (h *Handler) handleListBuilds(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 	now := h.clock()
 
 	h.mu.Lock()
@@ -605,6 +633,16 @@ func (h *Handler) handleListBuilds(w http.ResponseWriter, _ *http.Request) {
 		if !e.state.Initialized || e.broken {
 			e.mu.Unlock()
 			continue
+		}
+		if e.state.Verdict() == queue.VerdictRunning && now >= e.state.DeadlineMS {
+			events, _, err := queue.DecideStatus(e.state, now)
+			if err == nil && len(events) > 0 {
+				_ = h.persistAndApply(r.Context(), e.state.BuildID, e, events)
+			}
+			if e.broken {
+				e.mu.Unlock()
+				continue
+			}
 		}
 		v := e.state.Verdict()
 		if v != queue.VerdictRunning && e.state.FinishedAtMS > 0 && now-e.state.FinishedAtMS >= h.retentionMS {
@@ -655,12 +693,24 @@ func (h *Handler) persistAndApply(ctx context.Context, buildID string, entry *bu
 	if len(events) == 0 {
 		return nil
 	}
-	if err := h.log.Append(ctx, buildID, events); err != nil {
-		h.logger.Error("event append failed", "build_id", buildID, "events", len(events), "err", err)
+	// Detach from request cancellation so a client disconnect mid-write cannot
+	// leave an in-progress journal append half-written.
+	persistCtx := context.WithoutCancel(ctx)
+	if err := h.log.Append(persistCtx, buildID, events); err != nil {
+		if errors.Is(err, ErrAppendUnwritten) {
+			h.logger.Error("event append failed cleanly", "build_id", buildID, "events", len(events), "err", err)
+			return &APIError{
+				HTTPStatus: http.StatusServiceUnavailable,
+				Code:       ErrCodeStorageError,
+				Message:    "failed to persist queue events",
+			}
+		}
+		entry.broken = true
+		h.logger.Error("event append failed with uncertain write state; marking build broken", "build_id", buildID, "events", len(events), "err", err)
 		return &APIError{
-			HTTPStatus: http.StatusServiceUnavailable,
-			Code:       ErrCodeStorageError,
-			Message:    "failed to persist queue events",
+			HTTPStatus: http.StatusInternalServerError,
+			Code:       ErrCodeInternalError,
+			Message:    "build state is inconsistent after storage error",
 		}
 	}
 	for _, ev := range events {
@@ -712,12 +762,14 @@ func (h *Handler) lookupBuildLocked(buildID string) *buildEntry {
 }
 
 // getOrCreateBuildLocked returns the locked buildEntry for buildID, creating
-// one (with retention/capacity enforcement) if absent. Lock ordering is
-// strictly h.mu -> entry.mu only for newly created or TryLock-scanned entries,
-// so a slow Append on another build never blocks unrelated builds.
-func (h *Handler) getOrCreateBuildLocked(buildID string) (*buildEntry, bool, *APIError) {
-	now := h.clock()
+// one (with deadline finalization, retention, and capacity eviction under
+// pressure) if absent. Lock ordering is strictly h.mu -> entry.mu only for
+// newly created or TryLock-scanned entries, so a slow Append on another build
+// never blocks unrelated builds.
+func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*buildEntry, bool, *APIError) {
+	finalizedDeadline := false
 	for {
+		now := h.clock()
 		h.mu.Lock()
 		if existing, ok := h.builds[buildID]; ok {
 			h.mu.Unlock()
@@ -738,23 +790,51 @@ func (h *Handler) getOrCreateBuildLocked(buildID string) (*buildEntry, bool, *AP
 			return existing, false, nil
 		}
 
-		// Evict expired finished builds and count running builds using TryLock so
-		// a build blocked inside a slow Append never stalls other builds' init.
 		type finCandidate struct {
 			id         string
 			finishedAt int64
 			createdAt  int64
 		}
+		type idleCandidate struct {
+			id             string
+			lastActivityMS int64
+		}
+		type deadlineCandidate struct {
+			id    string
+			entry *buildEntry
+		}
+
 		running := 0
+		var brokenIDs []string
 		var finished []finCandidate
+		var idleRunning []idleCandidate
+		var pastDeadline []deadlineCandidate
+
 		for id, e := range h.builds {
 			if !e.mu.TryLock() {
 				// Conservatively count busy builds as running so we never exceed MaxRunning.
 				running++
 				continue
 			}
-			if !e.state.Initialized || e.state.Verdict() == queue.VerdictRunning {
+			if e.broken {
+				brokenIDs = append(brokenIDs, id)
+				e.mu.Unlock()
+				continue
+			}
+			if !e.state.Initialized {
 				running++
+				e.mu.Unlock()
+				continue
+			}
+			if e.state.Verdict() == queue.VerdictRunning {
+				if now >= e.state.DeadlineMS {
+					pastDeadline = append(pastDeadline, deadlineCandidate{id: id, entry: e})
+				} else {
+					running++
+					if now-e.lastActivityMS > 2*e.state.Config.LeaseTTLMS {
+						idleRunning = append(idleRunning, idleCandidate{id: id, lastActivityMS: e.lastActivityMS})
+					}
+				}
 				e.mu.Unlock()
 				continue
 			}
@@ -768,6 +848,37 @@ func (h *Handler) getOrCreateBuildLocked(buildID string) (*buildEntry, bool, *AP
 			finished = append(finished, finCandidate{id: id, finishedAt: fin, createdAt: created})
 		}
 
+		// Finalize deadline-expired builds through the EventLog outside h.mu.
+		if len(pastDeadline) > 0 && !finalizedDeadline {
+			finalizedDeadline = true
+			h.mu.Unlock()
+			for _, dc := range pastDeadline {
+				dc.entry.mu.Lock()
+				if !dc.entry.broken && dc.entry.state.Initialized && dc.entry.state.Verdict() == queue.VerdictRunning && now >= dc.entry.state.DeadlineMS {
+					events, _, err := queue.DecideStatus(dc.entry.state, now)
+					if err == nil && len(events) > 0 {
+						_ = h.persistAndApply(ctx, dc.id, dc.entry, events)
+					}
+				}
+				dc.entry.mu.Unlock()
+			}
+			continue
+		}
+		// Any still-unfinalized past-deadline builds (for example if Append failed cleanly)
+		// count conservatively toward running so we don't spin.
+		running += len(pastDeadline)
+
+		// Under running-capacity pressure, evict idle abandoned running builds
+		// (no activity for > 2 * lease_ttl_ms), longest idle first.
+		slices.SortFunc(idleRunning, func(a, b idleCandidate) int {
+			return cmp.Or(cmp.Compare(a.lastActivityMS, b.lastActivityMS), cmp.Compare(a.id, b.id))
+		})
+		evictedIdle := 0
+		for running >= h.maxRunning && evictedIdle < len(idleRunning) {
+			delete(h.builds, idleRunning[evictedIdle].id)
+			running--
+			evictedIdle++
+		}
 		if running >= h.maxRunning {
 			h.mu.Unlock()
 			return nil, false, &APIError{
@@ -777,33 +888,37 @@ func (h *Handler) getOrCreateBuildLocked(buildID string) (*buildEntry, bool, *AP
 			}
 		}
 
+		// Under total-build pressure, evict broken builds, then oldest finished
+		// builds, then remaining idle abandoned running builds.
 		if len(h.builds) >= h.maxBuilds {
-			if len(finished) == 0 {
-				h.mu.Unlock()
-				return nil, false, &APIError{
-					HTTPStatus: http.StatusServiceUnavailable,
-					Code:       ErrCodeAtCapacity,
-					Message:    fmt.Sprintf("server at build capacity (%d)", h.maxBuilds),
-				}
+			slices.Sort(brokenIDs)
+			for i := 0; len(h.builds) >= h.maxBuilds && i < len(brokenIDs); i++ {
+				delete(h.builds, brokenIDs[i])
 			}
+		}
+		if len(h.builds) >= h.maxBuilds {
 			slices.SortFunc(finished, func(a, b finCandidate) int {
 				return cmp.Or(cmp.Compare(a.finishedAt, b.finishedAt), cmp.Compare(a.createdAt, b.createdAt), cmp.Compare(a.id, b.id))
 			})
-			evict := len(h.builds) - h.maxBuilds + 1
-			for i := 0; i < evict && i < len(finished); i++ {
+			for i := 0; len(h.builds) >= h.maxBuilds && i < len(finished); i++ {
 				delete(h.builds, finished[i].id)
 			}
-			if len(h.builds) >= h.maxBuilds {
-				h.mu.Unlock()
-				return nil, false, &APIError{
-					HTTPStatus: http.StatusServiceUnavailable,
-					Code:       ErrCodeAtCapacity,
-					Message:    fmt.Sprintf("server at build capacity (%d)", h.maxBuilds),
-				}
+		}
+		if len(h.builds) >= h.maxBuilds {
+			for ; len(h.builds) >= h.maxBuilds && evictedIdle < len(idleRunning); evictedIdle++ {
+				delete(h.builds, idleRunning[evictedIdle].id)
+			}
+		}
+		if len(h.builds) >= h.maxBuilds {
+			h.mu.Unlock()
+			return nil, false, &APIError{
+				HTTPStatus: http.StatusServiceUnavailable,
+				Code:       ErrCodeAtCapacity,
+				Message:    fmt.Sprintf("server at build capacity (%d)", h.maxBuilds),
 			}
 		}
 
-		entry := &buildEntry{state: queue.NewState(h.limits)}
+		entry := &buildEntry{state: queue.NewState(h.limits), lastActivityMS: now}
 		entry.mu.Lock()
 		h.builds[buildID] = entry
 		h.mu.Unlock()
