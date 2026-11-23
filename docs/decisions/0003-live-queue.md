@@ -38,14 +38,16 @@ A lease is a first-class record (`lease_id` monotonic per build, `runner_id`, op
 - Attempt IDs are deterministic: `<test_index>.<generation>`.
 - `heartbeat` and `report` identify a `lease_id`. Reports are all-or-nothing: a report must name every attempt in its lease exactly once, or the server rejects it with `400`.
 - Each runner process generates a random 16-byte hex `runner_id`; `--index` is optional display metadata so a restarted CI job does not collide with a partitioned predecessor.
-- The server remembers only the most recent `(request_id, lease_id)` per `runner_id` (and never remembers `wait` or `done`). Repeating `request_id` while its lease is still active extends and returns that lease; repeating it after expiry or completion returns `409 stale_request`.
+- The server remembers only the most recent `(request_id, lease_id)` per `runner_id` (and never remembers `wait` or `done`). Repeating `request_id` while its lease is still active extends and returns that lease; repeating it after expiry or completion returns `409 stale_request`. A runner holding an active lease that calls `lease` with a fresh `request_id` receives `409 lease_held`, guaranteeing at most one active lease per runner.
 - Lazy expiry scans only active leases (ascending `lease_id`, attempts in ascending `test_index`), never the full test list.
 
-### Init conflicts and verdict precedence
+### Init conflicts, bounded events, and verdict precedence
 
-The first `init` fixes the canonical test list, predictions, and config. Later `init` calls check a SHA-256 digest of the test list and config (excluding predictions, so runners with different timing caches agree). A mismatch while the build is `running` returns `409` and persists a `conflicted` event (keeping the first 8 conflict records plus a counter). A mismatch after the build has finished returns `409` without mutating the finished build.
+The first `init` fixes the canonical test list, predictions, and config. Later `init` calls check a SHA-256 digest of the test list and config (excluding predictions, so runners with different timing caches agree). A mismatch returns `409` and persists a `conflicted` event in **any** build state (including after the build finished, so a late runner with a different test list still invalidates a `passed` verdict) unless an identical conflict is already stored or the 8-conflict list is full.
 
-Verdict precedence: `running` while any test is `pending` or `leased`; else `failed` if any test failed; else `unresolved` if any test is `unresolved` or the build recorded an `init` conflict; else `passed`.
+To keep the event log strictly bounded under hostile repeats, identical stale/conflict reports and identical `init` conflicts emit no events, and once an 8-entry list is filled its boolean `truncated` flag is set and further entries emit nothing. `reported` events omit `duplicate` results, and `Apply` validates every event completely before mutating state so a damaged journal fails loudly.
+
+Verdict precedence: `running` while any test is `pending` or `leased`; else `failed` if any test failed; else `unresolved` if any test is `unresolved` or the build recorded an `init` conflict; else `passed`. A finished verdict may change in only one way: `passed -> unresolved` when a late `init` conflict arrives; never upward and never otherwise.
 
 ### Guided self-scheduling batching
 

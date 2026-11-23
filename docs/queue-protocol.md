@@ -72,8 +72,8 @@ Trust boundary:
 | `max_attempts` | `1` to `10` (default `3`) |
 | `max_batch` | `1` to `200` (default `200`) |
 | Request body size | `4 MiB` for `POST .../init`; `1 MiB` for all other `POST` endpoints |
-| Stored `init` conflicts per build | First `8` conflict details kept; further conflicts only increment `conflict_count` |
-| Stored stale/conflict attempt records per test | First `8` records kept; further ones only increment `dropped_history` |
+| Stored `init` conflicts per build | Up to `8` unique `(runner_id, got_digest)` conflicts kept; filling entry 8 sets `conflicts_truncated: true`, and duplicates or further conflicts emit no events |
+| Stored stale/conflict attempt records per test | Up to `8` unique records kept; filling entry 8 sets `history_truncated: true`, and duplicates or further records emit no events |
 | Retained builds (Go server) | Max `200` builds total, max `64` `running` (`503 at_capacity` when full), deleted `7 days` after finishing (oldest finished evicted first if over 200) |
 | Retained builds (Cloudflare) | `BuildIndex` lists at most `200` recent builds; each `BuildDO` calls `deleteAll()` `7 days` after finishing |
 | `GET /builds/{build}` summary caps | Up to `256` runner summaries, `20` slowest timed tests, `50` problem tests (`failed` then `unresolved`) |
@@ -126,7 +126,7 @@ Each test `i` (`0 <= i < len(tests)`) has:
 - `effective_ms`: predicted duration from `init` (`predictions_ms[i]` if non-null, else the integer half-up median of all non-null `predictions_ms`, or `0` if none are non-null).
 - `active_lease_id`: `0` unless `state == leased`.
 - `attempts`: up to `max_attempts` records (one per generation `1..generation`), recording `lease_id`, `runner_id`, `leased_at_ms`, `status` (`leased` | `expired` | `passed` | `failed` | `skipped` | `error`), `timed`, `duration_ms`, `finished_at_ms`.
-- `history`: up to `8` extra records (`stale` or `conflict`) plus `dropped_history` counter.
+- `history`: up to `8` unique extra records (`stale` or `conflict`) plus `history_truncated` (`bool`, set when the 8th record is stored).
 
 Terminal test states: `passed`, `failed`, `skipped`, `unresolved`. Once a test reaches a terminal state, its state and accepted result never change.
 
@@ -136,10 +136,10 @@ A build's verdict is derived from its state:
 
 1. If any test is `pending` or `leased`: `running`.
 2. Else if any test is `failed`: `failed`.
-3. Else if any test is `unresolved` or `conflict_count > 0`: `unresolved`.
+3. Else if any test is `unresolved` or `len(conflicts) > 0`: `unresolved`.
 4. Else: `passed`.
 
-Once a build leaves `running`, its verdict never changes, and `finished_at_ms` is fixed to the `at_ms` of the event that completed the last remaining test (or finalized the build).
+`finished_at_ms` is fixed to the `at_ms` of the event that completed the last remaining test (or finalized the build). A finished verdict may change in **exactly one way**: `passed -> unresolved` if a conflicting `init` arrives after the build passed. Never upward, and never otherwise.
 
 ### 5.4 Lazy expiry and finalization
 
@@ -200,16 +200,16 @@ A `Report` names `lease_id`, `runner_id`, and `results[]`.
 2. **Run lazy expiry at `now`** (see 5.4).
 3. **Evaluate each result in the lease's attempt order (ascending `test_index`):**
    1. If attempt `(test_index, generation)` already has a recorded outcome (`passed`, `failed`, `skipped`, or `error`—not `leased` or `expired`):
-      - If `(outcome, timed, duration_ms)` matches the recorded attempt -> `duplicate` (no change).
-      - Else -> `conflict` (appended to bounded test history if `< 8`, else increments `dropped_history`; no change to test state or accepted outcome).
+      - If `(outcome, timed, duration_ms)` matches the recorded attempt -> `duplicate` (no change, never persisted in a `reported` event).
+      - Else -> `conflict` (persisted only if `len(history) < 8` and no identical `(generation, lease_id, runner_id, outcome, timed, duration_ms, disposition)` record is already stored; filling the 8th slot sets `history_truncated: true`; no change to test state or accepted outcome).
    2. Else if `generation == test.generation` and `test.state == leased` and `test.active_lease_id == lease_id` (and lease is still active after lazy expiry):
       - `accepted`. Records `(outcome, timed, duration_ms, at_ms)` on the attempt.
       - If `outcome` is `passed`, `failed`, or `skipped`: transitions test to that terminal state and clears `active_lease_id`.
       - If `outcome == error`: clears `active_lease_id`; if `generation >= config.max_attempts`, transitions test to `unresolved`, else returns test to `pending`.
    3. Else (older generation, or this attempt already expired):
-      - `stale` (appended to bounded test history if `< 8`, else increments `dropped_history`; never terminal, no change to test state).
+      - `stale` (persisted only if `len(history) < 8` and no identical record is already stored; filling the 8th slot sets `history_truncated: true`; never terminal, no change to test state).
 4. If the lease was active and all its attempts were `accepted`, mark the lease `reported`.
-5. If at least one result had disposition `accepted`, `stale`, or `conflict`, emit one `reported` event carrying all evaluated results (and closing the lease if `accepted`). If every result was `duplicate`, emit zero events.
+5. Emit one `reported` event containing **only** the results that actually change state or append a new `stale`/`conflict` history entry (`duplicate`, deduplicated, and post-truncation records are omitted from the event, though every lease attempt still appears in the HTTP response). If no results qualify, emit zero events.
 
 ### 5.7 Persisted event schema
 
@@ -220,9 +220,14 @@ Every event has `seq` (1-based monotonic per build, assigned by storage/log), `t
 | `initialized` | `build_id`, `digest`, `config` (`machines`, `lease_ttl_ms`, `build_timeout_ms`, `max_attempts`, `max_batch`), `deadline_ms`, `tests[]`, `predictions_ms[]` (each `int64 \| null`) |
 | `conflicted` | `runner_id`, `machine_index`, `got_digest`, `reason` |
 | `leased` | `lease_id`, `runner_id`, `machine_index`, `request_id`, `deadline_ms`, `attempts[]` (`{test_index, generation}`) |
-| `reported` | `lease_id`, `runner_id`, `close_lease` (`bool`), `results[]` (`{test_index, generation, outcome, timed, duration_ms, disposition}`) |
+| `reported` | `lease_id`, `runner_id`, `close_lease` (`bool`), `results[]` (`{test_index, generation, outcome, timed, duration_ms, disposition}` — `duplicate` results are never stored) |
 | `expired` | `lease_id` |
 | `finalized` | `reason` (`"deadline"`) |
+
+`Apply` rules:
+
+- `Apply` must validate every precondition of an event before mutating any state, and reject events that do not fit the current state (wrong or unknown `lease_id`, `runner_id` mismatch, unknown or mismatched attempt, `accepted` on a non-leased test, `duplicate` in a `reported` event, `leased` for a runner that already holds an active lease, `at_ms < last_seen_ms`, or appending past the 8-item cap). A damaged journal must fail loudly rather than apply an event partly.
+- Because `duplicate` reports, identical stale/conflict records, identical `init` conflicts, and entries past the 8-item caps emit zero events, the total number of persisted events for any build is strictly bounded by `10 + len(tests) * (3 * max_attempts + 8)` regardless of hostile retries.
 
 ## 6. HTTP endpoints
 
@@ -263,7 +268,7 @@ Responses:
     "deadline_ms": 1700021600000
   }
   ```
-- `409 Conflict` (`init_conflict`): test list or config digest differs from the build's stored digest. Message names the difference (config mismatch or test count / first differing test). When the build is `running`, persists a `conflicted` event.
+- `409 Conflict` (`init_conflict`): test list or config digest differs from the build's stored digest. Message names the difference (config mismatch or test count / first differing test). Persists a `conflicted` event in any build state (including finished builds, flipping `passed -> unresolved`) unless an identical `(runner_id, got_digest)` conflict is already stored or `conflicts_truncated` is already `true`.
 - `400 Bad Request`: invalid build ID, non-canonical/unsorted/duplicate tests, invalid config or predictions length, unsupported version.
 - `413 Payload Too Large`: body > `4 MiB`.
 - `503 Service Unavailable` (`at_capacity` or `storage_error`).
@@ -318,6 +323,7 @@ Error responses:
 
 - `404 Not Found` (`build_not_found`): build not initialized.
 - `409 Conflict` (`stale_request`): `request_id` matches the runner's last remembered lease, which is no longer active.
+- `409 Conflict` (`lease_held`): `runner_id` already holds an active lease and sent a different `request_id`. Message names the held `lease_id`.
 - `429 Too Many Requests` (`too_many_runners`): `runner_id` is new and build already has `1,024` distinct runners.
 
 ### `POST /api/v1/builds/{build}/heartbeat`
@@ -421,7 +427,7 @@ Response (`200 OK`):
     "skipped": 0,
     "unresolved": 0
   },
-  "conflict_count": 0,
+  "conflicts_truncated": false,
   "conflicts": [],
   "runner_count": 1,
   "runners": [
@@ -453,7 +459,7 @@ Query parameters:
 - `cursor`: non-negative integer `test_index` to start from (default `0`).
 - `limit`: `1..1000` (default `200`).
 - `state`: optional comma-separated filter (`pending`, `leased`, `passed`, `failed`, `skipped`, `unresolved`).
-- `retried`: optional `true` to return only tests with `generation > 1` or non-empty `history` / `dropped_history > 0`.
+- `retried`: optional `true` to return only tests with `generation > 1` or non-empty `history` / `history_truncated == true`.
 
 Response (`200 OK`):
 
@@ -485,7 +491,7 @@ Response (`200 OK`):
         }
       ],
       "history": [],
-      "dropped_history": 0
+      "history_truncated": false
     }
   ],
   "next_cursor": null
@@ -510,7 +516,7 @@ Returns up to `200` most recent builds ordered by `created_at_ms` desc, then `bu
       "test_count": 2,
       "failed_count": 0,
       "unresolved_count": 0,
-      "conflict_count": 0
+      "has_conflicts": false
     }
   ]
 }
@@ -551,5 +557,5 @@ Additional client rules:
 
 1. Removes any leftover `report-0.json` in `--dir` first. Fails if any other `report-<N>.json` (`N >= 1`) exists in `--dir`.
 2. Fetches `GET /api/v1/builds/{build}`, prints the verdict, counts, failed/unresolved tests, and any `init` conflicts to stderr.
-3. If the build is finished with zero unresolved tests and zero `init` conflicts (`verdict` is `passed` or `failed` with `unresolved == 0 && conflict_count == 0`), paginates `GET /api/v1/builds/{build}/tests` (`limit=1000`) and writes `report-0.json` (`index: 0`, `machines: 1`): timed `passed` files keep their `duration_ms`; `failed`, `skipped`, and untimed `passed` files are written as `{timed: false, ms: 0}` so `bunpo merge` keeps them seen without distorting timings.
+3. If the build is finished with zero unresolved tests and zero `init` conflicts (`verdict` is `passed` or `failed` with `unresolved == 0 && len(conflicts) == 0`), paginates `GET /api/v1/builds/{build}/tests` (`limit=1000`) and writes `report-0.json` (`index: 0`, `machines: 1`): timed `passed` files keep their `duration_ms`; `failed`, `skipped`, and untimed `passed` files are written as `{timed: false, ms: 0}` so `bunpo merge` keeps them seen without distorting timings.
 4. Exits `0` if `verdict == passed`, `1` otherwise, `2` on usage or input error.
