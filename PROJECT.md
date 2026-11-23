@@ -314,6 +314,7 @@ Starting guesses. Revise them from the first real users.
 | Resource | Starting value | Why |
 | --- | --- | --- |
 | Tests in one split | 200,000 | Far above a large monorepo's file count. |
+| Test files in one queue build | 20,000 | Keeps a build small enough for one Cloudflare object. Not yet measured there; correct it once it is. Static splitting keeps 200,000. |
 | Machines | 256 | More than any matrix I expect; bounds the manifest set. |
 | One JUnit report / all reports | 64 MiB / 1 GiB | Real reports are a few megabytes. |
 | JUnit nesting / test cases per report | 32 levels / 2,000,000 | Real reports nest four levels. |
