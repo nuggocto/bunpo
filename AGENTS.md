@@ -65,6 +65,13 @@
   An independent reference oracle, such as the brute-force optimal solver
   in PROJECT.md, is not duplication.
 
+## Deterministic Simulation Testing (DST)
+
+- Prefer pure, deterministic core logic.
+- Abstract all I/O, time, network, randomness, and scheduling behind interfaces.
+- Make the real code runnable inside a seeded simulator.
+- Design so any bug found with a seed can be perfectly replayed.
+
 ## Project workflow
 
 - Toolchain: Go 1.27, pinned by the `toolchain` directive in `go.mod`.
