@@ -619,16 +619,26 @@ func (h *Handler) handleListTests(w http.ResponseWriter, r *http.Request, buildI
 func (h *Handler) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 	now := h.clock()
 
+	type namedEntry struct {
+		id    string
+		entry *buildEntry
+	}
 	h.mu.Lock()
-	entries := make([]*buildEntry, 0, len(h.builds))
-	for _, e := range h.builds {
-		entries = append(entries, e)
+	entries := make([]namedEntry, 0, len(h.builds))
+	for id, e := range h.builds {
+		entries = append(entries, namedEntry{id: id, entry: e})
 	}
 	h.mu.Unlock()
+	// Sort by build ID before touching EventLog so deadline finalization order
+	// is independent of Go's randomized map iteration.
+	slices.SortFunc(entries, func(a, b namedEntry) int {
+		return cmp.Compare(a.id, b.id)
+	})
 
 	var expiredIDs []string
 	summaries := make([]BuildSummary, 0, len(entries))
-	for _, e := range entries {
+	for _, ne := range entries {
+		e := ne.entry
 		e.mu.Lock()
 		if !e.state.Initialized || e.broken {
 			e.mu.Unlock()
@@ -848,10 +858,14 @@ func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*
 			finished = append(finished, finCandidate{id: id, finishedAt: fin, createdAt: created})
 		}
 
-		// Finalize deadline-expired builds through the EventLog outside h.mu.
+		// Finalize deadline-expired builds through the EventLog outside h.mu in
+		// deterministic build-ID order.
 		if len(pastDeadline) > 0 && !finalizedDeadline {
 			finalizedDeadline = true
 			h.mu.Unlock()
+			slices.SortFunc(pastDeadline, func(a, b deadlineCandidate) int {
+				return cmp.Compare(a.id, b.id)
+			})
 			for _, dc := range pastDeadline {
 				dc.entry.mu.Lock()
 				if !dc.entry.broken && dc.entry.state.Initialized && dc.entry.state.Verdict() == queue.VerdictRunning && now >= dc.entry.state.DeadlineMS {
