@@ -2,6 +2,8 @@
 
 Protocol version: `1`.
 
+Implementation status: the Go state machine (`internal/queue`), HTTP handler and client (`internal/queueapi`), in-memory standalone server (`cmd/bunpo-server`), and `bunpo --queue` worker and `--status` commands are implemented. Persistent disk journaling for `bunpo-server`, the Cloudflare Worker (`BuildDO` and `BuildIndex`), and the dashboard are specified here but not yet built.
+
 This document specifies the HTTP JSON protocol, the pure queue state machine, the event log, and the client rules for Bunpō's live queue. An independent server or client implementation should be able to interoperate from this document alone.
 
 ## 1. Conventions and wire format
@@ -40,7 +42,7 @@ Two distinct bearer tokens are configured from the environment only, never CLI f
 
 Server requirements:
 
-- Both tokens must be configured, non-empty, at least 16 bytes long, and not equal. The standalone Go server refuses to start if this fails. The Cloudflare Worker fails closed with `503 server_misconfigured` on every `/api/v1/...` request.
+- Both tokens must be configured, non-empty, at least 16 bytes long, and not equal. The standalone Go server refuses to start if this fails. The planned Cloudflare Worker will fail closed with `503 server_misconfigured` on every `/api/v1/...` request.
 - Clients send `Authorization: Bearer <token>`.
 - Servers compare the SHA-256 digest of the presented token against the SHA-256 digest of the configured token(s) in constant time.
 - Missing or malformed `Authorization` header returns `401 unauthorized`. A valid read token presented to a `POST` endpoint returns `403 forbidden`.
@@ -52,7 +54,7 @@ Trust boundary:
 - Pull requests from forks do not have repository secrets and must use static mode (`bunpo split` / `verify`).
 - The client strips `BUNPO_QUEUE_TOKEN` and `BUNPO_QUEUE_READ_TOKEN` from the test command's environment so untrusted test code cannot trivially call the queue API directly. On some operating systems a same-user child process can still inspect another process's environment, so stripping is a reduction in exposure rather than a hard security boundary.
 - The client refuses plain `http://` URLs except loopback (`localhost`, `127.0.0.1`, `[::1]`) unless `--allow-insecure-http` is passed (which prints a warning to stderr). The client never follows HTTP redirects, bounds every response body, and never prints tokens.
-- The dashboard uses no cookies; it stores the read token in `sessionStorage`, sends it in the `Authorization` header, renders all server data with `textContent`, and serves a strict Content-Security-Policy.
+- The planned dashboard will use no cookies; it will store the read token in `sessionStorage`, send it in the `Authorization` header, render all server data with `textContent`, and serve a strict Content-Security-Policy.
 
 ### When to use the live queue vs. static splitting
 
@@ -87,8 +89,8 @@ Use static splitting (`bunpo split` / `verify`) when machines are identical and 
 | Request body size | `4 MiB` for `POST .../init`; `1 MiB` for all other `POST` endpoints |
 | Stored `init` conflicts per build | Up to `8` unique `(runner_id, got_digest)` conflicts kept; filling entry 8 sets `conflicts_truncated: true`, and duplicates or further conflicts emit no events |
 | Stored stale/conflict attempt records per test | Up to `8` unique records kept; filling entry 8 sets `history_truncated: true`, and duplicates or further records emit no events |
-| Retained builds (Go server) | Max `200` builds total, max `64` `running` (`503 at_capacity` when full), deleted `7 days` after finishing. Capacity scans and `GET /api/v1/builds` finalize builds past their `deadline_ms` through the event log; under capacity pressure, broken builds, oldest finished builds, and running builds idle for `> 2 * lease_ttl_ms` (longest idle first) are evicted (returning `404` so no runner can pass). |
-| Retained builds (Cloudflare) | `BuildIndex` lists at most `200` recent builds; each `BuildDO` calls `deleteAll()` `7 days` after finishing |
+| Retained builds (Go server) | Max `200` builds total, max `64` `running` (`503 at_capacity` when full), deleted `7 days` after finishing. Capacity scans and `GET /api/v1/builds` finalize builds past their `deadline_ms` through the event log; under capacity pressure, broken builds, oldest finished builds, and running builds idle for `> 2 * lease_ttl_ms` (longest idle first) are evicted (returning `404` so no runner can pass). Today `bunpo-server` holds builds in memory only: a server restart loses running builds, runners then get `404` and exit `1`, and nothing can pass across a restart. |
+| Retained builds (Cloudflare, planned) | `BuildIndex` will list at most `200` recent builds; each `BuildDO` will call `deleteAll()` `7 days` after finishing |
 | `GET /builds/{build}` summary caps | Up to `256` runner summaries, `20` slowest timed tests, `50` problem tests (`failed` then `unresolved`) |
 | `GET /builds/{build}/tests` page size | Default `200`, max `1,000` |
 

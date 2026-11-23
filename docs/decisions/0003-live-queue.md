@@ -2,13 +2,15 @@
 
 Date: 2026-11-23. Status: accepted.
 
+Implementation status: the pure state machine (`internal/queue`), HTTP wire protocol and client (`internal/queueapi`), in-memory standalone server (`cmd/bunpo-server`), and `bunpo --queue` worker and `--status` commands are implemented. Persistent disk journaling for `bunpo-server`, the Cloudflare Worker (`BuildDO` and `BuildIndex`), and the dashboard are decided here and specified in `docs/queue-protocol.md`, but not yet built.
+
 ## Context
 
 Static splitting works well when CI machines are identical, start together, and run to completion. Mixed-speed runners (such as x64 alongside ARM64), queued runners that start late, and killed runners leave static shards unbalanced or incomplete.
 
 The live queue hands out batches of tests as runners ask for work, reassigns tests when a runner dies or loses a completion report, and enforces strict correctness: every logical test gets at most one accepted terminal result under the current lease, duplicate submissions are idempotent, stale results stay visible in attempt history, and bounded retry exhaustion leaves the build unresolved rather than passing.
 
-Two servers speak the same HTTP JSON protocol: a Cloudflare Worker with one SQLite-backed Durable Object per build (zero-ops, scales to zero between CI runs) and a standalone Go binary (`bunpo-server`) for teams not on Cloudflare. Both serve the same static dashboard bundle.
+Two servers will speak the same HTTP JSON protocol: a standalone Go binary (`bunpo-server`, implemented in memory today) for teams not on Cloudflare, and a planned Cloudflare Worker with one SQLite-backed Durable Object per build (zero-ops, scales to zero between CI runs). Both are designed to serve the same static dashboard bundle.
 
 ## Decision
 
@@ -67,19 +69,19 @@ Each lease takes tests in deal order until the batch holds at least `ceil(remain
 
 On Unix, the client runs the test command in its own process group and signals the group (`SIGTERM`, then `SIGKILL` after 5 s) on `SIGINT`/`SIGTERM` or when a heartbeat reports the lease is lost.
 
-### Cloudflare Worker topology
+### Cloudflare Worker topology (not yet built)
 
-One SQLite-backed Durable Object (`BuildDO`) owns each build, storing the immutable test catalog in chunked rows and appending one row per event. Each `BuildDO` uses two lifecycle alarms: one at `build_deadline` to finalize abandoned builds, and once terminal, one at `+7 days` to call `ctx.storage.deleteAll()`. A separate `BuildIndex` Durable Object holds up to 200 recent build summaries and receives at most two RPCs per build (on `init` and when the build reaches a terminal verdict).
+One SQLite-backed Durable Object (`BuildDO`) will own each build, storing the immutable test catalog in chunked rows and appending one row per event. Each `BuildDO` will use two lifecycle alarms: one at `build_deadline` to finalize abandoned builds, and once terminal, one at `+7 days` to call `ctx.storage.deleteAll()`. A separate `BuildIndex` Durable Object will hold up to 200 recent build summaries and receive at most two RPCs per build (on `init` and when the build reaches a terminal verdict).
 
-The Worker implements the same pure state machine in TypeScript and runs the same shared JSON test vectors (`internal/queue/testdata/vectors/*.json`) and black-box HTTP protocol test suite as `cmd/bunpo-server`.
+The Worker will implement the same pure state machine in TypeScript and run the same shared JSON test vectors (`internal/queue/testdata/vectors/*.json`) and black-box HTTP protocol test suite as `cmd/bunpo-server`.
 
 ## Consequences
 
-- A 20,000-test build writes roughly 1,000–2,000 SQLite rows instead of ~120,000, and healthy heartbeats write zero rows.
-- Restarting `bunpo-server` or evicting a Durable Object cannot change past decisions or accept a stale result, at the cost of delaying expiry of in-flight leases by up to one TTL.
-- Both Go and TypeScript maintain a copy of the small state machine; shared deterministic JSON vectors catch behavioral drift before deployment.
-- Runners using `--bail`, `-x`, or `--max-failures` are unsupported in queue mode (documented in the runner guides).
-- The standalone Go server caps retained builds (200 total, 64 running) and rejects plain `http://` outside loopback unless `--allow-insecure-http` is passed.
+- A 20,000-test build will write roughly 1,000–2,000 SQLite rows instead of ~120,000, and healthy heartbeats write zero rows.
+- Once persistent journaling (or Durable Object storage) is in place, restarting `bunpo-server` or evicting a Durable Object cannot change past decisions or accept a stale result, at the cost of delaying expiry of in-flight leases by up to one TTL. Today's in-memory `bunpo-server` loses running builds on restart, causing runners to receive `404` and exit `1` so nothing can pass.
+- Both Go and TypeScript will maintain a copy of the small state machine; shared deterministic JSON vectors catch behavioral drift before deployment.
+- Runners using `--bail`, `-x`, or `--max-failures` still fail the build safely (the failing file marks the build `failed`), though unrun files in that batch report as `error` (and may be retried) while clean siblings that finished before stopping report `passed` untimed.
+- The standalone Go server caps retained builds (200 total, 64 running) and the client rejects plain `http://` outside loopback unless `--allow-insecure-http` is passed.
 
 ## Alternatives considered
 

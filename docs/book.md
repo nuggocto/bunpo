@@ -334,6 +334,9 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   `BUNPO_QUEUE_READ_TOKEN` environment variables (each at least 16 bytes), logs
   structured JSON via `log/slog` without tokens, headers, or bodies, and shuts
   down cleanly on `SIGINT`/`SIGTERM`. Terminate TLS at your reverse proxy.
+  Today `bunpo-server` stores builds in memory only: a server restart loses
+  running builds, runners then get `404` and exit `1`, and nothing can pass
+  across a restart.
 - **`version`** (or **`-version`**, **`--version`**) prints the module version
   from the build information.
 
@@ -666,9 +669,9 @@ event applier and decision functions. `BenchmarkSplit` benchmarks the
 in-memory split of 50,000 tests across 256 machines well under the one-second
 budget (~31–80 ms depending on CPU, 403 allocations).
 
-`internal/queue` has table tests for every limit and error path, 18 shared JSON
+`internal/queue` has table tests for every limit and error path, shared JSON
 scenario vectors in `internal/queue/testdata/vectors/` (also meant to be run by
-the TypeScript Worker core), and a property test with an independent
+the future TypeScript Worker core), and a property test with an independent
 observation model checking at-most-one accepted terminal result per test,
 monotonic generations, at-most-one active lease per test and per runner,
 bounded event counts under hostile repeats, verdict transition rules (a
