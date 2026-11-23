@@ -1,0 +1,63 @@
+{
+  "name": "wait-no-predictions",
+  "description": "When no predictions exist (effective_ms == 0), expected_end equals leased_at so wait backs off as (now - latest) / 4 from 1000 ms.",
+  "min_lease_ttl_ms": 10000,
+  "steps": [
+    {
+      "now_ms": 1000,
+      "command": {
+        "type": "init",
+        "build_id": "build-wait-nopred",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "config": {"machines": 2, "lease_ttl_ms": 60000, "build_timeout_ms": 300000, "max_attempts": 3, "max_batch": 1},
+        "tests": ["tests/a.py"],
+        "predictions_ms": [null]
+      },
+      "expect_status": 200,
+      "expect_events": ["initialized"]
+    },
+    {
+      "now_ms": 1000,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a1"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {"status": "leased", "lease_id": 1, "deadline_ms": 61000}
+    },
+    {
+      "now_ms": 2000,
+      "command": {"type": "lease", "runner_id": "runner-b", "machine_index": 1, "request_id": "b1"},
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {"status": "wait", "retry_after_ms": 1000}
+    },
+    {
+      "now_ms": 17000,
+      "command": {"type": "lease", "runner_id": "runner-b", "machine_index": 1, "request_id": "b2"},
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {"status": "wait", "retry_after_ms": 4000}
+    },
+    {
+      "now_ms": 20000,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-a",
+        "lease_id": 1,
+        "results": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "outcome": "passed", "timed": true, "duration_ms": 19000}]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"],
+      "expect_response": {"verdict": "passed"}
+    }
+  ],
+  "expect_final": {
+    "verdict": "passed",
+    "counts": {"total": 1, "pending": 0, "leased": 0, "passed": 1, "failed": 0, "skipped": 0, "unresolved": 0},
+    "conflicts_len": 0,
+    "conflicts_truncated": false,
+    "tests": [
+      {"test_index": 0, "state": "passed", "generation": 1, "timed": true, "duration_ms": 19000, "history_len": 0, "history_truncated": false}
+    ]
+  }
+}

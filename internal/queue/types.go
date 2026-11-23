@@ -47,7 +47,7 @@ const (
 	DefaultTestsPageLimit = 200
 	MaxTestsPageLimit     = 1_000
 
-	MinWaitMS int64 = 2_000
+	MinWaitMS int64 = 1_000
 	MaxWaitMS int64 = 15_000
 )
 

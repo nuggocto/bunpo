@@ -29,7 +29,7 @@
       "command": {"type": "lease", "runner_id": "runner-b", "machine_index": 1, "request_id": "b1"},
       "expect_status": 200,
       "expect_events": [],
-      "expect_response": {"status": "wait", "retry_after_ms": 2000}
+      "expect_response": {"status": "wait", "retry_after_ms": 1000}
     },
     {
       "now_ms": 5000,

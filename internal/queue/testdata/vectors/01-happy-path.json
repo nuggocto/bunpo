@@ -177,7 +177,7 @@
       "expect_events": [],
       "expect_response": {
         "status": "wait",
-        "retry_after_ms": 5000
+        "retry_after_ms": 1000
       }
     },
     {

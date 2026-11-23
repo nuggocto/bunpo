@@ -190,15 +190,25 @@ Batch selection on `Lease`:
   - If `remaining_ms == 0`: `target_count = (total_pending + denom - 1) / denom` (integer ceiling), clamped to `[1, config.max_batch]`. Take up to `target_count` tests from `pending_first` in deal order.
 - Sort the chosen batch's attempts in ascending `test_index` order in the `leased` event and response.
 
-When no tests are `pending` but at least one active lease exists, `Lease` returns `status: "wait"` with:
+When no tests are `pending` but at least one active lease exists, `Lease` returns `status: "wait"` with integer millisecond arithmetic:
 
 ```text
-earliest = min(lease.deadline_ms for active leases)
-max_wait = min(config.lease_ttl_ms / 2, 15_000)
-retry_after_ms = clamp(earliest - now, 2_000, max_wait)
+expected_end(lease) = lease.leased_at_ms + sum(tests[a.test_index].effective_ms for a in lease.attempts)
+latest              = max(expected_end(lease) for active leases)
+earliest_deadline   = min(lease.deadline_ms for active leases)
+
+if now < latest:
+    wait = latest - now
+else:
+    wait = (now - latest) / 4
+
+wait           = min(wait, earliest_deadline - now)
+max_wait       = max(1, min(config.lease_ttl_ms / 2, 15_000))
+min_wait       = min(1_000, max_wait)
+retry_after_ms = clamp(wait, min_wait, max_wait)
 ```
 
-(If `max_wait < 2_000` in tests with tiny TTLs, clamp to `[1, max_wait]`.)
+Before active leases reach their predicted end, idle machines sleep until `latest` (capped by `earliest_deadline` and `max_wait`) so builds with predictions finish within roughly 1-2 seconds of the last test instead of sleeping half a lease TTL. Once overdue—or when no predictions exist (`effective_ms == 0`, so `latest == max(leased_at_ms) <= now`)—the wait backs off as `(now - latest) / 4` up to `15_000 ms`, while still capping by `earliest_deadline - now` so idle runners wake promptly if a dead holder's lease expires. With this backoff, 255 idle machines waiting on one test that runs 10 minutes overdue send about 13,000 requests instead of 150,000. (With tiny TTLs in tests where `max_wait < 1_000`, `min_wait` collapses to `max_wait`.)
 
 ### 5.6 Result evaluation order (`Report`)
 

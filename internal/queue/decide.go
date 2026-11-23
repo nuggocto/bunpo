@@ -546,17 +546,25 @@ func selectBatch(s *State, ov *expiryOverlay) []int {
 }
 
 func computeWaitMS(s *State, ov *expiryOverlay, now int64) int64 {
-	var earliest int64
+	var earliestDeadline int64
+	var latestExpectedEnd int64
 	found := false
 	for _, id := range s.ActiveLeases {
 		if !ov.leaseActive(s, id) {
 			continue
 		}
-		d := s.Leases[id-1].DeadlineMS
-		if !found || d < earliest {
-			earliest = d
-			found = true
+		l := &s.Leases[id-1]
+		expectedEnd := l.LeasedAtMS
+		for _, a := range l.Attempts {
+			expectedEnd += s.Tests[a.TestIndex].EffectiveMS
 		}
+		if !found || l.DeadlineMS < earliestDeadline {
+			earliestDeadline = l.DeadlineMS
+		}
+		if !found || expectedEnd > latestExpectedEnd {
+			latestExpectedEnd = expectedEnd
+		}
+		found = true
 	}
 	maxWait := min(s.Config.LeaseTTLMS/2, MaxWaitMS)
 	if maxWait < 1 {
@@ -566,8 +574,16 @@ func computeWaitMS(s *State, ov *expiryOverlay, now int64) int64 {
 	if !found {
 		return minWait
 	}
-	rem := earliest - now
-	return max(minWait, min(rem, maxWait))
+	var wait int64
+	if now < latestExpectedEnd {
+		wait = latestExpectedEnd - now
+	} else {
+		// Overdue or no predictions (EffectiveMS == 0): back off linearly so
+		// idle machines do not hammer the server on a long overdue test.
+		wait = (now - latestExpectedEnd) / 4
+	}
+	wait = min(wait, earliestDeadline-now)
+	return max(minWait, min(wait, maxWait))
 }
 
 // DecideHeartbeat decides a heartbeat without mutating s.

@@ -601,3 +601,91 @@ func TestResendingIdenticalStaleAndConflictingReportsEmitsNothing(t *testing.T) 
 		t.Fatalf("history len after repeated conflict = %d; want 2", len(s.Tests[0].History))
 	}
 }
+
+func TestWaitRetryAfterEdgeCases(t *testing.T) {
+	t.Run("multi-attempt batch sums effective_ms and caps by earliest_deadline", func(t *testing.T) {
+		s := queue.NewState(queue.DefaultLimits())
+		cfg := queue.Config{Machines: 1, LeaseTTLMS: 60_000, BuildTimeoutMS: 300_000, MaxAttempts: 3, MaxBatch: 10}
+		evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
+			BuildID:       "b-sum",
+			RunnerID:      "r1",
+			Config:        cfg,
+			Tests:         []string{"a.py", "b.py", "c.py"},
+			PredictionsMS: []*int64{int64Ptr(3000), int64Ptr(3000), int64Ptr(3000)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustApply(t, s, evs)
+		// denom=2, remaining=9000, target=4500 -> lease 1 takes a.py+b.py (sum=6000, expected_end=7000).
+		evs, l1, err := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
+		if err != nil || len(l1.Attempts) != 2 {
+			t.Fatalf("lease 1 = %+v, err=%v", l1, err)
+		}
+		mustApply(t, s, evs)
+		// lease 2 takes c.py (3000ms) at now=1000 -> expected_end=4000.
+		evs, _, err = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r2", RequestID: "q2"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustApply(t, s, evs)
+		// At now=2000: latest = max(7000, 4000) = 7000 -> wait = 5000.
+		_, w, err := queue.DecideLease(s, 2000, queue.LeaseCommand{RunnerID: "r3", RequestID: "q3"})
+		if err != nil || w.Status != queue.LeaseWait || w.RetryAfterMS != 5000 {
+			t.Fatalf("wait = %+v, err=%v; want 5000", w, err)
+		}
+	})
+
+	t.Run("before expected end capped by earliest_deadline", func(t *testing.T) {
+		s := queue.NewState(queue.DefaultLimits())
+		cfg := queue.Config{Machines: 1, LeaseTTLMS: 60_000, BuildTimeoutMS: 300_000, MaxAttempts: 3, MaxBatch: 1}
+		evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
+			BuildID:       "b-cap",
+			RunnerID:      "r1",
+			Config:        cfg,
+			Tests:         []string{"slow.py"},
+			PredictionsMS: []*int64{int64Ptr(90_000)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustApply(t, s, evs)
+		evs, _, err = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustApply(t, s, evs)
+		// At now=57000: latest=91000 (34000 remaining), deadline=61000 (4000 remaining) -> wait=4000.
+		_, w, err := queue.DecideLease(s, 57_000, queue.LeaseCommand{RunnerID: "r2", RequestID: "q2"})
+		if err != nil || w.Status != queue.LeaseWait || w.RetryAfterMS != 4000 {
+			t.Fatalf("wait = %+v, err=%v; want 4000", w, err)
+		}
+	})
+
+	t.Run("tiny TTL clamp in tests", func(t *testing.T) {
+		lim := queue.DefaultLimits()
+		lim.MinLeaseTTLMS = 100
+		s := queue.NewState(lim)
+		cfg := queue.Config{Machines: 1, LeaseTTLMS: 300, BuildTimeoutMS: 30_000, MaxAttempts: 3, MaxBatch: 1}
+		evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
+			BuildID:       "b-tiny",
+			RunnerID:      "r1",
+			Config:        cfg,
+			Tests:         []string{"a.py"},
+			PredictionsMS: []*int64{int64Ptr(5000)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustApply(t, s, evs)
+		evs, _, err = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustApply(t, s, evs)
+		_, w, err := queue.DecideLease(s, 1050, queue.LeaseCommand{RunnerID: "r2", RequestID: "q2"})
+		if err != nil || w.Status != queue.LeaseWait || w.RetryAfterMS != 150 {
+			t.Fatalf("wait = %+v, err=%v; want 150", w, err)
+		}
+	})
+}
