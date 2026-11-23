@@ -12,6 +12,7 @@ import (
 )
 
 const usage = `usage: bunpo <command> [flags]
+       bunpo --queue URL --build ID [flags] < tests.txt -- command args...
 
 Commands:
   split    print this machine's share of the test files
@@ -19,9 +20,10 @@ Commands:
   record   turn this machine's test report into a run report
   merge    fold every machine's run report into timings.json
   verify   check that every test file was assigned exactly once
+  --queue  run tests from a live queue server (or query --status)
   version  print the version
 
-Run "bunpo <command> -h" for a command's flags.
+Run "bunpo <command> -h" or "bunpo --queue -h" for flags.
 
 Exit status: 0 on success, 1 when a check fails, 2 for bad usage or input.
 `
@@ -48,6 +50,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return 2
+	}
+
+	if queueURL, rest, ok := isQueueInvocation(args); ok {
+		err := cmdQueue(queueURL, rest, stdin, stdout, con, getenv)
+		return exitCode("queue", err, con)
 	}
 
 	name := args[0]

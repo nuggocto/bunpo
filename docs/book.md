@@ -212,32 +212,40 @@ explains the choice. `scripts/install.sh`:
 ## Architecture
 
 ```text
-action.yml          the GitHub Action: installs a release
-benchmark/          the benchmark program behind docs/benchmark.md
-guidecheck/         runs every guide's shell steps against the real runners
-scripts/            release build, Action installer, dogfooding
-cmd/bunpo/          the commands: flags, files, messages, exit codes
-internal/split/     canonical identifiers, dealing, plan, digest
-internal/timing/    timing file, median, merging, pruning
-internal/junit/     reading JUnit XML and the two-column format
-internal/manifest/  manifest, plan and run report files; the verify check
-internal/jsonfile/  the strict versioned-JSON reader every file uses
-internal/queue/     pure live-queue state machine (Decide/Apply) and shared vectors
+action.yml               the GitHub Action: installs a release
+benchmark/               the benchmark program behind docs/benchmark.md
+guidecheck/              runs every guide's shell steps against the real runners
+scripts/                 release build, Action installer, dogfooding
+cmd/bunpo/               the CLI: flags, files, messages, exit codes, --queue wrapper
+cmd/bunpo-server/        standalone live-queue HTTP server (in memory; TLS at reverse proxy)
+internal/split/          canonical identifiers, dealing, plan, digest
+internal/timing/         timing file, median, merging, pruning
+internal/junit/          reading JUnit XML and the two-column format
+internal/manifest/       manifest, plan and run report files; the verify check
+internal/jsonfile/       the strict versioned-JSON reader every file uses
+internal/queue/          pure live-queue state machine (Decide/Apply) and shared vectors
+internal/queueapi/       HTTP wire types, strict JSON handler, client, black-box protocol suite
+internal/queuerunner/    live-queue worker loop, process-group signaling, heartbeats, outcome mapping
 ```
 
-Only `cmd/bunpo` touches files, standard input and the operating system. The
-packages under `internal/` are plain computations on bytes and values, so
-every platform gets the same answer and the tests call them directly.
+Only `cmd/bunpo`, `cmd/bunpo-server`, `internal/queueapi` (HTTP), and
+`internal/queuerunner` (subprocess execution and batch files) touch I/O or the
+operating system. The core packages (`split`, `timing`, `junit`, `manifest`,
+`jsonfile`, `queue`) are plain computations on bytes and values, so every
+platform gets the same answer and the tests call them directly.
 
 Imports flow one way:
 
 ```text
-cmd/bunpo  ──▶ junit, manifest, split, timing
-manifest   ──▶ split, timing, jsonfile
-queue      ──▶ split, timing
-junit      ──▶ timing
-split      ──▶ timing
-timing     ──▶ jsonfile
+cmd/bunpo        ──▶ junit, manifest, queue, queueapi, queuerunner, split, timing
+cmd/bunpo-server ──▶ queue, queueapi
+queuerunner      ──▶ junit, manifest, queue, queueapi, timing
+queueapi         ──▶ queue
+manifest         ──▶ split, timing, jsonfile
+queue            ──▶ split, timing
+junit            ──▶ timing
+split            ──▶ timing
+timing           ──▶ jsonfile
 ```
 
 ## The commands
@@ -306,8 +314,37 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   `manifest-*.json`, and runs the verify check described below. On success it
   prints "assignment verified", and says that this covers what each machine
   was asked to run, not what ran.
+- **`--queue URL --build ID [--index N] --total M --report PATH... [flags] < tests.txt -- command args...`**
+  runs in live-queue worker mode. It reads `BUNPO_QUEUE_TOKEN` from the
+  environment (never flags), initializes or joins the build, leases batches
+  longest-first via guided self-scheduling, writes each batch to
+  `.bunpo/queue-<index>.txt` (set in `BUNPO_TESTS_FILE`), deletes old `--report`
+  files, runs the test command in its own Unix process group with queue tokens
+  stripped from its environment while sending heartbeats at `TTL / 3`, and
+  reports outcomes until the build finishes. Exits 0 only on `passed`, 1
+  otherwise, 2 on bad usage. Use `--allow-insecure-http` for plain `http://` on
+  private networks outside loopback.
+- **`--queue URL --build ID --status [--dir DIR]`** reads
+  `BUNPO_QUEUE_READ_TOKEN` (falling back to `BUNPO_QUEUE_TOKEN`), prints the
+  verdict, counts, failed/unresolved tests, and any `init` conflicts, and writes
+  `report-0.json` (`machines: 1`) when the build finished with zero unresolved
+  tests and zero conflicts so `bunpo merge` can update `timings.json`.
+- **`bunpo-server [--addr 127.0.0.1:8080]`** runs the standalone live-queue
+  HTTP server in memory. It requires distinct `BUNPO_QUEUE_TOKEN` and
+  `BUNPO_QUEUE_READ_TOKEN` environment variables (each at least 16 bytes), logs
+  structured JSON via `log/slog` without tokens, headers, or bodies, and shuts
+  down cleanly on `SIGINT`/`SIGTERM`. Terminate TLS at your reverse proxy.
 - **`version`** (or **`-version`**, **`--version`**) prints the module version
   from the build information.
+
+Batching adds test-runner startup overhead compared to static splitting. In
+4-machine simulations with 5 s startup per batch, static splitting finished in
+827 s vs 902 s for the live queue on equal machines starting together, while the
+live queue won on mixed speeds (1.8x/1x: 850 s vs 1,077 s) and when one machine
+started 5 minutes late (976 s vs 1,127 s). Use static splitting for identical
+machines starting together and the live queue for unequal, delayed, or
+preemptible runners. State-machine `Decide` calls stay under 2.5 ms at 20,000
+tests.
 
 ## Reading test reports
 
@@ -629,15 +666,25 @@ event applier and decision functions. `BenchmarkSplit` benchmarks the
 in-memory split of 50,000 tests across 256 machines well under the one-second
 budget (~31–80 ms depending on CPU, 403 allocations).
 
-`internal/queue` has table tests for every limit and error path, 17 shared JSON
+`internal/queue` has table tests for every limit and error path, 18 shared JSON
 scenario vectors in `internal/queue/testdata/vectors/` (also meant to be run by
 the TypeScript Worker core), and a property test with an independent
 observation model checking at-most-one accepted terminal result per test,
 monotonic generations, at-most-one active lease per test and per runner,
 bounded event counts under hostile repeats, verdict transition rules (a
 finished verdict can change only `passed -> unresolved` on an `init` conflict),
-replay equality, and `Decide` purity. [Decision 3](decisions/0003-live-queue.md)
-and [docs/queue-protocol.md](queue-protocol.md) specify the design and wire
+replay equality, and `Decide` purity. `internal/queueapi` includes a black-box
+HTTP protocol test suite (runnable against any server via
+`BUNPO_TEST_SERVER_URL`) plus concurrency tests under `-race` and storage/fault
+injection tests. `internal/queuerunner` tests every row of the outcome table,
+token stripping, heartbeat retry, and goroutine cleanup, and `cmd/bunpo` runs
+real-process end-to-end tests covering `SIGKILL` before/after execution,
+`SIGSTOP`/`SIGCONT` past TTL, temporary server connection refusal, poison-file
+isolation, failing-sibling untimed results, Playwright-style all-skipped
+non-zero exits, `init` conflicts, missing/extra reports, `--status` + `merge`,
+and a smoke test against the real `bunpo-server` binary.
+[Decision 3](decisions/0003-live-queue.md) and
+[docs/queue-protocol.md](queue-protocol.md) specify the design and wire
 protocol.
 
 Golden tests read the real pytest, Jest, Vitest, Playwright and RSpec reports.

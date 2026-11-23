@@ -3,6 +3,16 @@
 All notable changes to Bunpō are recorded here. Release binaries and checksums
 start at `v0.0.3` on [GitHub Releases](https://github.com/nuggocto/bunpo/releases).
 
+## [Unreleased]
+
+### Added
+
+- Live-queue design record (`docs/decisions/0003-live-queue.md`) and HTTP protocol and state-machine specification (`docs/queue-protocol.md`).
+- Skipped test-case count (`junit.File.Skipped`) in `internal/junit`, keeping `bunpo record` behavior unchanged.
+- Pure event-sourced live-queue state machine (`internal/queue`) with 18 shared JSON scenario vectors, property tests with an independent observation model, and fuzz targets (`FuzzEventReplay`, `FuzzDecide`).
+- Live-queue HTTP wire format, handler, client, black-box protocol test suite (`internal/queueapi`), and standalone in-memory server (`cmd/bunpo-server`).
+- Live-queue runner loop (`internal/queuerunner`) and `bunpo --queue` CLI mode (worker loop, process-group signaling, token stripping from child commands, `--status`, and `report-0.json` output for `bunpo merge`), with multi-process kill and fault-injection end-to-end tests.
+
 ## [v0.0.7] - 2026-11-23
 
 ### Changed
