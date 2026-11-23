@@ -595,7 +595,6 @@ func (h *Handler) handleListTests(w http.ResponseWriter, r *http.Request, buildI
 		case "true":
 			cmd.Retried = true
 		case "false":
-			cmd.Retried = false
 		default:
 			writeAPIError(w, &APIError{HTTPStatus: http.StatusBadRequest, Code: queue.ErrCodeInvalidRequest, Message: "retried must be true or false"})
 			return
@@ -658,7 +657,7 @@ func (h *Handler) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 		}
 		if e.state.Verdict() == queue.VerdictRunning && now >= e.state.DeadlineMS {
 			events, _, err := queue.DecideStatus(e.state, now)
-			if err == nil && len(events) > 0 {
+			if err == nil {
 				_ = h.persistAndApply(r.Context(), e.state.BuildID, e, events)
 			}
 			if e.broken {
@@ -766,7 +765,7 @@ func (h *Handler) lookupBuildLocked(buildID string) *buildEntry {
 			entry.mu.Unlock()
 			continue
 		}
-		if !entry.state.Initialized {
+		if !entry.broken && !entry.state.Initialized {
 			entry.mu.Unlock()
 			return nil
 		}

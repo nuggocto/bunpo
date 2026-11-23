@@ -350,7 +350,6 @@ func (s *State) applyReported(atMS int64, d *ReportedData) error {
 	for _, a := range lease.Attempts {
 		leaseAttempts[a.TestIndex] = a.Generation
 	}
-	seen := make(map[int]bool, len(d.Results))
 	for i, res := range d.Results {
 		if i > 0 && d.Results[i-1].TestIndex >= res.TestIndex {
 			return errors.New("reported results must be unique and sorted by test_index")
@@ -359,10 +358,6 @@ func (s *State) applyReported(atMS int64, d *ReportedData) error {
 		if !ok || res.Generation != wantGen {
 			return fmt.Errorf("reported result %d does not match lease attempt", i)
 		}
-		if seen[res.TestIndex] {
-			return fmt.Errorf("duplicate reported result for test %d", res.TestIndex)
-		}
-		seen[res.TestIndex] = true
 		if err := validateReportValues(res.Outcome, res.Timed, res.DurationMS); err != nil {
 			return err
 		}

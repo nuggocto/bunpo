@@ -820,6 +820,13 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 
 		if s.phase == statusPhasePaging {
 			page := *ev.Resp.ListTests
+			if page.Verdict != s.status.Verdict {
+				// A late init conflict can flip a finished passed build to unresolved
+				// between /status and /tests; re-fetch /status so verdict, conflicts,
+				// and the report decision stay consistent.
+				s.phase = statusPhaseFetching
+				return []Action{s.sendStatus()}
+			}
 			for _, tv := range page.Tests {
 				if tv.State == queue.StatusPassed && tv.Timed {
 					s.report.Tests[tv.Test] = timing.Observation{Timed: true, MS: tv.DurationMS}
