@@ -386,7 +386,10 @@ func TestProtocolBlackBox(t *testing.T) {
 			}
 		}
 
-		// Complete all 3 tests with runner-2.
+		// Complete all 3 tests with runner-2. Unstarted tests come before retries, and
+		// the nil prediction for tests/c.py must stay nil (median 150ms > tests/a.py 100ms)
+		// rather than decoding null as 0.
+		wantOrder := []string{"tests/c.py", "tests/a.py", "tests/b.py"}
 		for step := range 3 {
 			l, err := wc.Lease(ctx, bid, queue.LeaseCommand{
 				RunnerID:     "runner-2",
@@ -397,6 +400,9 @@ func TestProtocolBlackBox(t *testing.T) {
 				t.Fatalf("step %d lease = %+v, err=%v", step, l, err)
 			}
 			a := l.Attempts[0]
+			if a.Test != wantOrder[step] {
+				t.Fatalf("step %d leased %q; want %q", step, a.Test, wantOrder[step])
+			}
 			rep, err := wc.Report(ctx, bid, queue.ReportCommand{
 				RunnerID: "runner-2",
 				LeaseID:  l.LeaseID,

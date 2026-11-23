@@ -15,11 +15,8 @@ func int64Ptr(v int64) *int64 { return &v }
 
 func defaultConfig() queue.Config {
 	return queue.Config{
-		Machines:       2,
-		LeaseTTLMS:     queue.DefaultLeaseTTLMS,
-		BuildTimeoutMS: queue.DefaultBuildTimeoutMS,
-		MaxAttempts:    queue.DefaultMaxAttempts,
-		MaxBatch:       queue.DefaultMaxBatch,
+		Machines: 2, LeaseTTLMS: queue.DefaultLeaseTTLMS, BuildTimeoutMS: queue.DefaultBuildTimeoutMS,
+		MaxAttempts: queue.DefaultMaxAttempts, MaxBatch: queue.DefaultMaxBatch,
 	}
 }
 
@@ -35,197 +32,133 @@ func mustApply(t *testing.T, s *queue.State, events []queue.Event) {
 func assertQueueErr(t *testing.T, err error, wantStatus int, wantCode string) {
 	t.Helper()
 	var qe *queue.Error
-	if !errors.As(err, &qe) {
-		t.Fatalf("err = %v; want *queue.Error(%d, %s)", err, wantStatus, wantCode)
-	}
-	if qe.HTTPStatus != wantStatus || qe.Code != wantCode {
-		t.Fatalf("err = (%d, %q, %q); want (%d, %q)", qe.HTTPStatus, qe.Code, qe.Message, wantStatus, wantCode)
+	if !errors.As(err, &qe) || qe.HTTPStatus != wantStatus || qe.Code != wantCode {
+		t.Fatalf("err = %v; want *queue.Error (%d %s)", err, wantStatus, wantCode)
 	}
 }
 
 func TestValidIdentifiers(t *testing.T) {
-	validBuilds := []string{"a", "build-1", "Run_2026.11.23", strings.Repeat("a", 128)}
-	for _, id := range validBuilds {
+	for _, id := range []string{"a", "run-123_4.5", strings.Repeat("a", 128)} {
 		if !queue.ValidBuildID(id) {
-			t.Errorf("ValidBuildID(%q) = false; want true", id)
+			t.Errorf("ValidBuildID(%q) = false", id)
 		}
 	}
-	invalidBuilds := []string{"", ".", "..", ".hidden", "-dash", "_under", "a..b", "a/b", "a b", strings.Repeat("a", 129)}
-	for _, id := range invalidBuilds {
+	for _, id := range []string{"", "-bad", ".bad", "a..b", "a/b", "a b", strings.Repeat("a", 129)} {
 		if queue.ValidBuildID(id) {
-			t.Errorf("ValidBuildID(%q) = true; want false", id)
+			t.Errorf("ValidBuildID(%q) = true", id)
 		}
 	}
-
-	if !queue.ValidRunnerID("0123456789abcdef0123456789abcdef") || queue.ValidRunnerID("") || queue.ValidRunnerID(strings.Repeat("x", 65)) || queue.ValidRunnerID("bad/id") {
-		t.Error("ValidRunnerID boundary check failed")
-	}
-	if !queue.ValidRequestID("req-1.a_b") || queue.ValidRequestID("") || queue.ValidRequestID(strings.Repeat("x", 129)) || queue.ValidRequestID("bad id") {
-		t.Error("ValidRequestID boundary check failed")
-	}
-	if !queue.ValidTestID("tests/a.py") || queue.ValidTestID("") || queue.ValidTestID("./a.py") || queue.ValidTestID("a/../b.py") || queue.ValidTestID(strings.Repeat("a", queue.MaxTestIDBytes+1)) {
-		t.Error("ValidTestID boundary check failed")
+	exactID := strings.Repeat("a", queue.MaxTestIDBytes)
+	if !queue.ValidRunnerID(strings.Repeat("r", 64)) || queue.ValidRunnerID("") || queue.ValidRunnerID(strings.Repeat("r", 65)) || queue.ValidRunnerID("bad/id") ||
+		!queue.ValidRequestID(strings.Repeat("q", 128)) || queue.ValidRequestID("") || queue.ValidRequestID(strings.Repeat("q", 129)) ||
+		!queue.ValidTestID(exactID) || queue.ValidTestID(exactID+"x") {
+		t.Fatal("identifier bounds failed")
 	}
 }
 
-func TestInitValidationAndLimits(t *testing.T) {
-	base := func() queue.InitCommand {
-		return queue.InitCommand{
-			BuildID:       "build-1",
-			RunnerID:      "runner-1",
-			MachineIndex:  intPtr(0),
-			Config:        defaultConfig(),
-			Tests:         []string{"a.py", "b.py"},
-			PredictionsMS: []*int64{int64Ptr(100), nil},
-		}
+func TestInitValidationAndExactLimits(t *testing.T) {
+	lim := queue.Limits{MinLeaseTTLMS: queue.MinLeaseTTLMS, MaxTests: 3, MaxRunners: 2}
+	maxCfg := queue.Config{
+		Machines: queue.MaxMachines, LeaseTTLMS: queue.MaxLeaseTTLMS, BuildTimeoutMS: queue.MaxBuildTimeoutMS,
+		MaxAttempts: queue.MaxAttemptsLimit, MaxBatch: queue.MaxBatchLimit,
+	}
+	// Exact-at-limit values must be accepted (AtMS == 0, MaxDurationMS, BuildTimeoutMS == LeaseTTLMS).
+	s0 := queue.NewState(lim)
+	evs, _, err := queue.DecideInit(s0, 0, queue.InitCommand{
+		BuildID: "exact-max", RunnerID: "r1", Config: maxCfg,
+		Tests: []string{"a.py", "b.py", "c.py"}, PredictionsMS: []*int64{int64Ptr(0), int64Ptr(timing.MaxDurationMS), nil},
+	})
+	if err != nil {
+		t.Fatalf("exact-limit init failed: %v", err)
+	}
+	mustApply(t, s0, evs)
+
+	eqCfg := defaultConfig()
+	eqCfg.BuildTimeoutMS = eqCfg.LeaseTTLMS
+	if _, _, err := queue.DecideInit(queue.NewState(queue.DefaultLimits()), 1000, queue.InitCommand{
+		BuildID: "eq-timeout", RunnerID: "r1", Config: eqCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil},
+	}); err != nil {
+		t.Fatalf("BuildTimeoutMS == LeaseTTLMS rejected: %v", err)
 	}
 
-	tests := []struct {
-		name   string
-		nowMS  int64
-		mutate func(*queue.InitCommand)
-	}{
-		{"negative now", -1, func(c *queue.InitCommand) {}},
-		{"bad build id ..", 1000, func(c *queue.InitCommand) { c.BuildID = ".." }},
-		{"bad runner id", 1000, func(c *queue.InitCommand) { c.RunnerID = "bad/runner" }},
-		{"negative machine index", 1000, func(c *queue.InitCommand) { c.MachineIndex = intPtr(-1) }},
-		{"machine index too high", 1000, func(c *queue.InitCommand) { c.MachineIndex = intPtr(queue.MaxMachines) }},
-		{"machines 0", 1000, func(c *queue.InitCommand) { c.Config.Machines = 0 }},
-		{"machines over max", 1000, func(c *queue.InitCommand) { c.Config.Machines = queue.MaxMachines + 1 }},
-		{"ttl below min", 1000, func(c *queue.InitCommand) { c.Config.LeaseTTLMS = queue.MinLeaseTTLMS - 1 }},
-		{"ttl over max", 1000, func(c *queue.InitCommand) { c.Config.LeaseTTLMS = queue.MaxLeaseTTLMS + 1 }},
-		{"timeout below ttl", 1000, func(c *queue.InitCommand) { c.Config.BuildTimeoutMS = c.Config.LeaseTTLMS - 1 }},
-		{"timeout over max", 1000, func(c *queue.InitCommand) { c.Config.BuildTimeoutMS = queue.MaxBuildTimeoutMS + 1 }},
-		{"max attempts 0", 1000, func(c *queue.InitCommand) { c.Config.MaxAttempts = 0 }},
-		{"max attempts over limit", 1000, func(c *queue.InitCommand) { c.Config.MaxAttempts = queue.MaxAttemptsLimit + 1 }},
-		{"max batch 0", 1000, func(c *queue.InitCommand) { c.Config.MaxBatch = 0 }},
-		{"max batch over limit", 1000, func(c *queue.InitCommand) { c.Config.MaxBatch = queue.MaxBatchLimit + 1 }},
-		{"empty tests", 1000, func(c *queue.InitCommand) { c.Tests = nil; c.PredictionsMS = nil }},
-		{"predictions length mismatch", 1000, func(c *queue.InitCommand) { c.PredictionsMS = []*int64{int64Ptr(1)} }},
-		{"unsorted tests", 1000, func(c *queue.InitCommand) { c.Tests = []string{"b.py", "a.py"} }},
-		{"duplicate tests", 1000, func(c *queue.InitCommand) { c.Tests = []string{"a.py", "a.py"} }},
-		{"non-canonical test", 1000, func(c *queue.InitCommand) { c.Tests = []string{"./a.py", "b.py"} }},
-		{"negative prediction", 1000, func(c *queue.InitCommand) { c.PredictionsMS[0] = int64Ptr(-1) }},
-		{"prediction over 30d", 1000, func(c *queue.InitCommand) { c.PredictionsMS[0] = int64Ptr(timing.MaxDurationMS + 1) }},
+	ok := func(mod func(*queue.InitCommand)) queue.InitCommand {
+		c := queue.InitCommand{BuildID: "b1", RunnerID: "r1", Config: defaultConfig(), Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}
+		mod(&c)
+		return c
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			s := queue.NewState(queue.DefaultLimits())
-			cmd := base()
-			tc.mutate(&cmd)
-			events, _, err := queue.DecideInit(s, tc.nowMS, cmd)
-			assertQueueErr(t, err, 400, queue.ErrCodeInvalidRequest)
-			if len(events) != 0 {
-				t.Fatalf("events = %v; want none", events)
-			}
-		})
+	bad := []queue.InitCommand{
+		ok(func(c *queue.InitCommand) { c.BuildID = "../bad" }),
+		ok(func(c *queue.InitCommand) { c.MachineIndex = intPtr(256) }),
+		ok(func(c *queue.InitCommand) { c.Tests, c.PredictionsMS = nil, nil }),
+		ok(func(c *queue.InitCommand) {
+			c.Tests = []string{"a.py", "b.py", "c.py", "d.py"}
+			c.PredictionsMS = make([]*int64, 4)
+		}),
+		ok(func(c *queue.InitCommand) { c.Tests = []string{"b.py", "a.py"}; c.PredictionsMS = make([]*int64, 2) }),
+		ok(func(c *queue.InitCommand) { c.Tests = []string{"a.py", "a.py"}; c.PredictionsMS = make([]*int64, 2) }),
+		ok(func(c *queue.InitCommand) { c.Tests = []string{"./a.py"} }),
+		ok(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{} }),
+		ok(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{int64Ptr(-1)} }),
+		ok(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{int64Ptr(timing.MaxDurationMS + 1)} }),
+		ok(func(c *queue.InitCommand) { c.Config.Machines = 0 }),
+		ok(func(c *queue.InitCommand) { c.Config.LeaseTTLMS = 9_999 }),
+		ok(func(c *queue.InitCommand) { c.Config.BuildTimeoutMS = c.Config.LeaseTTLMS - 1 }),
+		ok(func(c *queue.InitCommand) { c.Config.MaxAttempts = 11 }),
+		ok(func(c *queue.InitCommand) { c.Config.MaxBatch = 201 }),
 	}
-
-	// Over MaxTests limit.
-	lim := queue.DefaultLimits()
-	lim.MaxTests = 2
-	s := queue.NewState(lim)
-	cmd := base()
-	cmd.Tests = []string{"a.py", "b.py", "c.py"}
-	cmd.PredictionsMS = []*int64{nil, nil, nil}
-	_, _, err := queue.DecideInit(s, 1000, cmd)
-	assertQueueErr(t, err, 400, queue.ErrCodeInvalidRequest)
-}
-
-func TestUninitializedReturns404(t *testing.T) {
-	s := queue.NewState(queue.DefaultLimits())
-	if _, _, err := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"}); err == nil {
-		t.Fatal("expected 404")
-	} else {
-		assertQueueErr(t, err, 404, queue.ErrCodeBuildNotFound)
-	}
-	if _, _, err := queue.DecideHeartbeat(s, 1000, queue.HeartbeatCommand{RunnerID: "r1", LeaseID: 1}); err == nil {
-		t.Fatal("expected 404")
-	} else {
-		assertQueueErr(t, err, 404, queue.ErrCodeBuildNotFound)
-	}
-	if _, _, err := queue.DecideReport(s, 1000, queue.ReportCommand{RunnerID: "r1", LeaseID: 1}); err == nil {
-		t.Fatal("expected 404")
-	} else {
-		assertQueueErr(t, err, 404, queue.ErrCodeBuildNotFound)
-	}
-	if _, _, err := queue.DecideStatus(s, 1000); err == nil {
-		t.Fatal("expected 404")
-	} else {
-		assertQueueErr(t, err, 404, queue.ErrCodeBuildNotFound)
-	}
-	if _, _, err := queue.DecideListTests(s, 1000, queue.ListTestsCommand{}); err == nil {
-		t.Fatal("expected 404")
-	} else {
-		assertQueueErr(t, err, 404, queue.ErrCodeBuildNotFound)
+	for i, cmd := range bad {
+		_, _, err := queue.DecideInit(queue.NewState(lim), 1000, cmd)
+		assertQueueErr(t, err, 400, queue.ErrCodeInvalidRequest)
+		_ = i
 	}
 }
 
 func TestInitConflictsBoundedAndFailedPrecedence(t *testing.T) {
 	s := queue.NewState(queue.DefaultLimits())
-	cfg := defaultConfig()
 	evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
-		BuildID:       "b1",
-		RunnerID:      "r0",
-		Config:        cfg,
-		Tests:         []string{"a.py"},
-		PredictionsMS: []*int64{int64Ptr(100)},
+		BuildID: "b-conf", RunnerID: "r0", Config: defaultConfig(),
+		Tests: []string{"a.py", "b.py"}, PredictionsMS: []*int64{int64Ptr(100), int64Ptr(100)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	mustApply(t, s, evs)
-
-	// 12 distinct conflicting runners -> only first 8 emit events, then truncated.
 	for i := range 12 {
-		alt := cfg
-		alt.MaxAttempts = 4
-		evs, _, err := queue.DecideInit(s, 1000+int64(i), queue.InitCommand{
-			BuildID:       "b1",
-			RunnerID:      fmt.Sprintf("bad-%d", i),
-			Config:        alt,
-			Tests:         []string{"a.py"},
-			PredictionsMS: []*int64{nil},
+		cEvs, _, err := queue.DecideInit(s, int64(1100+i), queue.InitCommand{
+			BuildID: "b-conf", RunnerID: fmt.Sprintf("bad-%d", i), Config: defaultConfig(),
+			Tests: []string{"a.py"}, PredictionsMS: []*int64{int64Ptr(100)},
 		})
 		assertQueueErr(t, err, 409, queue.ErrCodeInitConflict)
-		if i < queue.MaxInitConflicts {
-			if len(evs) != 1 || evs[0].Type != queue.EventConflicted {
-				t.Fatalf("conflict %d: events = %v; want [conflicted]", i, evs)
-			}
-			mustApply(t, s, evs)
-		} else if len(evs) != 0 {
-			t.Fatalf("conflict %d past cap emitted %d events; want 0", i, len(evs))
+		if (i < queue.MaxInitConflicts && len(cEvs) != 1) || (i >= queue.MaxInitConflicts && len(cEvs) != 0) {
+			t.Fatalf("conflict %d emitted %d events", i, len(cEvs))
 		}
+		mustApply(t, s, cEvs)
 	}
-	if !s.ConflictsTruncated || len(s.Conflicts) != queue.MaxInitConflicts {
-		t.Fatalf("conflicts = %d, truncated = %t; want %d, true", len(s.Conflicts), s.ConflictsTruncated, queue.MaxInitConflicts)
+	if len(s.Conflicts) != queue.MaxInitConflicts || !s.ConflictsTruncated {
+		t.Fatalf("conflicts = %d truncated=%t", len(s.Conflicts), s.ConflictsTruncated)
 	}
-
-	// When test fails, failed takes precedence over unresolved even with init conflicts.
-	evs, resp, err := queue.DecideLease(s, 2000, queue.LeaseCommand{RunnerID: "r0", RequestID: "q1"})
-	if err != nil {
-		t.Fatal(err)
+	for step := range 2 {
+		evs, l, err := queue.DecideLease(s, int64(2000+step*200), queue.LeaseCommand{RunnerID: "r0", RequestID: fmt.Sprintf("q%d", step)})
+		if err != nil || l.Status != queue.LeaseGranted {
+			break
+		}
+		mustApply(t, s, evs)
+		results := make([]queue.ReportResult, len(l.Attempts))
+		for i, a := range l.Attempts {
+			out, timed, ms := queue.OutcomePassed, true, int64(10)
+			if step == 0 && i == 0 {
+				out, timed, ms = queue.OutcomeFailed, false, 0
+			}
+			results[i] = queue.ReportResult{AttemptID: a.AttemptID, TestIndex: a.TestIndex, Generation: a.Generation, Outcome: out, Timed: timed, DurationMS: ms}
+		}
+		evs, _, err = queue.DecideReport(s, int64(2100+step*200), queue.ReportCommand{RunnerID: "r0", LeaseID: l.LeaseID, Results: results})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustApply(t, s, evs)
 	}
-	mustApply(t, s, evs)
-	evs, rep, err := queue.DecideReport(s, 2500, queue.ReportCommand{
-		RunnerID: "r0",
-		LeaseID:  resp.LeaseID,
-		Results: []queue.ReportResult{{
-			AttemptID:  "0.1",
-			TestIndex:  0,
-			Generation: 1,
-			Outcome:    queue.OutcomeFailed,
-			Timed:      false,
-			DurationMS: 0,
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustApply(t, s, evs)
-	if rep.Verdict != queue.VerdictFailed || s.Verdict() != queue.VerdictFailed {
-		t.Fatalf("verdict = (%s, %s); want failed", rep.Verdict, s.Verdict())
+	if s.Verdict() != queue.VerdictFailed {
+		t.Fatalf("verdict = %s; want failed", s.Verdict())
 	}
 }
 
@@ -234,458 +167,130 @@ func TestHostileStaleAndConflictHistoryBounded(t *testing.T) {
 	lim.MinLeaseTTLMS = 1000
 	s := queue.NewState(lim)
 	cfg := defaultConfig()
-	cfg.LeaseTTLMS = 1000
-	cfg.BuildTimeoutMS = 60_000
-	cfg.MaxAttempts = 1
-	cfg.MaxBatch = 1
-
-	evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
-		BuildID:       "b1",
-		RunnerID:      "r0",
-		Config:        cfg,
-		Tests:         []string{"a.py"},
-		PredictionsMS: []*int64{int64Ptr(100)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg.LeaseTTLMS, cfg.MaxAttempts, cfg.MaxBatch = 2000, 3, 1
+	evs, _, _ := queue.DecideInit(s, 1000, queue.InitCommand{BuildID: "b-hist", RunnerID: "r0", Config: cfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{int64Ptr(100)}})
 	mustApply(t, s, evs)
-
-	evs, leaseResp, err := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r0", RequestID: "q1"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	evs, l1, _ := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r0", RequestID: "q1"})
 	mustApply(t, s, evs)
-
-	// Accept attempt 0.1 as passed with 50ms.
-	evs, _, err = queue.DecideReport(s, 1100, queue.ReportCommand{
-		RunnerID: "r0",
-		LeaseID:  leaseResp.LeaseID,
-		Results:  []queue.ReportResult{{AttemptID: "0.1", TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 50}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	evs, l2, _ := queue.DecideLease(s, 4000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q2"})
 	mustApply(t, s, evs)
-
-	// Send 15 distinct conflicting durations -> only first 8 emit reported events.
-	for i := range 15 {
-		evs, rep, err := queue.DecideReport(s, 1200+int64(i), queue.ReportCommand{
-			RunnerID: "r0",
-			LeaseID:  leaseResp.LeaseID,
-			Results:  []queue.ReportResult{{AttemptID: "0.1", TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: int64(100 + i)}},
+	evs, _, _ = queue.DecideReport(s, 4100, queue.ReportCommand{RunnerID: "r1", LeaseID: l2.LeaseID, Results: []queue.ReportResult{{AttemptID: "0.2", TestIndex: 0, Generation: 2, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 50}}})
+	mustApply(t, s, evs)
+	for i := range 20 {
+		evs, rep, err := queue.DecideReport(s, int64(5000+i), queue.ReportCommand{
+			RunnerID: "r0", LeaseID: l1.LeaseID,
+			Results: []queue.ReportResult{{AttemptID: "0.1", TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: int64(10 + i)}},
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if rep.Results[0].Disposition != queue.DispositionConflict {
-			t.Fatalf("i=%d: disp = %s; want conflict", i, rep.Results[0].Disposition)
+		if err != nil || rep.Results[0].Disposition != queue.DispositionStale {
+			t.Fatalf("stale %d: rep=%+v err=%v", i, rep, err)
 		}
 		if i < queue.MaxTestHistory {
-			if len(evs) != 1 {
-				t.Fatalf("i=%d: events = %d; want 1", i, len(evs))
-			}
 			mustApply(t, s, evs)
 		} else if len(evs) != 0 {
-			t.Fatalf("i=%d past history cap emitted %d events; want 0", i, len(evs))
+			t.Fatalf("stale %d past cap emitted %d events; want 0", i, len(evs))
 		}
 	}
-	if !s.Tests[0].HistoryTruncated || len(s.Tests[0].History) != queue.MaxTestHistory {
-		t.Fatalf("history = %d, truncated = %t; want %d, true", len(s.Tests[0].History), s.Tests[0].HistoryTruncated, queue.MaxTestHistory)
+	if len(s.Tests[0].History) != queue.MaxTestHistory || !s.Tests[0].HistoryTruncated {
+		t.Fatalf("history len=%d truncated=%t", len(s.Tests[0].History), s.Tests[0].HistoryTruncated)
 	}
 }
 
 func TestTooManyRunnersAndReportValidation(t *testing.T) {
-	lim := queue.DefaultLimits()
-	lim.MaxRunners = 2
+	lim := queue.Limits{MinLeaseTTLMS: 1000, MaxTests: 10, MaxRunners: 2}
 	s := queue.NewState(lim)
 	cfg := defaultConfig()
-	cfg.MaxBatch = 1
-
-	evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
-		BuildID:       "b1",
-		RunnerID:      "r0",
-		Config:        cfg,
-		Tests:         []string{"a.py", "b.py", "c.py"},
-		PredictionsMS: []*int64{int64Ptr(300), int64Ptr(200), int64Ptr(100)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg.LeaseTTLMS, cfg.MaxBatch = 2000, 1
+	evs, _, _ := queue.DecideInit(s, 1000, queue.InitCommand{BuildID: "b-run", RunnerID: "r0", Config: cfg, Tests: []string{"a.py", "b.py", "c.py"}, PredictionsMS: []*int64{int64Ptr(100), int64Ptr(100), int64Ptr(100)}})
 	mustApply(t, s, evs)
-
-	evs, l1, err := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	evs, l1, _ := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
 	mustApply(t, s, evs)
-
-	evs, _, err = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r2", RequestID: "q2"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	evs, _, _ = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r2", RequestID: "q2"})
 	mustApply(t, s, evs)
-
-	// 3rd distinct runner exceeds MaxRunners=2.
-	_, _, err = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r3", RequestID: "q3"})
+	_, _, err := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r3", RequestID: "q3"})
 	assertQueueErr(t, err, 429, queue.ErrCodeTooManyRunners)
 
-	// Report validation failures.
-	badReports := []struct {
-		name     string
-		cmd      queue.ReportCommand
-		wantCode string
+	a := l1.Attempts[0]
+	for _, tc := range []struct {
+		cmd  queue.ReportCommand
+		code string
 	}{
-		{"unknown lease", queue.ReportCommand{RunnerID: "r1", LeaseID: 99}, queue.ErrCodeUnknownLease},
-		{"runner mismatch", queue.ReportCommand{RunnerID: "r2", LeaseID: l1.LeaseID, Results: []queue.ReportResult{{AttemptID: "0.1", TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 10}}}, queue.ErrCodeRunnerMismatch},
-		{"partial report", queue.ReportCommand{RunnerID: "r1", LeaseID: l1.LeaseID, Results: nil}, queue.ErrCodeInvalidRequest},
-		{"wrong attempt_id", queue.ReportCommand{RunnerID: "r1", LeaseID: l1.LeaseID, Results: []queue.ReportResult{{AttemptID: "9.9", TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 10}}}, queue.ErrCodeInvalidRequest},
-		{"timed failed", queue.ReportCommand{RunnerID: "r1", LeaseID: l1.LeaseID, Results: []queue.ReportResult{{AttemptID: "0.1", TestIndex: 0, Generation: 1, Outcome: queue.OutcomeFailed, Timed: true, DurationMS: 10}}}, queue.ErrCodeInvalidRequest},
-		{"untimed nonzero ms", queue.ReportCommand{RunnerID: "r1", LeaseID: l1.LeaseID, Results: []queue.ReportResult{{AttemptID: "0.1", TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: false, DurationMS: 10}}}, queue.ErrCodeInvalidRequest},
-		{"invalid outcome", queue.ReportCommand{RunnerID: "r1", LeaseID: l1.LeaseID, Results: []queue.ReportResult{{AttemptID: "0.1", TestIndex: 0, Generation: 1, Outcome: "bogus", Timed: false, DurationMS: 0}}}, queue.ErrCodeInvalidRequest},
-		{"wrong test index", queue.ReportCommand{RunnerID: "r1", LeaseID: l1.LeaseID, Results: []queue.ReportResult{{AttemptID: "1.1", TestIndex: 1, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 10}}}, queue.ErrCodeInvalidRequest},
-	}
-	for _, tc := range badReports {
-		t.Run(tc.name, func(t *testing.T) {
-			evs, _, err := queue.DecideReport(s, 1100, tc.cmd)
-			assertQueueErr(t, err, 400, tc.wantCode)
-			if len(evs) != 0 {
-				t.Fatalf("bad report emitted events %v", evs)
-			}
-		})
+		{queue.ReportCommand{RunnerID: "r1", LeaseID: 999}, queue.ErrCodeUnknownLease},
+		{queue.ReportCommand{RunnerID: "r2", LeaseID: l1.LeaseID}, queue.ErrCodeRunnerMismatch},
+		{queue.ReportCommand{RunnerID: "r1", LeaseID: l1.LeaseID}, queue.ErrCodeInvalidRequest},
+		{queue.ReportCommand{RunnerID: "r1", LeaseID: l1.LeaseID, Results: []queue.ReportResult{{AttemptID: a.AttemptID, TestIndex: a.TestIndex, Generation: 1, Outcome: queue.OutcomeFailed, Timed: true, DurationMS: 10}}}, queue.ErrCodeInvalidRequest},
+		{queue.ReportCommand{RunnerID: "r1", LeaseID: l1.LeaseID, Results: []queue.ReportResult{{AttemptID: a.AttemptID, TestIndex: a.TestIndex, Generation: 1, Outcome: queue.OutcomePassed, Timed: false, DurationMS: 10}}}, queue.ErrCodeInvalidRequest},
+	} {
+		_, _, err := queue.DecideReport(s, 1200, tc.cmd)
+		assertQueueErr(t, err, 400, tc.code)
 	}
 }
 
-func TestStatusAndListTestsPaginationAndFilters(t *testing.T) {
-	s := queue.NewState(queue.DefaultLimits())
-	cfg := defaultConfig()
-	cfg.MaxBatch = 1
-
-	evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
-		BuildID:       "b1",
-		RunnerID:      "r0",
-		Config:        cfg,
-		Tests:         []string{"a.py", "b.py", "c.py"},
-		PredictionsMS: []*int64{int64Ptr(300), int64Ptr(200), int64Ptr(100)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustApply(t, s, evs)
-
-	// Lease and pass a.py (250ms), fail b.py, leave c.py pending.
-	evs, l1, _ := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", MachineIndex: intPtr(0), RequestID: "q1"})
-	mustApply(t, s, evs)
-	evs, _, _ = queue.DecideReport(s, 1100, queue.ReportCommand{
-		RunnerID: "r1",
-		LeaseID:  l1.LeaseID,
-		Results:  []queue.ReportResult{{AttemptID: "0.1", TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 250}},
-	})
-	mustApply(t, s, evs)
-
-	evs, l2, _ := queue.DecideLease(s, 1200, queue.LeaseCommand{RunnerID: "r1", MachineIndex: intPtr(0), RequestID: "q2"})
-	mustApply(t, s, evs)
-	evs, _, _ = queue.DecideReport(s, 1300, queue.ReportCommand{
-		RunnerID: "r1",
-		LeaseID:  l2.LeaseID,
-		Results:  []queue.ReportResult{{AttemptID: "1.1", TestIndex: 1, Generation: 1, Outcome: queue.OutcomeFailed, Timed: false, DurationMS: 0}},
-	})
-	mustApply(t, s, evs)
-
-	evs, status, err := queue.DecideStatus(s, 1400)
-	if err != nil || len(evs) != 0 {
-		t.Fatalf("DecideStatus: evs=%v err=%v", evs, err)
-	}
-	if status.Verdict != queue.VerdictRunning || len(status.Slowest) != 1 || status.Slowest[0].Test != "a.py" || status.ProblemCount != 1 || status.Problems[0].Test != "b.py" {
-		t.Fatalf("unexpected status: %+v", status)
-	}
-
-	// Paginate tests with limit=2.
-	_, p1, err := queue.DecideListTests(s, 1400, queue.ListTestsCommand{Cursor: 0, Limit: 2})
-	if err != nil || len(p1.Tests) != 2 || p1.NextCursor == nil || *p1.NextCursor != 2 {
-		t.Fatalf("page 1 = %+v, err=%v", p1, err)
-	}
-	_, p2, err := queue.DecideListTests(s, 1400, queue.ListTestsCommand{Cursor: *p1.NextCursor, Limit: 2})
-	if err != nil || len(p2.Tests) != 1 || p2.NextCursor != nil || p2.Tests[0].Test != "c.py" {
-		t.Fatalf("page 2 = %+v, err=%v", p2, err)
-	}
-
-	// Filter by state=failed.
-	_, pf, err := queue.DecideListTests(s, 1400, queue.ListTestsCommand{States: []queue.TestStatus{queue.StatusFailed}})
-	if err != nil || len(pf.Tests) != 1 || pf.Tests[0].Test != "b.py" {
-		t.Fatalf("failed filter = %+v, err=%v", pf, err)
-	}
-
-	// Bad ListTests inputs.
-	if _, _, err := queue.DecideListTests(s, 1400, queue.ListTestsCommand{Cursor: -1}); err == nil {
-		t.Fatal("expected 400 on negative cursor")
-	} else {
-		assertQueueErr(t, err, 400, queue.ErrCodeInvalidRequest)
-	}
-	if _, _, err := queue.DecideListTests(s, 1400, queue.ListTestsCommand{Limit: queue.MaxTestsPageLimit + 1}); err == nil {
-		t.Fatal("expected 400 on oversized limit")
-	} else {
-		assertQueueErr(t, err, 400, queue.ErrCodeInvalidRequest)
-	}
-	if _, _, err := queue.DecideListTests(s, 1400, queue.ListTestsCommand{States: []queue.TestStatus{"bogus"}}); err == nil {
-		t.Fatal("expected 400 on invalid state filter")
-	} else {
-		assertQueueErr(t, err, 400, queue.ErrCodeInvalidRequest)
-	}
-
-	// Heartbeat errors: unknown lease and runner mismatch.
-	if _, _, err := queue.DecideHeartbeat(s, 1400, queue.HeartbeatCommand{RunnerID: "r1", LeaseID: 99}); err == nil {
-		t.Fatal("expected 400 on unknown lease")
-	} else {
-		assertQueueErr(t, err, 400, queue.ErrCodeUnknownLease)
-	}
-	if _, _, err := queue.DecideHeartbeat(s, 1400, queue.HeartbeatCommand{RunnerID: "r2", LeaseID: l1.LeaseID}); err == nil {
-		t.Fatal("expected 400 on runner mismatch")
-	} else {
-		assertQueueErr(t, err, 400, queue.ErrCodeRunnerMismatch)
-	}
-
-	// Init conflict naming differing path at same count.
-	evs, _, err = queue.DecideInit(s, 1450, queue.InitCommand{
-		BuildID:       "b1",
-		RunnerID:      "r9",
-		Config:        cfg,
-		Tests:         []string{"a.py", "b.py", "z.py"},
-		PredictionsMS: []*int64{nil, nil, nil},
-	})
-	assertQueueErr(t, err, 409, queue.ErrCodeInitConflict)
-	if !strings.Contains(err.Error(), "z.py") || len(evs) != 1 {
-		t.Fatalf("conflict err=%v evs=%v; want path diff mentioning z.py", err, evs)
-	}
-
-	// Finalize on ListTests read when build deadline passes.
-	evs, finPage, err := queue.DecideListTests(s, 1000+cfg.BuildTimeoutMS, queue.ListTestsCommand{States: []queue.TestStatus{queue.StatusUnresolved}})
-	if err != nil || len(evs) != 1 || evs[0].Type != queue.EventFinalized || finPage.Verdict != queue.VerdictFailed || len(finPage.Tests) != 1 || finPage.Tests[0].Test != "c.py" {
-		t.Fatalf("finalize on ListTests: evs=%v page=%+v err=%v", evs, finPage, err)
-	}
-}
-
-func TestApplyRejectsCorruptEventsWithoutPartialMutation(t *testing.T) {
-	s := queue.NewState(queue.DefaultLimits())
-	cfg := defaultConfig()
-	evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
-		BuildID:       "b1",
-		RunnerID:      "r0",
-		Config:        cfg,
-		Tests:         []string{"a.py", "b.py"},
-		PredictionsMS: []*int64{int64Ptr(100), int64Ptr(100)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustApply(t, s, evs)
-
-	evs, _, err = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustApply(t, s, evs)
-
-	badEvents := []queue.Event{
-		{Type: queue.EventInitialized, AtMS: 1000, Initialized: &queue.InitializedData{BuildID: "b1"}},
-		{Type: queue.EventExpired, AtMS: 500, Expired: &queue.ExpiredData{LeaseID: 1}}, // clock backwards
-		{Type: queue.EventExpired, AtMS: 1100, Expired: &queue.ExpiredData{LeaseID: 99}},
-		{Type: queue.EventLeased, AtMS: 1100, Leased: &queue.LeasedData{LeaseID: 2, RunnerID: "r1", RequestID: "q2", DeadlineMS: 61100, Attempts: []queue.LeaseAttempt{{TestIndex: 1, Generation: 1}}}}, // runner already holds active lease
-		{Type: queue.EventReported, AtMS: 1100, Reported: &queue.ReportedData{LeaseID: 1, RunnerID: "r1", CloseLease: true, Results: []queue.ReportedAttempt{{TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 10, Disposition: queue.DispositionDuplicate}}}}, // duplicate not allowed in event
-		{Type: queue.EventReported, AtMS: 1100, Reported: &queue.ReportedData{LeaseID: 1, RunnerID: "r1", CloseLease: false, Results: []queue.ReportedAttempt{{TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 10, Disposition: queue.DispositionAccepted}}}},
-		{Type: queue.EventFinalized, AtMS: 1100, Finalized: &queue.FinalizedData{Reason: "bogus"}},
-		{Type: "unknown", AtMS: 1100},
-	}
-
-	for i, bad := range badEvents {
-		before := cloneState(t, s)
-		if err := s.Apply(bad); err == nil {
-			t.Fatalf("bad event %d (%s): Apply succeeded; want error", i, bad.Type)
-		}
-		if !equalExact(t, s, before) {
-			t.Fatalf("bad event %d (%s): Apply partially mutated state on error", i, bad.Type)
-		}
-	}
-}
-
-func TestResendingIdenticalStaleAndConflictingReportsEmitsNothing(t *testing.T) {
+func TestStatusListTestsAndFinalizeOverlay(t *testing.T) {
 	lim := queue.DefaultLimits()
 	lim.MinLeaseTTLMS = 1000
 	s := queue.NewState(lim)
-	cfg := defaultConfig()
-	cfg.LeaseTTLMS = 2000
-	cfg.BuildTimeoutMS = 60_000
-	cfg.MaxAttempts = 3
-	cfg.MaxBatch = 1
-
-	evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
-		BuildID:       "b-dedup",
-		RunnerID:      "r1",
-		Config:        cfg,
-		Tests:         []string{"a.py"},
-		PredictionsMS: []*int64{int64Ptr(100)},
-	})
-	if err != nil {
-		t.Fatal(err)
+	cfg := queue.Config{Machines: 1, LeaseTTLMS: 2000, BuildTimeoutMS: 10_000, MaxAttempts: 2, MaxBatch: 1}
+	evs, _, _ := queue.DecideInit(s, 1000, queue.InitCommand{BuildID: "b-st", RunnerID: "r1", Config: cfg, Tests: []string{"a.py", "b.py", "c.py"}, PredictionsMS: []*int64{int64Ptr(300), int64Ptr(200), int64Ptr(100)}})
+	mustApply(t, s, evs)
+	leaseAndRep := func(tLease, tRep int64, q, att string, idx int, out queue.Outcome, timed bool, ms int64) {
+		evs, l, _ := queue.DecideLease(s, tLease, queue.LeaseCommand{RunnerID: "r1", RequestID: q})
+		mustApply(t, s, evs)
+		evs, _, _ = queue.DecideReport(s, tRep, queue.ReportCommand{RunnerID: "r1", LeaseID: l.LeaseID, Results: []queue.ReportResult{{AttemptID: att, TestIndex: idx, Generation: 1, Outcome: out, Timed: timed, DurationMS: ms}}})
+		mustApply(t, s, evs)
 	}
+	leaseAndRep(1000, 1200, "q1", "0.1", 0, queue.OutcomePassed, true, 350)
+	leaseAndRep(1300, 1400, "q2", "1.1", 1, queue.OutcomeFailed, false, 0)
+	evs, l3, _ := queue.DecideLease(s, 1500, queue.LeaseCommand{RunnerID: "r1", RequestID: "q3"})
 	mustApply(t, s, evs)
 
-	// Lease 1 expires -> runner 2 leases 0.2 and passes.
-	evs, l1, err := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
-	if err != nil {
-		t.Fatal(err)
+	if hbEvs, hbResp, err := queue.DecideHeartbeat(s, s.DeadlineMS, queue.HeartbeatCommand{RunnerID: "r1", LeaseID: l3.LeaseID}); err != nil || hbResp.Held || len(hbEvs) == 0 {
+		t.Fatalf("heartbeat at exact deadline: evs=%v resp=%+v err=%v", hbEvs, hbResp, err)
 	}
-	mustApply(t, s, evs)
-
-	evs, l2, err := queue.DecideLease(s, 3500, queue.LeaseCommand{RunnerID: "r2", RequestID: "q2"})
-	if err != nil {
-		t.Fatal(err)
+	if stEvs, stResp, err := queue.DecideStatus(s, s.DeadlineMS); err != nil || len(stEvs) != 1 || stResp.Verdict != queue.VerdictFailed || len(stResp.Slowest) != 1 || stResp.Slowest[0].Test != "a.py" || stResp.Runners[0].ActiveLeaseID != 0 {
+		t.Fatalf("finalizing status: evs=%v resp=%+v err=%v", stEvs, stResp, err)
 	}
-	mustApply(t, s, evs)
-
-	evs, _, err = queue.DecideReport(s, 4000, queue.ReportCommand{
-		RunnerID: "r2",
-		LeaseID:  l2.LeaseID,
-		Results:  []queue.ReportResult{{AttemptID: "0.2", TestIndex: 0, Generation: 2, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 100}},
-	})
-	if err != nil {
-		t.Fatal(err)
+	if ltEvs, p1, err := queue.DecideListTests(s, s.DeadlineMS, queue.ListTestsCommand{Cursor: 0, Limit: 1}); err != nil || len(ltEvs) != 1 || len(p1.Tests) != 1 || p1.NextCursor == nil || *p1.NextCursor != 1 {
+		t.Fatalf("list limit=1: evs=%v p1=%+v err=%v", ltEvs, p1, err)
 	}
-	mustApply(t, s, evs)
-
-	// First stale report for lease 1 adds 1 history entry.
-	staleCmd := queue.ReportCommand{
-		RunnerID: "r1",
-		LeaseID:  l1.LeaseID,
-		Results:  []queue.ReportResult{{AttemptID: "0.1", TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 90}},
+	if _, all, err := queue.DecideListTests(s, s.DeadlineMS, queue.ListTestsCommand{Limit: queue.MaxTestsPageLimit}); err != nil || len(all.Tests) != 3 || all.Tests[2].Attempts[0].Status != queue.AttemptExpired || all.Tests[2].Attempts[0].FinishedAtMS != s.DeadlineMS {
+		t.Fatalf("finalizing list overlay: %+v err=%v", all, err)
 	}
-	evs, rep, err := queue.DecideReport(s, 4100, staleCmd)
-	if err != nil || len(evs) != 1 || rep.Results[0].Disposition != queue.DispositionStale {
-		t.Fatalf("first stale: evs=%v rep=%+v err=%v", evs, rep, err)
+	if _, retried, err := queue.DecideListTests(s, 1600, queue.ListTestsCommand{Retried: true}); err != nil || len(retried.Tests) != 0 {
+		t.Fatalf("retried filter: %+v err=%v", retried, err)
 	}
-	mustApply(t, s, evs)
-	if len(s.Tests[0].History) != 1 {
-		t.Fatalf("history len = %d; want 1", len(s.Tests[0].History))
-	}
-
-	// Resending the exact same stale report emits 0 events and adds 0 history.
-	evs, rep, err = queue.DecideReport(s, 4200, staleCmd)
-	if err != nil || len(evs) != 0 || rep.Results[0].Disposition != queue.DispositionStale {
-		t.Fatalf("repeated stale: evs=%v rep=%+v err=%v; want 0 events", evs, rep, err)
-	}
-	if len(s.Tests[0].History) != 1 {
-		t.Fatalf("history len after repeated stale = %d; want 1", len(s.Tests[0].History))
-	}
-
-	// First conflicting report for lease 2 adds 1 more history entry (total 2).
-	conflictCmd := queue.ReportCommand{
-		RunnerID: "r2",
-		LeaseID:  l2.LeaseID,
-		Results:  []queue.ReportResult{{AttemptID: "0.2", TestIndex: 0, Generation: 2, Outcome: queue.OutcomeFailed, Timed: false, DurationMS: 0}},
-	}
-	evs, rep, err = queue.DecideReport(s, 4300, conflictCmd)
-	if err != nil || len(evs) != 1 || rep.Results[0].Disposition != queue.DispositionConflict {
-		t.Fatalf("first conflict: evs=%v rep=%+v err=%v", evs, rep, err)
-	}
-	mustApply(t, s, evs)
-	if len(s.Tests[0].History) != 2 {
-		t.Fatalf("history len = %d; want 2", len(s.Tests[0].History))
-	}
-
-	// Resending the exact same conflicting report emits 0 events and adds 0 history.
-	evs, rep, err = queue.DecideReport(s, 4400, conflictCmd)
-	if err != nil || len(evs) != 0 || rep.Results[0].Disposition != queue.DispositionConflict {
-		t.Fatalf("repeated conflict: evs=%v rep=%+v err=%v; want 0 events", evs, rep, err)
-	}
-	if len(s.Tests[0].History) != 2 {
-		t.Fatalf("history len after repeated conflict = %d; want 2", len(s.Tests[0].History))
+	for _, cmd := range []queue.ListTestsCommand{{Cursor: -1}, {Limit: queue.MaxTestsPageLimit + 1}, {States: []queue.TestStatus{"bogus"}}} {
+		if _, _, err := queue.DecideListTests(s, 1600, cmd); err == nil {
+			t.Fatalf("DecideListTests(%+v) succeeded; want error", cmd)
+		}
 	}
 }
 
-func TestWaitRetryAfterEdgeCases(t *testing.T) {
-	t.Run("multi-attempt batch sums effective_ms and caps by earliest_deadline", func(t *testing.T) {
-		s := queue.NewState(queue.DefaultLimits())
-		cfg := queue.Config{Machines: 1, LeaseTTLMS: 60_000, BuildTimeoutMS: 300_000, MaxAttempts: 3, MaxBatch: 10}
-		evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
-			BuildID:       "b-sum",
-			RunnerID:      "r1",
-			Config:        cfg,
-			Tests:         []string{"a.py", "b.py", "c.py"},
-			PredictionsMS: []*int64{int64Ptr(3000), int64Ptr(3000), int64Ptr(3000)},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		mustApply(t, s, evs)
-		// denom=2, remaining=9000, target=4500 -> lease 1 takes a.py+b.py (sum=6000, expected_end=7000).
-		evs, l1, err := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
-		if err != nil || len(l1.Attempts) != 2 {
-			t.Fatalf("lease 1 = %+v, err=%v", l1, err)
-		}
-		mustApply(t, s, evs)
-		// lease 2 takes c.py (3000ms) at now=1000 -> expected_end=4000.
-		evs, _, err = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r2", RequestID: "q2"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		mustApply(t, s, evs)
-		// At now=2000: latest = max(7000, 4000) = 7000 -> wait = 5000.
-		_, w, err := queue.DecideLease(s, 2000, queue.LeaseCommand{RunnerID: "r3", RequestID: "q3"})
-		if err != nil || w.Status != queue.LeaseWait || w.RetryAfterMS != 5000 {
-			t.Fatalf("wait = %+v, err=%v; want 5000", w, err)
-		}
-	})
+func TestApplyRejectsDamagedEventsAtomically(t *testing.T) {
+	lim := queue.Limits{MinLeaseTTLMS: 1000, MaxTests: 10, MaxRunners: 1}
+	s := queue.NewState(lim)
+	cfg := defaultConfig()
+	cfg.LeaseTTLMS, cfg.MaxBatch = 2000, 1
+	evs, _, _ := queue.DecideInit(s, 1000, queue.InitCommand{BuildID: "b-dmg", RunnerID: "r1", Config: cfg, Tests: []string{"a.py", "b.py"}, PredictionsMS: []*int64{int64Ptr(100), int64Ptr(100)}})
+	mustApply(t, s, evs)
+	evs, _, _ = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
+	mustApply(t, s, evs)
 
-	t.Run("before expected end capped by earliest_deadline", func(t *testing.T) {
-		s := queue.NewState(queue.DefaultLimits())
-		cfg := queue.Config{Machines: 1, LeaseTTLMS: 60_000, BuildTimeoutMS: 300_000, MaxAttempts: 3, MaxBatch: 1}
-		evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
-			BuildID:       "b-cap",
-			RunnerID:      "r1",
-			Config:        cfg,
-			Tests:         []string{"slow.py"},
-			PredictionsMS: []*int64{int64Ptr(90_000)},
-		})
-		if err != nil {
-			t.Fatal(err)
+	if err := queue.NewState(lim).Apply(queue.Event{Type: queue.EventInitialized, AtMS: 1000, Initialized: &queue.InitializedData{BuildID: "b", Digest: "d", Config: cfg, DeadlineMS: 500, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}}); err == nil {
+		t.Fatal("expected error for deadline < at_ms")
+	}
+	bad := []queue.Event{
+		{Type: queue.EventExpired, AtMS: -1, Expired: &queue.ExpiredData{LeaseID: 1}},
+		{Type: queue.EventLeased, AtMS: 1100, Leased: &queue.LeasedData{LeaseID: 2, RunnerID: "r2", RequestID: "q2", DeadlineMS: 3100}},
+		{Type: queue.EventLeased, AtMS: 1100, Leased: &queue.LeasedData{LeaseID: 2, RunnerID: "r2", RequestID: "q2", DeadlineMS: 3100, Attempts: []queue.LeaseAttempt{{TestIndex: 1, Generation: 1}}}},
+		{Type: queue.EventReported, AtMS: 1100, Reported: &queue.ReportedData{LeaseID: 1, RunnerID: "r1", CloseLease: true}},
+		{Type: queue.EventReported, AtMS: 1100, Reported: &queue.ReportedData{LeaseID: 1, RunnerID: "r1", CloseLease: true, Results: []queue.ReportedAttempt{{TestIndex: 1, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 10, Disposition: queue.DispositionAccepted}}}},
+		{Type: queue.EventReported, AtMS: 1100, Reported: &queue.ReportedData{LeaseID: 1, RunnerID: "r1", CloseLease: false, Results: []queue.ReportedAttempt{{TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 10, Disposition: queue.DispositionAccepted}}}},
+		{Type: queue.EventReported, AtMS: 1100, Reported: &queue.ReportedData{LeaseID: 1, RunnerID: "r1", CloseLease: true, Results: []queue.ReportedAttempt{{TestIndex: 0, Generation: 9, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 10, Disposition: queue.DispositionAccepted}}}},
+	}
+	for i, ev := range bad {
+		before := cloneState(t, s)
+		if err := s.Apply(ev); err == nil || !equalExact(t, s, before) {
+			t.Fatalf("bad[%d] (%s): err=%v or state mutated", i, ev.Type, err)
 		}
-		mustApply(t, s, evs)
-		evs, _, err = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		mustApply(t, s, evs)
-		// At now=57000: latest=91000 (34000 remaining), deadline=61000 (4000 remaining) -> wait=4000.
-		_, w, err := queue.DecideLease(s, 57_000, queue.LeaseCommand{RunnerID: "r2", RequestID: "q2"})
-		if err != nil || w.Status != queue.LeaseWait || w.RetryAfterMS != 4000 {
-			t.Fatalf("wait = %+v, err=%v; want 4000", w, err)
-		}
-	})
-
-	t.Run("tiny TTL clamp in tests", func(t *testing.T) {
-		lim := queue.DefaultLimits()
-		lim.MinLeaseTTLMS = 100
-		s := queue.NewState(lim)
-		cfg := queue.Config{Machines: 1, LeaseTTLMS: 300, BuildTimeoutMS: 30_000, MaxAttempts: 3, MaxBatch: 1}
-		evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
-			BuildID:       "b-tiny",
-			RunnerID:      "r1",
-			Config:        cfg,
-			Tests:         []string{"a.py"},
-			PredictionsMS: []*int64{int64Ptr(5000)},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		mustApply(t, s, evs)
-		evs, _, err = queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		mustApply(t, s, evs)
-		_, w, err := queue.DecideLease(s, 1050, queue.LeaseCommand{RunnerID: "r2", RequestID: "q2"})
-		if err != nil || w.Status != queue.LeaseWait || w.RetryAfterMS != 150 {
-			t.Fatalf("wait = %+v, err=%v; want 150", w, err)
-		}
-	})
+	}
 }

@@ -1,7 +1,6 @@
 package queue_test
 
 import (
-	"crypto/sha256"
 	"encoding/json/v2"
 	"reflect"
 	"testing"
@@ -9,19 +8,6 @@ import (
 	"github.com/nuggocto/bunpo/internal/queue"
 )
 
-// stateHash hashes the deterministic JSON encoding of s without allocating a
-// decoded copy. Any mutation to any exported field changes the hash.
-func stateHash(t testing.TB, s *queue.State) [sha256.Size]byte {
-	t.Helper()
-	h := sha256.New()
-	if err := json.MarshalWrite(h, s, json.Deterministic(true)); err != nil {
-		t.Fatalf("marshal state: %v", err)
-	}
-	return [sha256.Size]byte(h.Sum(nil))
-}
-
-// cloneState deep-copies s via JSON so adding a field to State cannot be
-// silently forgotten in a hand-written clone helper.
 func cloneState(t testing.TB, s *queue.State) *queue.State {
 	t.Helper()
 	raw, err := json.Marshal(s)
@@ -35,60 +21,43 @@ func cloneState(t testing.TB, s *queue.State) *queue.State {
 	return &out
 }
 
+func nilEmpty[T any](s *[]T) {
+	if len(*s) == 0 {
+		*s = nil
+	}
+}
+
 func normalizeEmptySlices(s *queue.State) {
-	if len(s.ActiveLeases) == 0 {
-		s.ActiveLeases = nil
-	}
-	if len(s.RunnerOrder) == 0 {
-		s.RunnerOrder = nil
-	}
-	if len(s.Conflicts) == 0 {
-		s.Conflicts = nil
-	}
-	if len(s.Tests) == 0 {
-		s.Tests = nil
-	}
-	if len(s.Leases) == 0 {
-		s.Leases = nil
-	}
-	if len(s.DealOrder) == 0 {
-		s.DealOrder = nil
-	}
+	nilEmpty(&s.ActiveLeases)
+	nilEmpty(&s.RunnerOrder)
+	nilEmpty(&s.Conflicts)
+	nilEmpty(&s.Tests)
+	nilEmpty(&s.Leases)
+	nilEmpty(&s.DealOrder)
 	if len(s.Runners) == 0 {
 		s.Runners = nil
 	}
 	for i := range s.Tests {
-		if len(s.Tests[i].Attempts) == 0 {
-			s.Tests[i].Attempts = nil
-		}
-		if len(s.Tests[i].History) == 0 {
-			s.Tests[i].History = nil
-		}
+		nilEmpty(&s.Tests[i].Attempts)
+		nilEmpty(&s.Tests[i].History)
 	}
 }
 
-// equalExact checks full structural equality via reflect.DeepEqual (including
-// ephemeral in-memory lease deadlines).
-func equalExact(t testing.TB, a, b *queue.State) bool {
+func equalStates(t testing.TB, a, b *queue.State, ignoreDeadlines bool) bool {
 	t.Helper()
 	ca, cb := cloneState(t, a), cloneState(t, b)
 	normalizeEmptySlices(ca)
 	normalizeEmptySlices(cb)
+	if ignoreDeadlines {
+		for i := range ca.Leases {
+			ca.Leases[i].DeadlineMS = 0
+		}
+		for i := range cb.Leases {
+			cb.Leases[i].DeadlineMS = 0
+		}
+	}
 	return reflect.DeepEqual(ca, cb)
 }
 
-// equalPersistent checks equality of persisted state via reflect.DeepEqual,
-// ignoring ephemeral in-memory Lease.DeadlineMS extensions from heartbeats.
-func equalPersistent(t testing.TB, a, b *queue.State) bool {
-	t.Helper()
-	ca, cb := cloneState(t, a), cloneState(t, b)
-	normalizeEmptySlices(ca)
-	normalizeEmptySlices(cb)
-	for i := range ca.Leases {
-		ca.Leases[i].DeadlineMS = 0
-	}
-	for i := range cb.Leases {
-		cb.Leases[i].DeadlineMS = 0
-	}
-	return reflect.DeepEqual(ca, cb)
-}
+func equalExact(t testing.TB, a, b *queue.State) bool      { return equalStates(t, a, b, false) }
+func equalPersistent(t testing.TB, a, b *queue.State) bool { return equalStates(t, a, b, true) }

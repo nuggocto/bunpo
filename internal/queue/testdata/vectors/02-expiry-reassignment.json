@@ -42,6 +42,13 @@
       }
     },
     {
+      "now_ms": 3000,
+      "command": {"type": "lease", "runner_id": "runner-c", "machine_index": 2, "request_id": "c0"},
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {"status": "wait", "retry_after_ms": 1000}
+    },
+    {
       "now_ms": 7000,
       "command": {"type": "lease", "runner_id": "runner-c", "machine_index": 2, "request_id": "c1"},
       "expect_status": 200,
