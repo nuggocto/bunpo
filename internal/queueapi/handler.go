@@ -43,15 +43,16 @@ func (NopEventLog) Append(context.Context, string, []queue.Event) error { return
 
 // HandlerConfig configures a live-queue HTTP handler.
 type HandlerConfig struct {
-	WriteToken  string
-	ReadToken   string
-	Clock       func() int64
-	Limits      queue.Limits
-	MaxBuilds   int
-	MaxRunning  int
-	RetentionMS int64
-	Log         EventLog
-	Logger      *slog.Logger
+	WriteToken    string
+	ReadToken     string
+	Clock         func() int64
+	Limits        queue.Limits
+	MaxBuilds     int
+	MaxRunning    int
+	RetentionMS   int64
+	Log           EventLog
+	Logger        *slog.Logger
+	InitialBuilds []*queue.State
 }
 
 type authRole int
@@ -110,7 +111,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
-	return &Handler{
+	h := &Handler{
 		writeDigest: sha256.Sum256([]byte(cfg.WriteToken)),
 		readDigest:  sha256.Sum256([]byte(cfg.ReadToken)),
 		clock:       cfg.Clock,
@@ -120,8 +121,19 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		retentionMS: cfg.RetentionMS,
 		log:         cfg.Log,
 		logger:      cfg.Logger,
-		builds:      make(map[string]*buildEntry),
-	}, nil
+		builds:      make(map[string]*buildEntry, len(cfg.InitialBuilds)),
+	}
+	now := h.clock()
+	for _, st := range cfg.InitialBuilds {
+		if st == nil || !st.Initialized || st.BuildID == "" {
+			continue
+		}
+		h.builds[st.BuildID] = &buildEntry{
+			state:          st,
+			lastActivityMS: now,
+		}
+	}
+	return h, nil
 }
 
 // ServeHTTP dispatches live-queue HTTP requests. Auth runs before reading any

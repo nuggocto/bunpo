@@ -171,8 +171,7 @@ type driverDeps struct {
 
 type runningCmd struct {
 	leaseID  int64
-	cmd      *exec.Cmd
-	doneCh   chan error
+	stopCh   chan struct{}
 	stopOnce sync.Once
 }
 
@@ -186,6 +185,10 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 	if d.ent == nil {
 		d.ent = CryptoEntropy{}
 	}
+
+	// Monotonic clock anchored at startTime so NTP steps never skew retry budgets or timers.
+	startTime := time.Now()
+	nowMS := func() int64 { return time.Since(startTime).Milliseconds() }
 
 	evCh := make(chan Event, 64)
 	driverDone := make(chan struct{})
@@ -234,7 +237,7 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 				cancelTimer(a.TimerKind)
 				stopCh := make(chan struct{})
 				timers[a.TimerKind] = stopCh
-				delay := max(time.Duration(a.AtMS-time.Now().UnixMilli())*time.Millisecond, 0)
+				delay := max(time.Duration(a.AtMS-nowMS())*time.Millisecond, 0)
 				kind, gen := a.TimerKind, a.TimerGen
 				wg.Add(1)
 				go func() {
@@ -262,8 +265,10 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 				if err := writeBatchFile(d.dirRoot, d.batchFileName, a.Attempts, d.ent); err != nil {
 					return fmt.Errorf("writing batch file: %w", err)
 				}
-				if err := removeReportFiles(d.reportPaths); err != nil {
-					return fmt.Errorf("removing old report file: %w", err)
+				if a.ClearReports {
+					if err := removeReportFiles(d.reportPaths); err != nil {
+						return fmt.Errorf("removing old report file: %w", err)
+					}
 				}
 				cmd := exec.Command(d.command[0], d.command[1:]...)
 				cmd.Stdin = nil
@@ -278,28 +283,29 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 				}
 				rc := &runningCmd{
 					leaseID: a.LeaseID,
-					cmd:     cmd,
-					doneCh:  make(chan error, 1),
+					stopCh:  make(chan struct{}),
 				}
 				activeCmd = rc
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					waitErr := cmd.Wait()
-					rc.doneCh <- waitErr
+					childDone := make(chan error, 1)
+					go func() { childDone <- cmd.Wait() }()
+					var waitErr error
+					select {
+					case waitErr = <-childDone:
+					case <-rc.stopCh:
+						// Wait until stopProcessGroup has killed the entire process
+						// group (including grandchildren) before posting EvCommandExited.
+						waitErr = stopProcessGroup(cmd, childDone, d.killGrace)
+					}
 					exitCode, signaled := classifyExit(waitErr)
 					post(Event{Kind: EvCommandExited, LeaseID: rc.leaseID, ExitCode: exitCode, Signaled: signaled})
 				}()
 
 			case ActStopCommand:
 				if rc := activeCmd; rc != nil && rc.leaseID == a.LeaseID {
-					rc.stopOnce.Do(func() {
-						wg.Add(1)
-						go func() {
-							defer wg.Done()
-							_ = stopProcessGroup(rc.cmd, rc.doneCh, d.killGrace)
-						}()
-					})
+					rc.stopOnce.Do(func() { close(rc.stopCh) })
 				}
 
 			case ActReadReports:
@@ -322,7 +328,7 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 		return nil
 	}
 
-	if err := execActions(step(time.Now().UnixMilli(), Event{Kind: EvStart})); err != nil {
+	if err := execActions(step(nowMS(), Event{Kind: EvStart})); err != nil {
 		return Action{}, err
 	}
 	if doneAction != nil {
@@ -334,14 +340,14 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 		select {
 		case <-sigCh:
 			sigCh = nil // deliver EvSignal once
-			if err := execActions(step(time.Now().UnixMilli(), Event{Kind: EvSignal})); err != nil {
+			if err := execActions(step(nowMS(), Event{Kind: EvSignal})); err != nil {
 				return Action{}, err
 			}
 		case ev := <-evCh:
 			if ev.Kind == EvCommandExited && activeCmd != nil && activeCmd.leaseID == ev.LeaseID {
 				activeCmd = nil
 			}
-			if err := execActions(step(time.Now().UnixMilli(), ev)); err != nil {
+			if err := execActions(step(nowMS(), ev)); err != nil {
 				return Action{}, err
 			}
 		}

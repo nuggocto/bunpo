@@ -202,20 +202,21 @@ const (
 
 // Action is one side effect emitted by a sans-I/O machine.
 type Action struct {
-	Kind      ActionKind
-	OpID      uint64
-	Req       Request
-	TimerKind TimerKind
-	TimerGen  uint64
-	AtMS      int64
-	LeaseID   int64
-	Attempts  []queue.LeasedAttemptView
-	Message   string
-	Verdict   queue.Verdict
-	Status    *queueapi.StatusResponse
-	Report    *manifest.RunReport
-	HasReport bool
-	Err       error
+	Kind         ActionKind
+	OpID         uint64
+	Req          Request
+	TimerKind    TimerKind
+	TimerGen     uint64
+	AtMS         int64
+	LeaseID      int64
+	Attempts     []queue.LeasedAttemptView
+	ClearReports bool
+	Message      string
+	Verdict      queue.Verdict
+	Status       *queueapi.StatusResponse
+	Report       *manifest.RunReport
+	HasReport    bool
+	Err          error
 }
 
 // WorkerConfig configures a sans-I/O live-queue worker Machine.
@@ -267,6 +268,8 @@ type Machine struct {
 
 	hbIntervalMS int64
 	hbRetryMS    int64
+	buildStartMS int64
+	startedAtSet bool
 
 	curReqID    string
 	curLease    queueapi.LeaseResponse
@@ -316,6 +319,8 @@ func (m *Machine) Step(nowMS int64, ev Event) []Action {
 		if m.phase != phaseNew {
 			return nil
 		}
+		m.buildStartMS = nowMS
+		m.startedAtSet = true
 		m.phase = phaseInit
 		return []Action{m.sendInit()}
 
@@ -488,10 +493,27 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 	case phaseLeasing:
 		if resp.Err != nil {
 			var apiErr *queueapi.APIError
-			if errors.As(resp.Err, &apiErr) && apiErr.HTTPStatus == 409 && apiErr.Code == queue.ErrCodeStaleRequest {
-				actions := []Action{{Kind: ActLogWarn, Message: "lease request expired before response arrived; requesting a fresh lease"}}
-				actions = append(actions, m.startFreshLease()...)
-				return actions
+			if errors.As(resp.Err, &apiErr) && apiErr.HTTPStatus == 409 {
+				if apiErr.Code == queue.ErrCodeStaleRequest {
+					actions := []Action{{Kind: ActLogWarn, Message: "lease request expired before response arrived; requesting a fresh lease"}}
+					actions = append(actions, m.startFreshLease()...)
+					return actions
+				}
+				if apiErr.Code == queue.ErrCodeLeaseHeld {
+					// A delayed duplicate lease request can grant an orphan lease on the
+					// server after this runner moved on; wait one heartbeat interval for
+					// it to expire and try again with a fresh request_id, bounded by the
+					// build deadline.
+					if m.startedAtSet && m.cfg.Config.BuildTimeoutMS > 0 && nowMS >= m.buildStartMS+m.cfg.Config.BuildTimeoutMS {
+						return m.fail(resp.Err)
+					}
+					m.fgRetry.reset()
+					m.phase = phaseWaiting
+					return []Action{
+						{Kind: ActLogWarn, Message: "server reports an active lease for this runner; waiting before requesting a fresh lease"},
+						m.setForegroundTimer(nowMS + m.hbIntervalMS),
+					}
+				}
 			}
 			return m.handleTransientOrFail(nowMS, resp.Err)
 		}
@@ -524,7 +546,7 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 			m.curExtraErr = nil
 			m.phase = phaseRunningCmd
 			return []Action{
-				{Kind: ActStartCommand, LeaseID: lease.LeaseID, Attempts: lease.Attempts},
+				{Kind: ActStartCommand, LeaseID: lease.LeaseID, Attempts: lease.Attempts, ClearReports: true},
 				m.setHeartbeatTimer(nowMS + m.hbIntervalMS),
 			}
 
