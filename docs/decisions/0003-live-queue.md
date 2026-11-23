@@ -69,6 +69,8 @@ Each lease takes tests in deal order until the batch holds at least `ceil(remain
 
 On Unix, the client runs the test command in its own process group and signals the group (`SIGTERM`, then `SIGKILL` after 5 s) on `SIGINT`/`SIGTERM` or when a heartbeat reports the lease is lost.
 
+To keep runner and status behavior deterministic and testable under fault injection, `internal/queuerunner` separates pure sans-I/O state machines (`Machine` and `StatusMachine`, advancing via `Step(nowMS, event) -> []Action` with `OpID`/`TimerGen` fencing and an `Entropy` interface) from a thin OS/HTTP driver, and `internal/queueapi.Client` performs single-shot HTTP requests without internal retry loops. `internal/sim` runs the real machines, wire encoders, and `queueapi.Handler` in a single-goroutine seeded simulator with an independent oracle.
+
 ### Cloudflare Worker topology (not yet built)
 
 One SQLite-backed Durable Object (`BuildDO`) will own each build, storing the immutable test catalog in chunked rows and appending one row per event. Each `BuildDO` will use two lifecycle alarms: one at `build_deadline` to finalize abandoned builds, and once terminal, one at `+7 days` to call `ctx.storage.deleteAll()`. A separate `BuildIndex` Durable Object will hold up to 200 recent build summaries and receive at most two RPCs per build (on `init` and when the build reaches a terminal verdict).

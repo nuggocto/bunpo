@@ -224,15 +224,17 @@ internal/junit/          reading JUnit XML and the two-column format
 internal/manifest/       manifest, plan and run report files; the verify check
 internal/jsonfile/       the strict versioned-JSON reader every file uses
 internal/queue/          pure live-queue state machine (Decide/Apply) and shared vectors
-internal/queueapi/       HTTP wire types, strict JSON handler, client, black-box protocol suite
-internal/queuerunner/    live-queue worker loop, process-group signaling, heartbeats, outcome mapping
+internal/queueapi/       HTTP wire types, strict JSON handler, single-shot client, black-box suite
+internal/queuerunner/    sans-I/O worker and status machines, thin OS driver, process-group signaling
+internal/sim/            deterministic single-goroutine live-queue simulator and independent oracle
 ```
 
 Only `cmd/bunpo`, `cmd/bunpo-server`, `internal/queueapi` (HTTP), and
-`internal/queuerunner` (subprocess execution and batch files) touch I/O or the
-operating system. The core packages (`split`, `timing`, `junit`, `manifest`,
-`jsonfile`, `queue`) are plain computations on bytes and values, so every
-platform gets the same answer and the tests call them directly.
+`internal/queuerunner`'s thin driver (`driver.go`, `proc_unix.go`) touch I/O or
+the operating system. The core packages (`split`, `timing`, `junit`, `manifest`,
+`jsonfile`, `queue`) and `queuerunner`'s `Machine`/`StatusMachine` are plain
+deterministic computations on bytes and values, so every platform gets the same
+answer and the simulator drives the real code directly.
 
 Imports flow one way:
 
@@ -664,28 +666,40 @@ Two tests pin exact bytes: the timing file's JSON and the digest input. If
 either fails, the format changed, and the change needs a new version number.
 
 `FuzzDecode` feeds `timing.Decode` random input, `FuzzRead` does the same for
-the JUnit reader, and `FuzzEventReplay` and `FuzzDecide` fuzz the live-queue
-event applier and decision functions. `BenchmarkSplit` benchmarks the
-in-memory split of 50,000 tests across 256 machines well under the one-second
-budget (~31–80 ms depending on CPU, 403 allocations).
+the JUnit reader, and `FuzzEventReplay` fuzzes the live-queue event applier.
+`BenchmarkSplit` benchmarks the in-memory split of 50,000 tests across 256
+machines well under the one-second budget (~31–80 ms depending on CPU, 403
+allocations).
 
-`internal/queue` has table tests for every limit and error path, shared JSON
-scenario vectors in `internal/queue/testdata/vectors/` (also meant to be run by
-the future TypeScript Worker core), and a property test with an independent
-observation model checking at-most-one accepted terminal result per test,
-monotonic generations, at-most-one active lease per test and per runner,
-bounded event counts under hostile repeats, verdict transition rules (a
-finished verdict can change only `passed -> unresolved` on an `init` conflict),
-replay equality, and `Decide` purity. `internal/queueapi` includes a black-box
-HTTP protocol test suite (runnable against any server via
-`BUNPO_TEST_SERVER_URL`) plus concurrency tests under `-race` and storage/fault
-injection tests. `internal/queuerunner` tests every row of the outcome table,
-token stripping, heartbeat retry, and goroutine cleanup, and `cmd/bunpo` runs
-real-process end-to-end tests covering `SIGKILL` before/after execution,
-`SIGSTOP`/`SIGCONT` past TTL, temporary server connection refusal, poison-file
-isolation, failing-sibling untimed results, Playwright-style all-skipped
-non-zero exits, `init` conflicts, missing/extra reports, `--status` + `merge`,
-and a smoke test against the real `bunpo-server` binary.
+`internal/queue` has table tests for every limit, boundary, and error path plus
+shared JSON scenario vectors in `internal/queue/testdata/vectors/` (also meant
+to be run by the future TypeScript Worker core). `internal/queueapi` includes a
+black-box HTTP protocol test suite (runnable against any server via
+`BUNPO_TEST_SERVER_URL`), lock/concurrency checks, capacity and retention tests,
+and client hardening tests. `internal/queuerunner` tests every row of the
+outcome table, token stripping, Unix process-group cleanup, and goroutine leaks
+on cancellation. `cmd/bunpo` runs real-process end-to-end tests covering
+`SIGKILL` before and after test execution plus a smoke test against the real
+`bunpo-server` binary.
+
+`internal/sim` runs deterministic simulation tests in a single goroutine on a
+virtual clock with seeded randomness, driving the real `queueapi.Handler`, wire
+encoders/parsers, `queuerunner.Machine`, and `queuerunner.StatusMachine` through
+a faulted network and durable event log. Each seed combines random swarm fault
+profiles (request/response drops and late duplicates, HTTP 503/429, unwritten
+and uncertain disk errors, server restarts, clock jumps, client skew, runner
+kills and pauses, divergent inits, late conflicts after pass, report outages,
+poison files, extra/missing/corrupt reports, and mixed sibling failures) and
+heals faults to verify liveness. An independent oracle checks every response and
+command outcome against ground truth, replays stored events incrementally and
+again from disk on restart and completion, and fails if any required fault
+counter stays zero. Any failure prints the exact replay command:
+
+```sh
+BUNPO_SIM_SEED=42 go test -v -run TestSim ./internal/sim
+```
+
+Run larger sweeps with `BUNPO_SIM_COUNT=5000 go test -count=1 -run TestSim$ ./internal/sim`.
 [Decision 3](decisions/0003-live-queue.md) and
 [docs/queue-protocol.md](queue-protocol.md) specify the design and wire
 protocol.
