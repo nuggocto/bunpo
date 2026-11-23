@@ -10,15 +10,16 @@ import (
 
 // total is a File reduced to what callers use.
 type total struct {
-	ms     int64
-	cases  int
-	failed bool
+	ms      int64
+	cases   int
+	skipped int
+	failed  bool
 }
 
 func totals(r junit.Report) map[string]total {
 	out := make(map[string]total, len(r.Files))
 	for path, f := range r.Files {
-		out[path] = total{f.MS(), f.Cases, f.Failed}
+		out[path] = total{f.MS(), f.Cases, f.Skipped, f.Failed}
 	}
 	return out
 }
@@ -55,14 +56,14 @@ func TestRead(t *testing.T) {
 				<testcase file="b.py" time="1.5"/>
 			</testsuite>`,
 			src:  junit.FileAttribute,
-			want: map[string]total{"a.py": {1, 3, false}, "b.py": {1500, 1, false}},
+			want: map[string]total{"a.py": {1, 3, 0, false}, "b.py": {1500, 1, 0, false}},
 		},
 		{
 			// Rounding to nanoseconds first would make this 0.5 ms, then 1 ms.
 			name: "sub-nanosecond digits still round once",
 			xml:  `<testsuite><testcase file="a.py" time="0.0004999996"/><testcase file="b.py" time="0.0005"/></testsuite>`,
 			src:  junit.FileAttribute,
-			want: map[string]total{"a.py": {0, 1, false}, "b.py": {1, 1, false}},
+			want: map[string]total{"a.py": {0, 1, 0, false}, "b.py": {1, 1, 0, false}},
 		},
 		{
 			name: "failure and error fail the file, skipped does not",
@@ -72,15 +73,26 @@ func TestRead(t *testing.T) {
 				<testcase file="s.py" time="1"><skipped/></testcase>
 			</testsuite></testsuites>`,
 			src:  junit.FileAttribute,
-			want: map[string]total{"f.py": {1000, 1, true}, "e.py": {1000, 1, true}, "s.py": {1000, 1, false}},
+			want: map[string]total{"f.py": {1000, 1, 0, true}, "e.py": {1000, 1, 0, true}, "s.py": {1000, 1, 1, false}},
 		},
 		{
-			name: "a failure element deeper inside the case does not count",
+			name: "mixed skipped and passed cases, and duplicate skipped elements in one case",
+			xml: `<testsuite>
+				<testcase file="mix.py" time="0.5"/>
+				<testcase file="mix.py" time="0"><skipped/><skipped/></testcase>
+				<testcase file="all.py"><skipped/></testcase>
+				<testcase file="all.py"><skipped message="win only"/></testcase>
+			</testsuite>`,
+			src:  junit.FileAttribute,
+			want: map[string]total{"mix.py": {500, 2, 1, false}, "all.py": {0, 2, 2, false}},
+		},
+		{
+			name: "a failure or skipped element deeper inside the case does not count",
 			xml: `<testsuite><testcase file="a.py" time="1">
-				<system-out><failure>printed text that looks like XML</failure></system-out>
+				<system-out><failure>printed text that looks like XML</failure><skipped/></system-out>
 			</testcase></testsuite>`,
 			src:  junit.FileAttribute,
-			want: map[string]total{"a.py": {1000, 1, false}},
+			want: map[string]total{"a.py": {1000, 1, 0, false}},
 		},
 		{
 			name: "the nearest suite's file attribute stands in for the case's",
@@ -88,25 +100,25 @@ func TestRead(t *testing.T) {
 				<testcase time="1"/>
 			</testsuite><testcase time="2"/></testsuite></testsuites>`,
 			src:  junit.FileAttribute,
-			want: map[string]total{"inner.js": {1000, 1, false}, "outer.js": {2000, 1, false}},
+			want: map[string]total{"inner.js": {1000, 1, 0, false}, "outer.js": {2000, 1, 0, false}},
 		},
 		{
 			name: "classname",
 			xml:  `<testsuite name="ignored"><testcase classname="sub/a.spec.js" file="ignored" time="1"/></testsuite>`,
 			src:  junit.Classname,
-			want: map[string]total{"sub/a.spec.js": {1000, 1, false}},
+			want: map[string]total{"sub/a.spec.js": {1000, 1, 0, false}},
 		},
 		{
 			name: "suite name",
 			xml:  `<testsuites><testsuite name="a.spec.js"><testcase classname="ignored" time="1"/></testsuite></testsuites>`,
 			src:  junit.SuiteName,
-			want: map[string]total{"a.spec.js": {1000, 1, false}},
+			want: map[string]total{"a.spec.js": {1000, 1, 0, false}},
 		},
 		{
 			name: "a skipped case with no time counts as zero",
 			xml:  `<testsuite><testcase classname="a.spec.js"><skipped/></testcase></testsuite>`,
 			src:  junit.Classname,
-			want: map[string]total{"a.spec.js": {0, 1, false}},
+			want: map[string]total{"a.spec.js": {0, 1, 1, false}},
 		},
 		{
 			name: "an empty suite, with a declaration, comments and whitespace",
@@ -180,9 +192,9 @@ func TestReadLines(t *testing.T) {
 	}
 
 	assertTotals(t, got, map[string]total{
-		"tests/a.py":          {1205, 2, false},
-		"tests/with space.py": {30, 1, false},
-		"tests/fails.py":      {0, 1, true},
+		"tests/a.py":          {1205, 2, 0, false},
+		"tests/with space.py": {30, 1, 0, false},
+		"tests/fails.py":      {0, 1, 0, true},
 	})
 }
 

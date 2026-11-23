@@ -1,1 +1,1 @@
-{"./spec/fast_spec.rb":{"ms":0,"cases":2,"failed":false},"./spec/slow_spec.rb":{"ms":151,"cases":1,"failed":false},"./spec/sub/fails_spec.rb":{"ms":7,"cases":2,"failed":true},"./spec/sub/skips_spec.rb":{"ms":0,"cases":2,"failed":false}}
+{"./spec/fast_spec.rb":{"ms":0,"cases":2,"skipped":0,"failed":false},"./spec/slow_spec.rb":{"ms":151,"cases":1,"skipped":0,"failed":false},"./spec/sub/fails_spec.rb":{"ms":7,"cases":2,"skipped":0,"failed":true},"./spec/sub/skips_spec.rb":{"ms":0,"cases":2,"skipped":1,"failed":false}}

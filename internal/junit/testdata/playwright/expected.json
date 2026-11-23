@@ -1,1 +1,1 @@
-{"fast.spec.js":{"ms":7,"cases":2,"failed":false},"slow.spec.js":{"ms":152,"cases":1,"failed":false},"sub/fails.spec.js":{"ms":5,"cases":2,"failed":true},"sub/skips.spec.js":{"ms":3,"cases":2,"failed":false}}
+{"fast.spec.js":{"ms":7,"cases":2,"skipped":0,"failed":false},"slow.spec.js":{"ms":152,"cases":1,"skipped":0,"failed":false},"sub/fails.spec.js":{"ms":5,"cases":2,"skipped":0,"failed":true},"sub/skips.spec.js":{"ms":3,"cases":2,"skipped":1,"failed":false}}

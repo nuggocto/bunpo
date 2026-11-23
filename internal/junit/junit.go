@@ -44,10 +44,12 @@ const (
 )
 
 // File is the total for one test file. Seconds is exact, so the total is
-// rounded only once, by MS. Skipped cases do not set Failed.
+// rounded only once, by MS. Skipped counts test cases with a direct <skipped>
+// child and does not set Failed.
 type File struct {
 	Seconds *big.Rat
 	Cases   int
+	Skipped int
 	Failed  bool
 }
 
@@ -85,7 +87,7 @@ func (f File) Add(g File) (File, bool) {
 	if sum.Cmp(maxSeconds) > 0 {
 		return File{}, false
 	}
-	return File{Seconds: sum, Cases: f.Cases + g.Cases, Failed: f.Failed || g.Failed}, true
+	return File{Seconds: sum, Cases: f.Cases + g.Cases, Skipped: f.Skipped + g.Skipped, Failed: f.Failed || g.Failed}, true
 }
 
 func Read(r io.Reader, src Source) (Report, error) {
@@ -154,6 +156,7 @@ type parser struct {
 	file    string
 	seconds *big.Rat
 	failed  bool
+	skipped bool
 }
 
 func (p *parser) start(t xml.StartElement) error {
@@ -174,10 +177,15 @@ func (p *parser) start(t xml.StartElement) error {
 	case p.depth == 1:
 		p.sawRoot = true
 
-	// Only a direct child counts: <failure> inside <system-out> is text.
+	// Only a direct child counts: <failure> or <skipped> inside <system-out> is text.
 	case p.inCase:
-		if p.depth == p.caseAt+1 && (name == "failure" || name == "error") {
-			p.failed = true
+		if p.depth == p.caseAt+1 {
+			switch name {
+			case "failure", "error":
+				p.failed = true
+			case "skipped":
+				p.skipped = true
+			}
 		}
 		return nil
 	}
@@ -209,7 +217,7 @@ func (p *parser) startCase(t xml.StartElement) error {
 		return fmt.Errorf("%w: %q", ErrNoFile, attr(t, "name"))
 	}
 
-	p.inCase, p.caseAt, p.file, p.seconds, p.failed = true, p.depth, file, seconds, false
+	p.inCase, p.caseAt, p.file, p.seconds, p.failed, p.skipped = true, p.depth, file, seconds, false, false
 	return nil
 }
 
@@ -238,7 +246,11 @@ func (p *parser) end() error {
 
 	if p.inCase && p.depth == p.caseAt {
 		p.inCase = false
-		if err := p.report.add(p.file, File{Seconds: p.seconds, Cases: 1, Failed: p.failed}); err != nil {
+		skipped := 0
+		if p.skipped {
+			skipped = 1
+		}
+		if err := p.report.add(p.file, File{Seconds: p.seconds, Cases: 1, Skipped: skipped, Failed: p.failed}); err != nil {
 			return err
 		}
 	}

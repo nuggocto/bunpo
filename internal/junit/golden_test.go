@@ -48,13 +48,14 @@ func TestGolden(t *testing.T) {
 			}
 
 			want := map[string]struct {
-				cases  int
-				failed bool
-			}{tc.fast: {2, false}, tc.slow: {1, false}, tc.fails: {2, true}, tc.skips: {2, false}}
+				cases   int
+				skipped int
+				failed  bool
+			}{tc.fast: {2, 0, false}, tc.slow: {1, 0, false}, tc.fails: {2, 0, true}, tc.skips: {2, 1, false}}
 			for path, w := range want {
 				g, ok := got.Files[path]
-				if !ok || g.Cases != w.cases || g.Failed != w.failed {
-					t.Fatalf("%s = %+v, %t; want %d cases, failed %t", path, g, ok, w.cases, w.failed)
+				if !ok || g.Cases != w.cases || g.Skipped != w.skipped || g.Failed != w.failed {
+					t.Fatalf("%s = %+v, %t; want %d cases, %d skipped, failed %t", path, g, ok, w.cases, w.skipped, w.failed)
 				}
 			}
 
@@ -71,14 +72,15 @@ func compareGolden(t *testing.T, path string, got junit.Report) {
 	t.Helper()
 
 	type goldenFile struct {
-		MS     int64 `json:"ms"`
-		Cases  int   `json:"cases"`
-		Failed bool  `json:"failed"`
+		MS      int64 `json:"ms"`
+		Cases   int   `json:"cases"`
+		Skipped int   `json:"skipped"`
+		Failed  bool  `json:"failed"`
 	}
 
 	view := make(map[string]goldenFile, len(got.Files))
 	for path, f := range got.Files {
-		view[path] = goldenFile{f.MS(), f.Cases, f.Failed}
+		view[path] = goldenFile{f.MS(), f.Cases, f.Skipped, f.Failed}
 	}
 
 	data, err := json.Marshal(view, json.Deterministic(true))

@@ -1,1 +1,1 @@
-{"tests/sub/test_fails.py":{"ms":0,"cases":2,"failed":true},"tests/sub/test_skips.py":{"ms":0,"cases":2,"failed":false},"tests/test_fast.py":{"ms":0,"cases":2,"failed":false},"tests/test_slow.py":{"ms":151,"cases":1,"failed":false}}
+{"tests/sub/test_fails.py":{"ms":0,"cases":2,"skipped":0,"failed":true},"tests/sub/test_skips.py":{"ms":0,"cases":2,"skipped":1,"failed":false},"tests/test_fast.py":{"ms":0,"cases":2,"skipped":0,"failed":false},"tests/test_slow.py":{"ms":151,"cases":1,"skipped":0,"failed":false}}

@@ -1,1 +1,1 @@
-{"tests/fast.test.js":{"ms":0,"cases":2,"failed":false},"tests/slow.test.js":{"ms":150,"cases":1,"failed":false},"tests/sub/fails.test.js":{"ms":2,"cases":2,"failed":true},"tests/sub/skips.test.js":{"ms":0,"cases":2,"failed":false}}
+{"tests/fast.test.js":{"ms":0,"cases":2,"skipped":0,"failed":false},"tests/slow.test.js":{"ms":150,"cases":1,"skipped":0,"failed":false},"tests/sub/fails.test.js":{"ms":2,"cases":2,"skipped":0,"failed":true},"tests/sub/skips.test.js":{"ms":0,"cases":2,"skipped":1,"failed":false}}
