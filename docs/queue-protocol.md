@@ -50,8 +50,21 @@ Trust boundary:
 
 - **Anyone holding `BUNPO_QUEUE_TOKEN` can initialize builds, lease work, and report any outcome for any build.** Treat it as a CI write secret.
 - Pull requests from forks do not have repository secrets and must use static mode (`bunpo split` / `verify`).
+- The client strips `BUNPO_QUEUE_TOKEN` and `BUNPO_QUEUE_READ_TOKEN` from the test command's environment so untrusted test code cannot trivially call the queue API directly. On some operating systems a same-user child process can still inspect another process's environment, so stripping is a reduction in exposure rather than a hard security boundary.
 - The client refuses plain `http://` URLs except loopback (`localhost`, `127.0.0.1`, `[::1]`) unless `--allow-insecure-http` is passed (which prints a warning to stderr). The client never follows HTTP redirects, bounds every response body, and never prints tokens.
 - The dashboard uses no cookies; it stores the read token in `sessionStorage`, sends it in the `Authorization` header, renders all server data with `textContent`, and serves a strict Content-Security-Policy.
+
+### When to use the live queue vs. static splitting
+
+Batching costs extra test-runner startups compared to one static invocation per machine. In simulations with a 5 s runner startup overhead across 4 machines:
+
+| Scenario | Static split | Live queue |
+| --- | --- | --- |
+| 4 equal machines starting together | 827 s | 902 s |
+| Mixed speeds (1.8x and 1x) | 1,077 s | 850 s |
+| One machine 5 minutes late | 1,127 s | 976 s |
+
+Use static splitting (`bunpo split` / `verify`) when machines are identical and start together. Use the live queue when runners differ in speed, start at different times behind CI queues, or can be preempted or killed mid-run. State-machine `Decide` calls stay under 2.5 ms at 20,000 tests.
 
 ## 3. Identifiers and limits
 

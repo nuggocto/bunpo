@@ -97,9 +97,9 @@ func runVector(t *testing.T, vec vectorFile) {
 			continue
 		}
 
-		before := st.Clone()
+		before := cloneState(t, st)
 		events, respVal, err := runVectorCommand(st, step.NowMS, hdr.Type, step.Command)
-		if !st.EqualExact(before) {
+		if !equalExact(t, st, before) {
 			t.Fatalf("step %d (%s): Decide mutated State", i, hdr.Type)
 		}
 
@@ -202,7 +202,7 @@ func runVector(t *testing.T, vec vectorFile) {
 			t.Fatalf("replay event %d (%s): %v", i, ev.Type, err)
 		}
 	}
-	if !st.EqualPersistent(replayed) {
+	if !equalPersistent(t, st, replayed) {
 		t.Fatalf("replayed state differs from live persistent state")
 	}
 }

@@ -498,12 +498,106 @@ func TestApplyRejectsCorruptEventsWithoutPartialMutation(t *testing.T) {
 	}
 
 	for i, bad := range badEvents {
-		before := s.Clone()
+		before := cloneState(t, s)
 		if err := s.Apply(bad); err == nil {
 			t.Fatalf("bad event %d (%s): Apply succeeded; want error", i, bad.Type)
 		}
-		if !s.EqualExact(before) {
+		if !equalExact(t, s, before) {
 			t.Fatalf("bad event %d (%s): Apply partially mutated state on error", i, bad.Type)
 		}
+	}
+}
+
+func TestResendingIdenticalStaleAndConflictingReportsEmitsNothing(t *testing.T) {
+	lim := queue.DefaultLimits()
+	lim.MinLeaseTTLMS = 1000
+	s := queue.NewState(lim)
+	cfg := defaultConfig()
+	cfg.LeaseTTLMS = 2000
+	cfg.BuildTimeoutMS = 60_000
+	cfg.MaxAttempts = 3
+	cfg.MaxBatch = 1
+
+	evs, _, err := queue.DecideInit(s, 1000, queue.InitCommand{
+		BuildID:       "b-dedup",
+		RunnerID:      "r1",
+		Config:        cfg,
+		Tests:         []string{"a.py"},
+		PredictionsMS: []*int64{int64Ptr(100)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustApply(t, s, evs)
+
+	// Lease 1 expires -> runner 2 leases 0.2 and passes.
+	evs, l1, err := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustApply(t, s, evs)
+
+	evs, l2, err := queue.DecideLease(s, 3500, queue.LeaseCommand{RunnerID: "r2", RequestID: "q2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustApply(t, s, evs)
+
+	evs, _, err = queue.DecideReport(s, 4000, queue.ReportCommand{
+		RunnerID: "r2",
+		LeaseID:  l2.LeaseID,
+		Results:  []queue.ReportResult{{AttemptID: "0.2", TestIndex: 0, Generation: 2, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 100}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustApply(t, s, evs)
+
+	// First stale report for lease 1 adds 1 history entry.
+	staleCmd := queue.ReportCommand{
+		RunnerID: "r1",
+		LeaseID:  l1.LeaseID,
+		Results:  []queue.ReportResult{{AttemptID: "0.1", TestIndex: 0, Generation: 1, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 90}},
+	}
+	evs, rep, err := queue.DecideReport(s, 4100, staleCmd)
+	if err != nil || len(evs) != 1 || rep.Results[0].Disposition != queue.DispositionStale {
+		t.Fatalf("first stale: evs=%v rep=%+v err=%v", evs, rep, err)
+	}
+	mustApply(t, s, evs)
+	if len(s.Tests[0].History) != 1 {
+		t.Fatalf("history len = %d; want 1", len(s.Tests[0].History))
+	}
+
+	// Resending the exact same stale report emits 0 events and adds 0 history.
+	evs, rep, err = queue.DecideReport(s, 4200, staleCmd)
+	if err != nil || len(evs) != 0 || rep.Results[0].Disposition != queue.DispositionStale {
+		t.Fatalf("repeated stale: evs=%v rep=%+v err=%v; want 0 events", evs, rep, err)
+	}
+	if len(s.Tests[0].History) != 1 {
+		t.Fatalf("history len after repeated stale = %d; want 1", len(s.Tests[0].History))
+	}
+
+	// First conflicting report for lease 2 adds 1 more history entry (total 2).
+	conflictCmd := queue.ReportCommand{
+		RunnerID: "r2",
+		LeaseID:  l2.LeaseID,
+		Results:  []queue.ReportResult{{AttemptID: "0.2", TestIndex: 0, Generation: 2, Outcome: queue.OutcomeFailed, Timed: false, DurationMS: 0}},
+	}
+	evs, rep, err = queue.DecideReport(s, 4300, conflictCmd)
+	if err != nil || len(evs) != 1 || rep.Results[0].Disposition != queue.DispositionConflict {
+		t.Fatalf("first conflict: evs=%v rep=%+v err=%v", evs, rep, err)
+	}
+	mustApply(t, s, evs)
+	if len(s.Tests[0].History) != 2 {
+		t.Fatalf("history len = %d; want 2", len(s.Tests[0].History))
+	}
+
+	// Resending the exact same conflicting report emits 0 events and adds 0 history.
+	evs, rep, err = queue.DecideReport(s, 4400, conflictCmd)
+	if err != nil || len(evs) != 0 || rep.Results[0].Disposition != queue.DispositionConflict {
+		t.Fatalf("repeated conflict: evs=%v rep=%+v err=%v; want 0 events", evs, rep, err)
+	}
+	if len(s.Tests[0].History) != 2 {
+		t.Fatalf("history len after repeated conflict = %d; want 2", len(s.Tests[0].History))
 	}
 }

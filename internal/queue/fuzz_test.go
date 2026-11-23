@@ -41,9 +41,9 @@ func FuzzEventReplay(f *testing.F) {
 			if err != nil {
 				continue
 			}
-			before := st.Clone()
+			before := cloneState(t, st)
 			if err := st.Apply(ev); err != nil {
-				if !st.EqualExact(before) {
+				if !equalExact(t, st, before) {
 					t.Fatalf("Apply mutated state on error: %v", err)
 				}
 			}
@@ -94,9 +94,9 @@ func FuzzDecide(f *testing.F) {
 		}
 
 		for _, st := range states {
-			before := st.Clone()
+			before := cloneState(t, st)
 			evs, _, _ := runVectorCommand(st, nowMS, hdr.Type, data)
-			if !st.EqualExact(before) {
+			if !equalExact(t, st, before) {
 				t.Fatalf("Decide(%s) mutated state", hdr.Type)
 			}
 			for _, ev := range evs {

@@ -233,12 +233,12 @@ func TestPropertyRandomSequences(t *testing.T) {
 			Tests:         tests,
 			PredictionsMS: preds,
 		}
-		before := st.Clone()
+		before := cloneState(t, st)
 		evs, _, err := queue.DecideInit(st, now, initCmd)
 		if err != nil {
 			t.Fatalf("trial %d init: %v", trial, err)
 		}
-		if !st.EqualExact(before) {
+		if !equalExact(t, st, before) {
 			t.Fatalf("trial %d: DecideInit mutated state", trial)
 		}
 		for _, ev := range evs {
@@ -270,7 +270,7 @@ func TestPropertyRandomSequences(t *testing.T) {
 
 			runner := fmt.Sprintf("r%d", rng.IntN(nRunners))
 			op := rng.IntN(100)
-			before := st.Clone()
+			before := cloneState(t, st)
 
 			switch {
 			case op < 5: // Simulated restart
@@ -283,7 +283,7 @@ func TestPropertyRandomSequences(t *testing.T) {
 					cmd.Config.MaxAttempts = (cfg.MaxAttempts % queue.MaxAttemptsLimit) + 1
 				}
 				evs, _, err := queue.DecideInit(st, now, cmd)
-				if !st.EqualExact(before) {
+				if !equalExact(t, st, before) {
 					t.Fatalf("trial %d step %d: DecideInit mutated state", trial, step)
 				}
 				if err != nil {
@@ -307,7 +307,7 @@ func TestPropertyRandomSequences(t *testing.T) {
 					MachineIndex: intPtr(rng.IntN(machines)),
 					RequestID:    reqID,
 				})
-				if !st.EqualExact(before) {
+				if !equalExact(t, st, before) {
 					t.Fatalf("trial %d step %d: DecideLease mutated state", trial, step)
 				}
 				for _, ev := range evs {
@@ -330,7 +330,7 @@ func TestPropertyRandomSequences(t *testing.T) {
 					RunnerID: kl.runnerID,
 					LeaseID:  kl.leaseID,
 				})
-				if !st.EqualExact(before) {
+				if !equalExact(t, st, before) {
 					t.Fatalf("trial %d step %d: DecideHeartbeat mutated state", trial, step)
 				}
 				if err != nil {
@@ -383,7 +383,7 @@ func TestPropertyRandomSequences(t *testing.T) {
 					Results:  results,
 				}
 				evs, resp, err := queue.DecideReport(st, now, cmd)
-				if !st.EqualExact(before) {
+				if !equalExact(t, st, before) {
 					t.Fatalf("trial %d step %d: DecideReport mutated state", trial, step)
 				}
 				if err != nil {
@@ -398,7 +398,7 @@ func TestPropertyRandomSequences(t *testing.T) {
 			default: // Status or ListTests (may finalize on read)
 				if rng.IntN(2) == 0 {
 					evs, _, err := queue.DecideStatus(st, now)
-					if !st.EqualExact(before) {
+					if !equalExact(t, st, before) {
 						t.Fatalf("trial %d step %d: DecideStatus mutated state", trial, step)
 					}
 					if err != nil {
@@ -410,7 +410,7 @@ func TestPropertyRandomSequences(t *testing.T) {
 					}
 				} else {
 					evs, _, err := queue.DecideListTests(st, now, queue.ListTestsCommand{Cursor: 0, Limit: 5})
-					if !st.EqualExact(before) {
+					if !equalExact(t, st, before) {
 						t.Fatalf("trial %d step %d: DecideListTests mutated state", trial, step)
 					}
 					if err != nil {
@@ -433,7 +433,7 @@ func TestPropertyRandomSequences(t *testing.T) {
 				t.Fatalf("trial %d: replay event %d (%s): %v", trial, i, ev.Type, err)
 			}
 		}
-		if !st.EqualPersistent(replayed) {
+		if !equalPersistent(t, st, replayed) {
 			t.Fatalf("trial %d: replayed state differs from live persistent state", trial)
 		}
 	}
