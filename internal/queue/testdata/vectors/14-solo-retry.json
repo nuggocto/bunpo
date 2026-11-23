@@ -1,0 +1,93 @@
+{
+  "name": "solo-retry",
+  "description": "First attempts precede retries in deal order; a test on its second attempt is skipped when packing first-attempt batches and leased alone.",
+  "min_lease_ttl_ms": 1000,
+  "steps": [
+    {
+      "now_ms": 1000,
+      "command": {
+        "type": "init",
+        "build_id": "build-14",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "config": {"machines": 1, "lease_ttl_ms": 5000, "build_timeout_ms": 60000, "max_attempts": 3, "max_batch": 200},
+        "tests": ["tests/a.py", "tests/b.py", "tests/c.py"],
+        "predictions_ms": [1000, 100, 100]
+      },
+      "expect_status": 200,
+      "expect_events": ["initialized"]
+    },
+    {
+      "now_ms": 1000,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a1"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 1,
+        "attempts": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "test": "tests/a.py"}]
+      }
+    },
+    {
+      "now_ms": 1100,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-a",
+        "lease_id": 1,
+        "results": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "outcome": "error", "timed": false, "duration_ms": 0}]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"]
+    },
+    {
+      "now_ms": 1200,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a2"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 2,
+        "attempts": [
+          {"attempt_id": "1.1", "test_index": 1, "generation": 1, "test": "tests/b.py"},
+          {"attempt_id": "2.1", "test_index": 2, "generation": 1, "test": "tests/c.py"}
+        ]
+      }
+    },
+    {
+      "now_ms": 1300,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-a",
+        "lease_id": 2,
+        "results": [
+          {"attempt_id": "1.1", "test_index": 1, "generation": 1, "outcome": "passed", "timed": true, "duration_ms": 100},
+          {"attempt_id": "2.1", "test_index": 2, "generation": 1, "outcome": "passed", "timed": true, "duration_ms": 100}
+        ]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"]
+    },
+    {
+      "now_ms": 1400,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a3"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 3,
+        "attempts": [{"attempt_id": "0.2", "test_index": 0, "generation": 2, "test": "tests/a.py"}]
+      }
+    }
+  ],
+  "expect_final": {
+    "verdict": "running",
+    "counts": {"total": 3, "pending": 0, "leased": 1, "passed": 2, "failed": 0, "skipped": 0, "unresolved": 0},
+    "conflicts_len": 0,
+    "conflicts_truncated": false,
+    "tests": [
+      {"test_index": 0, "state": "leased", "generation": 2, "timed": false, "duration_ms": 0, "history_len": 0, "history_truncated": false},
+      {"test_index": 1, "state": "passed", "generation": 1, "timed": true, "duration_ms": 100, "history_len": 0, "history_truncated": false},
+      {"test_index": 2, "state": "passed", "generation": 1, "timed": true, "duration_ms": 100, "history_len": 0, "history_truncated": false}
+    ]
+  }
+}

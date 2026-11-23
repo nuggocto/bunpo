@@ -1,0 +1,229 @@
+{
+  "name": "happy-path",
+  "description": "Two machines initialize with different predictions, lease in longest-first order, heartbeat without emitting events, report passed/skipped, and finish passed.",
+  "min_lease_ttl_ms": 1000,
+  "steps": [
+    {
+      "now_ms": 1000,
+      "command": {
+        "type": "init",
+        "build_id": "build-1",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "config": {
+          "machines": 2,
+          "lease_ttl_ms": 10000,
+          "build_timeout_ms": 60000,
+          "max_attempts": 3,
+          "max_batch": 200
+        },
+        "tests": ["tests/a.py", "tests/b.py", "tests/c.py"],
+        "predictions_ms": [100, 500, null]
+      },
+      "expect_status": 200,
+      "expect_events": ["initialized"],
+      "expect_response": {
+        "build_id": "build-1",
+        "created": true,
+        "verdict": "running",
+        "test_count": 3,
+        "deadline_ms": 61000
+      }
+    },
+    {
+      "now_ms": 1050,
+      "command": {
+        "type": "init",
+        "build_id": "build-1",
+        "runner_id": "runner-b",
+        "machine_index": 1,
+        "config": {
+          "machines": 2,
+          "lease_ttl_ms": 10000,
+          "build_timeout_ms": 60000,
+          "max_attempts": 3,
+          "max_batch": 200
+        },
+        "tests": ["tests/a.py", "tests/b.py", "tests/c.py"],
+        "predictions_ms": [null, null, null]
+      },
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {
+        "build_id": "build-1",
+        "created": false,
+        "verdict": "running",
+        "test_count": 3
+      }
+    },
+    {
+      "now_ms": 1100,
+      "command": {
+        "type": "lease",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "request_id": "req-a1"
+      },
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 1,
+        "deadline_ms": 11100,
+        "attempts": [
+          {"attempt_id": "1.1", "test_index": 1, "generation": 1, "test": "tests/b.py"}
+        ]
+      }
+    },
+    {
+      "now_ms": 1200,
+      "command": {
+        "type": "lease",
+        "runner_id": "runner-b",
+        "machine_index": 1,
+        "request_id": "req-b1"
+      },
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 2,
+        "deadline_ms": 11200,
+        "attempts": [
+          {"attempt_id": "2.1", "test_index": 2, "generation": 1, "test": "tests/c.py"}
+        ]
+      }
+    },
+    {
+      "now_ms": 5000,
+      "command": {
+        "type": "heartbeat",
+        "runner_id": "runner-a",
+        "lease_id": 1
+      },
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {
+        "held": true,
+        "deadline_ms": 15000,
+        "verdict": "running"
+      }
+    },
+    {
+      "now_ms": 6000,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-a",
+        "lease_id": 1,
+        "results": [
+          {"attempt_id": "1.1", "test_index": 1, "generation": 1, "outcome": "passed", "timed": true, "duration_ms": 480}
+        ]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"],
+      "expect_response": {
+        "verdict": "running",
+        "results": [
+          {"attempt_id": "1.1", "test_index": 1, "generation": 1, "disposition": "accepted"}
+        ]
+      }
+    },
+    {
+      "now_ms": 6100,
+      "command": {
+        "type": "lease",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "request_id": "req-a2"
+      },
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 3,
+        "attempts": [
+          {"attempt_id": "0.1", "test_index": 0, "generation": 1, "test": "tests/a.py"}
+        ]
+      }
+    },
+    {
+      "now_ms": 6200,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-b",
+        "lease_id": 2,
+        "results": [
+          {"attempt_id": "2.1", "test_index": 2, "generation": 1, "outcome": "skipped", "timed": false, "duration_ms": 0}
+        ]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"],
+      "expect_response": {
+        "verdict": "running",
+        "results": [
+          {"attempt_id": "2.1", "test_index": 2, "generation": 1, "disposition": "accepted"}
+        ]
+      }
+    },
+    {
+      "now_ms": 6300,
+      "command": {
+        "type": "lease",
+        "runner_id": "runner-b",
+        "machine_index": 1,
+        "request_id": "req-b2"
+      },
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {
+        "status": "wait",
+        "retry_after_ms": 5000
+      }
+    },
+    {
+      "now_ms": 7000,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-a",
+        "lease_id": 3,
+        "results": [
+          {"attempt_id": "0.1", "test_index": 0, "generation": 1, "outcome": "passed", "timed": true, "duration_ms": 95}
+        ]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"],
+      "expect_response": {
+        "verdict": "passed",
+        "results": [
+          {"attempt_id": "0.1", "test_index": 0, "generation": 1, "disposition": "accepted"}
+        ]
+      }
+    },
+    {
+      "now_ms": 7100,
+      "command": {
+        "type": "lease",
+        "runner_id": "runner-b",
+        "machine_index": 1,
+        "request_id": "req-b3"
+      },
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {
+        "status": "done",
+        "verdict": "passed"
+      }
+    }
+  ],
+  "expect_final": {
+    "verdict": "passed",
+    "counts": {"total": 3, "pending": 0, "leased": 0, "passed": 2, "failed": 0, "skipped": 1, "unresolved": 0},
+    "conflicts_len": 0,
+    "conflicts_truncated": false,
+    "tests": [
+      {"test_index": 0, "state": "passed", "generation": 1, "timed": true, "duration_ms": 95, "history_len": 0, "history_truncated": false},
+      {"test_index": 1, "state": "passed", "generation": 1, "timed": true, "duration_ms": 480, "history_len": 0, "history_truncated": false},
+      {"test_index": 2, "state": "skipped", "generation": 1, "timed": false, "duration_ms": 0, "history_len": 0, "history_truncated": false}
+    ]
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "name": "attempt-exhaustion",
+  "description": "Expired and error attempts count toward max_attempts; hitting the bound marks the test unresolved and fails the build verdict.",
+  "min_lease_ttl_ms": 1000,
+  "steps": [
+    {
+      "now_ms": 1000,
+      "command": {
+        "type": "init",
+        "build_id": "build-10",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "config": {"machines": 1, "lease_ttl_ms": 4000, "build_timeout_ms": 60000, "max_attempts": 2, "max_batch": 1},
+        "tests": ["tests/a.py"],
+        "predictions_ms": [100]
+      },
+      "expect_status": 200,
+      "expect_events": ["initialized"]
+    },
+    {
+      "now_ms": 1000,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a1"},
+      "expect_status": 200,
+      "expect_events": ["leased"]
+    },
+    {
+      "now_ms": 5000,
+      "command": {"type": "lease", "runner_id": "runner-b", "machine_index": 1, "request_id": "b1"},
+      "expect_status": 200,
+      "expect_events": ["expired", "leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 2,
+        "attempts": [{"attempt_id": "0.2", "test_index": 0, "generation": 2, "test": "tests/a.py"}]
+      }
+    },
+    {
+      "now_ms": 5500,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-b",
+        "lease_id": 2,
+        "results": [{"attempt_id": "0.2", "test_index": 0, "generation": 2, "outcome": "error", "timed": false, "duration_ms": 0}]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"],
+      "expect_response": {
+        "verdict": "unresolved",
+        "results": [{"attempt_id": "0.2", "test_index": 0, "generation": 2, "disposition": "accepted"}]
+      }
+    },
+    {
+      "now_ms": 5600,
+      "command": {"type": "lease", "runner_id": "runner-b", "machine_index": 1, "request_id": "b2"},
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {"status": "done", "verdict": "unresolved"}
+    }
+  ],
+  "expect_final": {
+    "verdict": "unresolved",
+    "counts": {"total": 1, "pending": 0, "leased": 0, "passed": 0, "failed": 0, "skipped": 0, "unresolved": 1},
+    "conflicts_len": 0,
+    "conflicts_truncated": false,
+    "tests": [
+      {"test_index": 0, "state": "unresolved", "generation": 2, "timed": false, "duration_ms": 0, "history_len": 0, "history_truncated": false}
+    ]
+  }
+}

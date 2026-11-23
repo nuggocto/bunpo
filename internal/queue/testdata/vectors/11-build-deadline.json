@@ -1,0 +1,52 @@
+{
+  "name": "build-deadline",
+  "description": "Crossing build deadline emits finalized, turns pending and leased tests unresolved, and rejects late reports as stale.",
+  "min_lease_ttl_ms": 1000,
+  "steps": [
+    {
+      "now_ms": 1000,
+      "command": {
+        "type": "init",
+        "build_id": "build-11",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "config": {"machines": 2, "lease_ttl_ms": 5000, "build_timeout_ms": 10000, "max_attempts": 3, "max_batch": 1},
+        "tests": ["tests/a.py", "tests/b.py"],
+        "predictions_ms": [200, 100]
+      },
+      "expect_status": 200,
+      "expect_events": ["initialized"]
+    },
+    {
+      "now_ms": 1000,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a1"},
+      "expect_status": 200,
+      "expect_events": ["leased"]
+    },
+    {
+      "now_ms": 11000,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-a",
+        "lease_id": 1,
+        "results": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "outcome": "passed", "timed": true, "duration_ms": 100}]
+      },
+      "expect_status": 200,
+      "expect_events": ["finalized", "reported"],
+      "expect_response": {
+        "verdict": "unresolved",
+        "results": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "disposition": "stale"}]
+      }
+    }
+  ],
+  "expect_final": {
+    "verdict": "unresolved",
+    "counts": {"total": 2, "pending": 0, "leased": 0, "passed": 0, "failed": 0, "skipped": 0, "unresolved": 2},
+    "conflicts_len": 0,
+    "conflicts_truncated": false,
+    "tests": [
+      {"test_index": 0, "state": "unresolved", "generation": 1, "timed": false, "duration_ms": 0, "history_len": 1, "history_truncated": false},
+      {"test_index": 1, "state": "unresolved", "generation": 0, "timed": false, "duration_ms": 0, "history_len": 0, "history_truncated": false}
+    ]
+  }
+}

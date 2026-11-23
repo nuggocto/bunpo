@@ -1,0 +1,100 @@
+{
+  "name": "expiry-reassignment",
+  "description": "Expired lease moves tests back to pending in lease_id order; another runner leases attempt 2 alone and passes.",
+  "min_lease_ttl_ms": 1000,
+  "steps": [
+    {
+      "now_ms": 1000,
+      "command": {
+        "type": "init",
+        "build_id": "build-2",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "config": {"machines": 2, "lease_ttl_ms": 5000, "build_timeout_ms": 60000, "max_attempts": 3, "max_batch": 200},
+        "tests": ["tests/a.py", "tests/b.py"],
+        "predictions_ms": [100, 100]
+      },
+      "expect_status": 200,
+      "expect_events": ["initialized"]
+    },
+    {
+      "now_ms": 1000,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a1"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 1,
+        "deadline_ms": 6000,
+        "attempts": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "test": "tests/a.py"}]
+      }
+    },
+    {
+      "now_ms": 1500,
+      "command": {"type": "lease", "runner_id": "runner-b", "machine_index": 1, "request_id": "b1"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 2,
+        "deadline_ms": 6500,
+        "attempts": [{"attempt_id": "1.1", "test_index": 1, "generation": 1, "test": "tests/b.py"}]
+      }
+    },
+    {
+      "now_ms": 7000,
+      "command": {"type": "lease", "runner_id": "runner-c", "machine_index": 2, "request_id": "c1"},
+      "expect_status": 200,
+      "expect_events": ["expired", "expired", "leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 3,
+        "attempts": [{"attempt_id": "0.2", "test_index": 0, "generation": 2, "test": "tests/a.py"}]
+      }
+    },
+    {
+      "now_ms": 7500,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-c",
+        "lease_id": 3,
+        "results": [{"attempt_id": "0.2", "test_index": 0, "generation": 2, "outcome": "passed", "timed": true, "duration_ms": 90}]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"]
+    },
+    {
+      "now_ms": 7600,
+      "command": {"type": "lease", "runner_id": "runner-c", "machine_index": 2, "request_id": "c2"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 4,
+        "attempts": [{"attempt_id": "1.2", "test_index": 1, "generation": 2, "test": "tests/b.py"}]
+      }
+    },
+    {
+      "now_ms": 8000,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-c",
+        "lease_id": 4,
+        "results": [{"attempt_id": "1.2", "test_index": 1, "generation": 2, "outcome": "passed", "timed": true, "duration_ms": 110}]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"],
+      "expect_response": {"verdict": "passed"}
+    }
+  ],
+  "expect_final": {
+    "verdict": "passed",
+    "counts": {"total": 2, "pending": 0, "leased": 0, "passed": 2, "failed": 0, "skipped": 0, "unresolved": 0},
+    "conflicts_len": 0,
+    "conflicts_truncated": false,
+    "tests": [
+      {"test_index": 0, "state": "passed", "generation": 2, "timed": true, "duration_ms": 90, "history_len": 0, "history_truncated": false},
+      {"test_index": 1, "state": "passed", "generation": 2, "timed": true, "duration_ms": 110, "history_len": 0, "history_truncated": false}
+    ]
+  }
+}

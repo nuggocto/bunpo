@@ -1,0 +1,72 @@
+{
+  "name": "zero-ms-batching",
+  "description": "When remaining_ms reaches 0 (either no history or only 0ms tests left), batch size falls back to ceil(remaining_pending / (2*machines)).",
+  "min_lease_ttl_ms": 1000,
+  "steps": [
+    {
+      "now_ms": 1000,
+      "command": {
+        "type": "init",
+        "build_id": "build-15",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "config": {"machines": 2, "lease_ttl_ms": 5000, "build_timeout_ms": 60000, "max_attempts": 3, "max_batch": 200},
+        "tests": ["t0.py", "t1.py", "t2.py", "t3.py", "t4.py", "t5.py", "t6.py", "t7.py", "t8.py"],
+        "predictions_ms": [1000, 0, 0, 0, 0, 0, 0, 0, 0]
+      },
+      "expect_status": 200,
+      "expect_events": ["initialized"]
+    },
+    {
+      "now_ms": 1000,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a1"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 1,
+        "attempts": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "test": "t0.py"}]
+      }
+    },
+    {
+      "now_ms": 1100,
+      "command": {"type": "lease", "runner_id": "runner-b", "machine_index": 1, "request_id": "b1"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 2,
+        "attempts": [
+          {"attempt_id": "1.1", "test_index": 1, "generation": 1, "test": "t1.py"},
+          {"attempt_id": "2.1", "test_index": 2, "generation": 1, "test": "t2.py"}
+        ]
+      }
+    },
+    {
+      "now_ms": 1200,
+      "command": {"type": "lease", "runner_id": "runner-c", "machine_index": 2, "request_id": "c1"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 3,
+        "attempts": [
+          {"attempt_id": "3.1", "test_index": 3, "generation": 1, "test": "t3.py"},
+          {"attempt_id": "4.1", "test_index": 4, "generation": 1, "test": "t4.py"}
+        ]
+      }
+    }
+  ],
+  "expect_final": {
+    "verdict": "running",
+    "counts": {"total": 9, "pending": 4, "leased": 5, "passed": 0, "failed": 0, "skipped": 0, "unresolved": 0},
+    "conflicts_len": 0,
+    "conflicts_truncated": false,
+    "tests": [
+      {"test_index": 0, "state": "leased", "generation": 1, "timed": false, "duration_ms": 0, "history_len": 0, "history_truncated": false},
+      {"test_index": 1, "state": "leased", "generation": 1, "timed": false, "duration_ms": 0, "history_len": 0, "history_truncated": false},
+      {"test_index": 4, "state": "leased", "generation": 1, "timed": false, "duration_ms": 0, "history_len": 0, "history_truncated": false},
+      {"test_index": 5, "state": "pending", "generation": 0, "timed": false, "duration_ms": 0, "history_len": 0, "history_truncated": false}
+    ]
+  }
+}

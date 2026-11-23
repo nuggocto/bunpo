@@ -79,6 +79,8 @@ Fuzzing and the benchmark run only when you ask for them:
 ```sh
 go test -run '^$' -fuzz FuzzDecode -fuzztime 30s ./internal/timing
 go test -run '^$' -fuzz FuzzRead -fuzztime 30s ./internal/junit
+go test -run '^$' -fuzz FuzzEventReplay -fuzztime 30s ./internal/queue
+go test -run '^$' -fuzz FuzzDecide -fuzztime 30s ./internal/queue
 go test -run '^$' -bench BenchmarkSplit ./internal/split
 ```
 
@@ -220,6 +222,7 @@ internal/timing/    timing file, median, merging, pruning
 internal/junit/     reading JUnit XML and the two-column format
 internal/manifest/  manifest, plan and run report files; the verify check
 internal/jsonfile/  the strict versioned-JSON reader every file uses
+internal/queue/     pure live-queue state machine (Decide/Apply) and shared vectors
 ```
 
 Only `cmd/bunpo` touches files, standard input and the operating system. The
@@ -231,6 +234,7 @@ Imports flow one way:
 ```text
 cmd/bunpo  ──▶ junit, manifest, split, timing
 manifest   ──▶ split, timing, jsonfile
+queue      ──▶ split, timing
 junit      ──▶ timing
 split      ──▶ timing
 timing     ──▶ jsonfile
@@ -357,9 +361,11 @@ first would turn a thousand 0.4 ms cases into 0 ms, and rounding through
 nanoseconds would turn 0.4999996 ms into 1 ms.
 
 A case with a `<failure>` or `<error>` child marks the file failed, and a
-failed file records no time. Skipped cases do not fail a file. A time can use
-an exponent, because JavaScript writes very small numbers as `1e-7`, and a
-missing time counts as 0, because Playwright omits it on skipped cases.
+failed file records no time. Skipped cases (direct `<skipped>` children of
+`<testcase>`) are counted on `junit.File.Skipped` and do not fail a file. A
+time can use an exponent, because JavaScript writes very small numbers as
+`1e-7`, and a missing time counts as 0, because Playwright omits it on skipped
+cases.
 
 `record` then compares the report with the manifest:
 
@@ -585,6 +591,15 @@ assignment is verified.
 | `junit.MaxCases` | 2,000,000 | test cases in one report |
 | all reports | 1 GiB | one `record` call |
 | test list | 64 MiB | standard input of `split`, `plan`, `verify` |
+| `queue.MaxTests` | 20,000 distinct tests | one live-queue build |
+| `queue.MaxTestIDBytes` | 4,096 bytes | one canonical test ID in the live queue |
+| `queue.MaxMachines` | 256 | live-queue `--total` |
+| `queue.MaxRunners` | 1,024 distinct runners | one live-queue build |
+| `queue.MinLeaseTTLMS`..`MaxLeaseTTLMS` | 10 s to 10 min (default 60 s) | live-queue lease TTL |
+| `queue.MaxBuildTimeoutMS` | 24 h (default 6 h) | live-queue build deadline |
+| `queue.MaxAttemptsLimit` | 10 (default 3) | live-queue attempts per test |
+| `queue.MaxBatchLimit` | 200 (default 200) | live-queue tests per lease |
+| `queue.MaxInitConflicts` / `MaxTestHistory` | 8 each (with `truncated` flag) | bounded live-queue conflict/stale logs |
 
 200,000 durations at the 30-day cap still sum to less than the `int64` limit,
 so load totals cannot overflow.
@@ -608,10 +623,22 @@ test fails if the split's largest load ever exceeds four thirds of it.
 Two tests pin exact bytes: the timing file's JSON and the digest input. If
 either fails, the format changed, and the change needs a new version number.
 
-`FuzzDecode` feeds `timing.Decode` random input, and `FuzzRead` does the same
-for the JUnit reader. `BenchmarkSplit` benchmarks the in-memory split of
-50,000 tests across 256 machines well under the one-second budget (~31–80 ms
-depending on CPU, 403 allocations).
+`FuzzDecode` feeds `timing.Decode` random input, `FuzzRead` does the same for
+the JUnit reader, and `FuzzEventReplay` and `FuzzDecide` fuzz the live-queue
+event applier and decision functions. `BenchmarkSplit` benchmarks the
+in-memory split of 50,000 tests across 256 machines well under the one-second
+budget (~31–80 ms depending on CPU, 403 allocations).
+
+`internal/queue` has table tests for every limit and error path, 17 shared JSON
+scenario vectors in `internal/queue/testdata/vectors/` (also meant to be run by
+the TypeScript Worker core), and a property test with an independent
+observation model checking at-most-one accepted terminal result per test,
+monotonic generations, at-most-one active lease per test and per runner,
+bounded event counts under hostile repeats, verdict transition rules (a
+finished verdict can change only `passed -> unresolved` on an `init` conflict),
+replay equality, and `Decide` purity. [Decision 3](decisions/0003-live-queue.md)
+and [docs/queue-protocol.md](queue-protocol.md) specify the design and wire
+protocol.
 
 Golden tests read the real pytest, Jest, Vitest, Playwright and RSpec reports.
 They check the reviewed totals exactly, and also facts that survive

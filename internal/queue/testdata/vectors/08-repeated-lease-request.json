@@ -1,0 +1,70 @@
+{
+  "name": "repeated-lease-request",
+  "description": "Repeating a request_id while its lease is active extends and returns that exact lease without emitting a new leased event.",
+  "min_lease_ttl_ms": 1000,
+  "steps": [
+    {
+      "now_ms": 1000,
+      "command": {
+        "type": "init",
+        "build_id": "build-8",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "config": {"machines": 2, "lease_ttl_ms": 5000, "build_timeout_ms": 60000, "max_attempts": 3, "max_batch": 1},
+        "tests": ["tests/a.py", "tests/b.py"],
+        "predictions_ms": [200, 100]
+      },
+      "expect_status": 200,
+      "expect_events": ["initialized"]
+    },
+    {
+      "now_ms": 1000,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a1"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 1,
+        "deadline_ms": 6000,
+        "attempts": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "test": "tests/a.py"}]
+      }
+    },
+    {
+      "now_ms": 4000,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a1"},
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 1,
+        "deadline_ms": 9000,
+        "attempts": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "test": "tests/a.py"}]
+      }
+    },
+    {
+      "now_ms": 7000,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-a",
+        "lease_id": 1,
+        "results": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "outcome": "passed", "timed": true, "duration_ms": 180}]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"],
+      "expect_response": {
+        "verdict": "running",
+        "results": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "disposition": "accepted"}]
+      }
+    }
+  ],
+  "expect_final": {
+    "verdict": "running",
+    "counts": {"total": 2, "pending": 1, "leased": 0, "passed": 1, "failed": 0, "skipped": 0, "unresolved": 0},
+    "conflicts_len": 0,
+    "conflicts_truncated": false,
+    "tests": [
+      {"test_index": 0, "state": "passed", "generation": 1, "timed": true, "duration_ms": 180, "history_len": 0, "history_truncated": false},
+      {"test_index": 1, "state": "pending", "generation": 0, "timed": false, "duration_ms": 0, "history_len": 0, "history_truncated": false}
+    ]
+  }
+}

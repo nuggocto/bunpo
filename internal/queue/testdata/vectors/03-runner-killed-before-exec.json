@@ -1,0 +1,67 @@
+{
+  "name": "runner-killed-before-exec",
+  "description": "Runner A leases work and dies before running; runner B waits, takes over after TTL, and completes the build.",
+  "min_lease_ttl_ms": 1000,
+  "steps": [
+    {
+      "now_ms": 1000,
+      "command": {
+        "type": "init",
+        "build_id": "build-3",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "config": {"machines": 1, "lease_ttl_ms": 4000, "build_timeout_ms": 60000, "max_attempts": 3, "max_batch": 1},
+        "tests": ["tests/a.py"],
+        "predictions_ms": [200]
+      },
+      "expect_status": 200,
+      "expect_events": ["initialized"]
+    },
+    {
+      "now_ms": 1000,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a1"},
+      "expect_status": 200,
+      "expect_events": ["leased"],
+      "expect_response": {"status": "leased", "lease_id": 1, "deadline_ms": 5000}
+    },
+    {
+      "now_ms": 3000,
+      "command": {"type": "lease", "runner_id": "runner-b", "machine_index": 1, "request_id": "b1"},
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {"status": "wait", "retry_after_ms": 2000}
+    },
+    {
+      "now_ms": 5000,
+      "command": {"type": "lease", "runner_id": "runner-b", "machine_index": 1, "request_id": "b2"},
+      "expect_status": 200,
+      "expect_events": ["expired", "leased"],
+      "expect_response": {
+        "status": "leased",
+        "lease_id": 2,
+        "attempts": [{"attempt_id": "0.2", "test_index": 0, "generation": 2, "test": "tests/a.py"}]
+      }
+    },
+    {
+      "now_ms": 5500,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-b",
+        "lease_id": 2,
+        "results": [{"attempt_id": "0.2", "test_index": 0, "generation": 2, "outcome": "passed", "timed": true, "duration_ms": 210}]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"],
+      "expect_response": {"verdict": "passed"}
+    }
+  ],
+  "expect_final": {
+    "verdict": "passed",
+    "counts": {"total": 1, "pending": 0, "leased": 0, "passed": 1, "failed": 0, "skipped": 0, "unresolved": 0},
+    "conflicts_len": 0,
+    "conflicts_truncated": false,
+    "tests": [
+      {"test_index": 0, "state": "passed", "generation": 2, "timed": true, "duration_ms": 210, "history_len": 0, "history_truncated": false}
+    ]
+  }
+}

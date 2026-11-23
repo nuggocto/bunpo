@@ -1,0 +1,91 @@
+{
+  "name": "runner-killed-before-report-stale",
+  "description": "Runner A pauses past TTL, runner B takes over and passes; runner A resumes and submits a late report which is recorded as stale and does not overwrite runner B's accepted result.",
+  "min_lease_ttl_ms": 1000,
+  "steps": [
+    {
+      "now_ms": 1000,
+      "command": {
+        "type": "init",
+        "build_id": "build-4",
+        "runner_id": "runner-a",
+        "machine_index": 0,
+        "config": {"machines": 2, "lease_ttl_ms": 5000, "build_timeout_ms": 60000, "max_attempts": 3, "max_batch": 1},
+        "tests": ["tests/a.py"],
+        "predictions_ms": [200]
+      },
+      "expect_status": 200,
+      "expect_events": ["initialized"]
+    },
+    {
+      "now_ms": 1000,
+      "command": {"type": "lease", "runner_id": "runner-a", "machine_index": 0, "request_id": "a1"},
+      "expect_status": 200,
+      "expect_events": ["leased"]
+    },
+    {
+      "now_ms": 6500,
+      "command": {"type": "lease", "runner_id": "runner-b", "machine_index": 1, "request_id": "b1"},
+      "expect_status": 200,
+      "expect_events": ["expired", "leased"]
+    },
+    {
+      "now_ms": 7000,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-b",
+        "lease_id": 2,
+        "results": [{"attempt_id": "0.2", "test_index": 0, "generation": 2, "outcome": "passed", "timed": true, "duration_ms": 220}]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"],
+      "expect_response": {"verdict": "passed"}
+    },
+    {
+      "now_ms": 7500,
+      "command": {"type": "heartbeat", "runner_id": "runner-a", "lease_id": 1},
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {"held": false, "deadline_ms": 0, "verdict": "passed"}
+    },
+    {
+      "now_ms": 8000,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-a",
+        "lease_id": 1,
+        "results": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "outcome": "failed", "timed": false, "duration_ms": 0}]
+      },
+      "expect_status": 200,
+      "expect_events": ["reported"],
+      "expect_response": {
+        "verdict": "passed",
+        "results": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "disposition": "stale"}]
+      }
+    },
+    {
+      "now_ms": 8100,
+      "command": {
+        "type": "report",
+        "runner_id": "runner-a",
+        "lease_id": 1,
+        "results": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "outcome": "failed", "timed": false, "duration_ms": 0}]
+      },
+      "expect_status": 200,
+      "expect_events": [],
+      "expect_response": {
+        "verdict": "passed",
+        "results": [{"attempt_id": "0.1", "test_index": 0, "generation": 1, "disposition": "stale"}]
+      }
+    }
+  ],
+  "expect_final": {
+    "verdict": "passed",
+    "counts": {"total": 1, "pending": 0, "leased": 0, "passed": 1, "failed": 0, "skipped": 0, "unresolved": 0},
+    "conflicts_len": 0,
+    "conflicts_truncated": false,
+    "tests": [
+      {"test_index": 0, "state": "passed", "generation": 2, "timed": true, "duration_ms": 220, "history_len": 1, "history_truncated": false}
+    ]
+  }
+}
