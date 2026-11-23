@@ -18,8 +18,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nuggocto/bunpo/internal/junit"
 	"github.com/nuggocto/bunpo/internal/queue"
 	"github.com/nuggocto/bunpo/internal/queueapi"
+	"github.com/nuggocto/bunpo/internal/queuerunner"
 	"github.com/nuggocto/bunpo/internal/timing"
 )
 
@@ -218,10 +220,9 @@ func startInProcessQueueServer(t *testing.T, minTTLMS int64) (*httptest.Server, 
 	t.Cleanup(srv.Close)
 
 	rc, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:     srv.URL,
-		Token:       e2eReadTok,
-		HTTPClient:  srv.Client(),
-		RetryBudget: 5 * time.Second,
+		BaseURL:    srv.URL,
+		Token:      e2eReadTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -779,22 +780,25 @@ func TestQueueAtCapacityRetriesAndFormatsExit1Error(t *testing.T) {
 	defer srv.Close()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:      srv.URL,
-		Token:        e2eWriteTok,
-		HTTPClient:   srv.Client(),
-		RetryBudget:  120 * time.Millisecond,
-		RetryBase:    25 * time.Millisecond,
-		RetryMaxWait: 40 * time.Millisecond,
+		BaseURL:    srv.URL,
+		Token:      e2eWriteTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.Init(context.Background(), queue.InitCommand{
+	_, err = queuerunner.Run(context.Background(), queuerunner.RunConfig{
+		Client:        c,
 		BuildID:       "cap-1",
-		RunnerID:      "r1",
 		Config:        queue.Config{Machines: 1, LeaseTTLMS: queue.DefaultLeaseTTLMS, BuildTimeoutMS: queue.DefaultBuildTimeoutMS, MaxAttempts: 3, MaxBatch: 1},
 		Tests:         []string{"a.py"},
 		PredictionsMS: []*int64{nil},
+		Dir:           t.TempDir(),
+		Command:       []string{"true"},
+		ReportPaths:   []string{"unused"},
+		Format:        "lines",
+		ReadReports:   func([]string) (map[string]junit.File, error) { return nil, errors.New("unused") },
+		Retry:         queuerunner.RetryConfig{BudgetMS: 120, BaseMS: 25, MaxWaitMS: 40},
 	})
 	if calls < 2 {
 		t.Fatalf("expected 503 at_capacity to be retried before failing, got %d call(s)", calls)

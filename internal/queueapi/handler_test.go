@@ -100,12 +100,9 @@ func TestSlowAppendDoesNotBlockOtherBuildsAndErrorsPreserveInvariants(t *testing
 	defer srv.Close()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:      srv.URL,
-		Token:        testWriteTok,
-		HTTPClient:   srv.Client(),
-		RetryBudget:  10 * time.Millisecond, // fail fast on 503
-		RetryBase:    5 * time.Millisecond,
-		RetryMaxWait: 5 * time.Millisecond,
+		BaseURL:    srv.URL,
+		Token:      testWriteTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -244,12 +241,9 @@ func TestCapacityAndRetentionWithInjectedClock(t *testing.T) {
 	defer srv.Close()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:      srv.URL,
-		Token:        testWriteTok,
-		HTTPClient:   srv.Client(),
-		RetryBudget:  10 * time.Millisecond,
-		RetryBase:    5 * time.Millisecond,
-		RetryMaxWait: 5 * time.Millisecond,
+		BaseURL:    srv.URL,
+		Token:      testWriteTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -344,10 +338,9 @@ func TestClientHardening(t *testing.T) {
 	defer redirSrv.Close()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:     redirSrv.URL,
-		Token:       testWriteTok,
-		HTTPClient:  redirSrv.Client(),
-		RetryBudget: 10 * time.Millisecond,
+		BaseURL:    redirSrv.URL,
+		Token:      testWriteTok,
+		HTTPClient: redirSrv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -387,10 +380,9 @@ func TestSlowReaderDoesNotHoldBuildLock(t *testing.T) {
 	defer srv.Close()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:     srv.URL,
-		Token:       testWriteTok,
-		HTTPClient:  srv.Client(),
-		RetryBudget: 2 * time.Second,
+		BaseURL:    srv.URL,
+		Token:      testWriteTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -480,10 +472,9 @@ func TestAbandonedIdleAndBrokenBuildsEvictedUnderPressure(t *testing.T) {
 	defer srv.Close()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:     srv.URL,
-		Token:       testWriteTok,
-		HTTPClient:  srv.Client(),
-		RetryBudget: 10 * time.Millisecond,
+		BaseURL:    srv.URL,
+		Token:      testWriteTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -568,21 +559,15 @@ func TestAbandonedIdleAndBrokenBuildsEvictedUnderPressure(t *testing.T) {
 	}
 }
 
-func TestClientRetriesHTTPTimeoutAndRejectsMalformed200(t *testing.T) {
-	// 1. Server hangs attempt 1 until the client's http.Client.Timeout aborts it,
-	// then succeeds on attempt 2.
-	var calls atomic.Int32
+func TestClientHTTPTimeoutIsTransientAndRejectsMalformed200(t *testing.T) {
+	// 1. Server hangs past http.Client.Timeout: single-shot Client must return a
+	// transient error (not caller DeadlineExceeded) so the runner retries it.
 	releaseHang := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 1 {
-			select {
-			case <-r.Context().Done():
-			case <-releaseHang:
-			}
-			return
+		select {
+		case <-r.Context().Done():
+		case <-releaseHang:
 		}
-		w.Header().Set("Content-Type", queueapi.ContentTypeJSON)
-		_, _ = w.Write([]byte(`{"version":1,"build_id":"b1","verdict":"running","created_at_ms":1,"deadline_ms":2,"last_seen_ms":1,"counts":{"total":0,"pending":0,"leased":0,"passed":0,"failed":0,"skipped":0,"unresolved":0},"conflicts":[],"conflicts_truncated":false,"runners":[],"slowest":[],"problems":[]}`))
 	}))
 	defer func() {
 		close(releaseHang)
@@ -590,21 +575,16 @@ func TestClientRetriesHTTPTimeoutAndRejectsMalformed200(t *testing.T) {
 	}()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:      srv.URL,
-		Token:        testReadTok,
-		HTTPClient:   &http.Client{Timeout: 60 * time.Millisecond},
-		RetryBudget:  2 * time.Second,
-		RetryBase:    10 * time.Millisecond,
-		RetryMaxWait: 20 * time.Millisecond,
+		BaseURL:    srv.URL,
+		Token:      testReadTok,
+		HTTPClient: &http.Client{Timeout: 60 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Status(context.Background(), "b1"); err != nil {
-		t.Fatalf("client did not retry after http.Client.Timeout: %v", err)
-	}
-	if calls.Load() != 2 {
-		t.Fatalf("calls = %d; want 2", calls.Load())
+	_, err = c.Status(context.Background(), "b1")
+	if err == nil || !queueapi.IsTransientError(err) {
+		t.Fatalf("http.Client.Timeout err = %v (transient=%t); want transient error", err, queueapi.IsTransientError(err))
 	}
 
 	// 2. Proxy returning 200 {} or unknown status/verdict must always error.
@@ -620,10 +600,9 @@ func TestClientRetriesHTTPTimeoutAndRejectsMalformed200(t *testing.T) {
 			_, _ = w.Write([]byte(body))
 		}))
 		bc, err := queueapi.NewClient(queueapi.ClientConfig{
-			BaseURL:     badSrv.URL,
-			Token:       testWriteTok,
-			HTTPClient:  badSrv.Client(),
-			RetryBudget: 10 * time.Millisecond,
+			BaseURL:    badSrv.URL,
+			Token:      testWriteTok,
+			HTTPClient: badSrv.Client(),
 		})
 		if err != nil {
 			badSrv.Close()
@@ -668,10 +647,9 @@ func TestClientDisconnectDoesNotCancelAppendContext(t *testing.T) {
 	defer srv.Close()
 
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:     srv.URL,
-		Token:       testWriteTok,
-		HTTPClient:  srv.Client(),
-		RetryBudget: 10 * time.Millisecond,
+		BaseURL:    srv.URL,
+		Token:      testWriteTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -737,9 +715,8 @@ func TestIsTransientErrorClassification(t *testing.T) {
 	srvURL := srv.URL
 	srv.Close()
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:     srvURL,
-		Token:       testWriteTok,
-		RetryBudget: 10 * time.Millisecond,
+		BaseURL: srvURL,
+		Token:   testWriteTok,
 	})
 	if err != nil {
 		t.Fatal(err)

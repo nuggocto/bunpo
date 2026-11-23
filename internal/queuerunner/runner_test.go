@@ -195,12 +195,9 @@ func TestHeartbeatSurvivesTransientFailureAndNoGoroutineLeaks(t *testing.T) {
 	baseGoroutines := runtime.NumGoroutine()
 
 	client, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:      srv.URL,
-		Token:        writeTok,
-		HTTPClient:   srv.Client(),
-		RetryBudget:  2 * time.Second,
-		RetryBase:    15 * time.Millisecond,
-		RetryMaxWait: 50 * time.Millisecond,
+		BaseURL:    srv.URL,
+		Token:      writeTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -223,6 +220,7 @@ func TestHeartbeatSurvivesTransientFailureAndNoGoroutineLeaks(t *testing.T) {
 		Command:       helperCmd,
 		ReportPaths:   []string{reportPath},
 		Format:        "lines",
+		Retry:         RetryConfig{BudgetMS: 2000, BaseMS: 15, MaxWaitMS: 50},
 		ReadReports: func(paths []string) (map[string]junit.File, error) {
 			f, err := os.Open(paths[0])
 			if err != nil {
@@ -318,12 +316,9 @@ func TestHeartbeatsKeepLeaseAliveDuringReportRetry(t *testing.T) {
 	defer srv.Close()
 
 	client, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:      srv.URL,
-		Token:        writeTok,
-		HTTPClient:   srv.Client(),
-		RetryBudget:  3 * time.Second,
-		RetryBase:    40 * time.Millisecond,
-		RetryMaxWait: 80 * time.Millisecond,
+		BaseURL:    srv.URL,
+		Token:      writeTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -345,6 +340,7 @@ func TestHeartbeatsKeepLeaseAliveDuringReportRetry(t *testing.T) {
 		Command:       []string{os.Args[0], "-test.run=^TestRunnerChildHelper$"},
 		ReportPaths:   []string{reportPath},
 		Format:        "lines",
+		Retry:         RetryConfig{BudgetMS: 3000, BaseMS: 40, MaxWaitMS: 80},
 		ReadReports: func(paths []string) (map[string]junit.File, error) {
 			f, err := os.Open(paths[0])
 			if err != nil {
@@ -432,12 +428,9 @@ func TestLeaseStaleRequestRetriesWithFreshRequestID(t *testing.T) {
 	defer srv.Close()
 
 	client, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:      srv.URL,
-		Token:        writeTok,
-		HTTPClient:   srv.Client(),
-		RetryBudget:  3 * time.Second,
-		RetryBase:    20 * time.Millisecond,
-		RetryMaxWait: 40 * time.Millisecond,
+		BaseURL:    srv.URL,
+		Token:      writeTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -459,6 +452,7 @@ func TestLeaseStaleRequestRetriesWithFreshRequestID(t *testing.T) {
 		Command:       []string{os.Args[0], "-test.run=^TestRunnerChildHelper$"},
 		ReportPaths:   []string{reportPath},
 		Format:        "lines",
+		Retry:         RetryConfig{BudgetMS: 3000, BaseMS: 20, MaxWaitMS: 40},
 		ReadReports: func(paths []string) (map[string]junit.File, error) {
 			f, err := os.Open(paths[0])
 			if err != nil {
@@ -519,12 +513,9 @@ func TestHeartbeatPermanent4xxStopsBatchAndSurfacesError(t *testing.T) {
 	defer srv.Close()
 
 	client, err := queueapi.NewClient(queueapi.ClientConfig{
-		BaseURL:      srv.URL,
-		Token:        writeTok,
-		HTTPClient:   srv.Client(),
-		RetryBudget:  2 * time.Second,
-		RetryBase:    20 * time.Millisecond,
-		RetryMaxWait: 40 * time.Millisecond,
+		BaseURL:    srv.URL,
+		Token:      writeTok,
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -549,6 +540,7 @@ func TestHeartbeatPermanent4xxStopsBatchAndSurfacesError(t *testing.T) {
 		Format:        "lines",
 		ReadReports:   func([]string) (map[string]junit.File, error) { return nil, errors.New("unused") },
 		KillGrace:     200 * time.Millisecond,
+		Retry:         RetryConfig{BudgetMS: 2000, BaseMS: 20, MaxWaitMS: 40},
 	})
 	elapsed := time.Since(start)
 
@@ -564,43 +556,44 @@ func TestHeartbeatPermanent4xxStopsBatchAndSurfacesError(t *testing.T) {
 	}
 }
 
-func TestBuildRunReportRejectsStuckCursorAndShortRead(t *testing.T) {
-	status := queueapi.StatusResponse{
-		Version: queue.ProtocolVersion,
-		StatusResponse: queue.StatusResponse{
-			BuildID: "b-page",
-			Verdict: queue.VerdictPassed,
-			Counts:  queue.Counts{Total: 2, Passed: 2},
-		},
-	}
+func TestRunStatusRejectsStuckCursorAndShortRead(t *testing.T) {
+	statusJSON := `{"version":1,"build_id":"b-page","verdict":"passed","created_at_ms":1,"deadline_ms":2,"last_seen_ms":2,"counts":{"total":2,"pending":0,"leased":0,"passed":2,"failed":0,"skipped":0,"unresolved":0},"conflicts":[],"conflicts_truncated":false,"runners":[],"slowest":[],"problems":[]}`
 
 	t.Run("stuck cursor", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", queueapi.ContentTypeJSON)
-			_, _ = w.Write([]byte(`{"version":1,"build_id":"b-page","verdict":"passed","tests":[{"test":"a.py","index":0,"state":"passed","generation":1,"timed":true,"duration_ms":10,"attempts":[]}],"next_cursor":0}`))
+			if strings.HasSuffix(r.URL.Path, "/tests") {
+				_, _ = w.Write([]byte(`{"version":1,"build_id":"b-page","verdict":"passed","tests":[{"test":"a.py","index":0,"state":"passed","generation":1,"timed":true,"duration_ms":10,"attempts":[]}],"next_cursor":0}`))
+				return
+			}
+			_, _ = w.Write([]byte(statusJSON))
 		}))
 		defer srv.Close()
 		c, err := queueapi.NewClient(queueapi.ClientConfig{BaseURL: srv.URL, Token: "tok", HTTPClient: srv.Client()})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := BuildRunReport(context.Background(), c, "b-page", status); err == nil || !strings.Contains(err.Error(), "cursor did not advance") {
-			t.Fatalf("BuildRunReport stuck cursor err = %v; want cursor-did-not-advance error", err)
+		if _, err := RunStatus(context.Background(), StatusConfig{Client: c, BuildID: "b-page"}); err == nil || !strings.Contains(err.Error(), "cursor did not advance") {
+			t.Fatalf("RunStatus stuck cursor err = %v; want cursor-did-not-advance error", err)
 		}
 	})
 
 	t.Run("short read", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", queueapi.ContentTypeJSON)
-			_, _ = w.Write([]byte(`{"version":1,"build_id":"b-page","verdict":"passed","tests":[{"test":"a.py","index":0,"state":"passed","generation":1,"timed":true,"duration_ms":10,"attempts":[]}],"next_cursor":null}`))
+			if strings.HasSuffix(r.URL.Path, "/tests") {
+				_, _ = w.Write([]byte(`{"version":1,"build_id":"b-page","verdict":"passed","tests":[{"test":"a.py","index":0,"state":"passed","generation":1,"timed":true,"duration_ms":10,"attempts":[]}],"next_cursor":null}`))
+				return
+			}
+			_, _ = w.Write([]byte(statusJSON))
 		}))
 		defer srv.Close()
 		c, err := queueapi.NewClient(queueapi.ClientConfig{BaseURL: srv.URL, Token: "tok", HTTPClient: srv.Client()})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := BuildRunReport(context.Background(), c, "b-page", status); err == nil || !strings.Contains(err.Error(), "incomplete test list") {
-			t.Fatalf("BuildRunReport short read err = %v; want incomplete-test-list error", err)
+		if _, err := RunStatus(context.Background(), StatusConfig{Client: c, BuildID: "b-page"}); err == nil || !strings.Contains(err.Error(), "incomplete test list") {
+			t.Fatalf("RunStatus short read err = %v; want incomplete-test-list error", err)
 		}
 	})
 }

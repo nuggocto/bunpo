@@ -260,10 +260,14 @@ func runQueueStatus(ctx context.Context, client *queueapi.Client, buildID, dir s
 		return checkFailed("found other run report(s) in %s (for example %s); clean the directory before running --status", dir, reportName(existing[0]))
 	}
 
-	st, err := client.Status(ctx, buildID)
+	res, err := queuerunner.RunStatus(ctx, queuerunner.StatusConfig{
+		Client:  client,
+		BuildID: buildID,
+	})
 	if err != nil {
 		return checkFailed("%v", err)
 	}
+	st := res.Status
 
 	con.info("build %s: verdict %s (%d passed, %d skipped, %d failed, %d unresolved, %d pending, %d leased)",
 		st.BuildID, st.Verdict, st.Counts.Passed, st.Counts.Skipped, st.Counts.Failed, st.Counts.Unresolved, st.Counts.Pending, st.Counts.Leased)
@@ -278,19 +282,15 @@ func runQueueStatus(ctx context.Context, client *queueapi.Client, buildID, dir s
 		con.warn("%s: %s (attempts: %d)", p.State, p.Test, p.Generation)
 	}
 
-	report, ok, err := queuerunner.BuildRunReport(ctx, client, buildID, st)
-	if err != nil {
-		return checkFailed("%v", err)
-	}
-	if ok {
-		data, err := manifest.EncodeRunReport(report)
+	if res.HasReport {
+		data, err := manifest.EncodeRunReport(res.Report)
 		if err != nil {
 			return err
 		}
 		if err := writeFile(root, reportName(0), data); err != nil {
 			return err
 		}
-		con.info("wrote %s (%d files) for bunpo merge", reportName(0), len(report.Tests))
+		con.info("wrote %s (%d files) for bunpo merge", reportName(0), len(res.Report.Tests))
 	}
 
 	if st.Verdict == queue.VerdictPassed {

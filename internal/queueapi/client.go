@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,36 +17,35 @@ import (
 	"github.com/nuggocto/bunpo/internal/queue"
 )
 
-const (
-	DefaultRetryBudget  = 2 * time.Minute
-	DefaultRetryBase    = 200 * time.Millisecond
-	DefaultRetryMaxWait = 5 * time.Second
-	DefaultHTTPTimeout  = 30 * time.Second
-)
+const DefaultHTTPTimeout = 30 * time.Second
 
-// ClientConfig configures a live-queue HTTP client.
+// ClientConfig configures a single-shot live-queue HTTP client.
 type ClientConfig struct {
 	BaseURL           string
 	Token             string
 	AllowInsecureHTTP bool
 	HTTPClient        *http.Client
-	RetryBudget       time.Duration
-	RetryBase         time.Duration
-	RetryMaxWait      time.Duration
 }
 
-// Client speaks Bunpō's live-queue HTTP JSON protocol.
+// Client speaks Bunpō's live-queue HTTP JSON protocol. Each method performs one
+// HTTP round trip; retry and backoff policy live in internal/queuerunner.
 type Client struct {
-	baseURL      string
-	token        string
-	httpClient   *http.Client
-	retryBudget  time.Duration
-	retryBase    time.Duration
-	retryMaxWait time.Duration
+	baseURL    string
+	token      string
+	httpClient *http.Client
 }
 
-// NewClient validates BaseURL and returns a hardened HTTP client that never
-// follows redirects, bounds response bodies, and never includes tokens in errors.
+// WireRequest is a serialized HTTP request ready for transport or simulation.
+type WireRequest struct {
+	Method      string
+	Path        string
+	ContentType string
+	Body        []byte
+}
+
+// NewClient validates BaseURL and returns a hardened single-shot HTTP client
+// that never follows redirects, bounds response bodies, and never includes
+// tokens in errors.
 func NewClient(cfg ClientConfig) (*Client, error) {
 	u, err := url.Parse(strings.TrimSpace(cfg.BaseURL))
 	if err != nil || u.Host == "" {
@@ -77,26 +75,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return http.ErrUseLastResponse
 	}
 
-	budget := cfg.RetryBudget
-	if budget <= 0 {
-		budget = DefaultRetryBudget
-	}
-	base := cfg.RetryBase
-	if base <= 0 {
-		base = DefaultRetryBase
-	}
-	maxWait := cfg.RetryMaxWait
-	if maxWait <= 0 {
-		maxWait = DefaultRetryMaxWait
-	}
-
 	return &Client{
-		baseURL:      strings.TrimRight(u.String(), "/"),
-		token:        cfg.Token,
-		httpClient:   hc,
-		retryBudget:  budget,
-		retryBase:    base,
-		retryMaxWait: maxWait,
+		baseURL:    strings.TrimRight(u.String(), "/"),
+		token:      cfg.Token,
+		httpClient: hc,
 	}, nil
 }
 
@@ -119,17 +101,29 @@ func checkRespVersion(got int64, endpoint string) error {
 	return nil
 }
 
-func (c *Client) Init(ctx context.Context, cmd queue.InitCommand) (InitResponse, error) {
-	body := initRequestOut{
+func EncodeInit(cmd queue.InitCommand) (WireRequest, error) {
+	body, err := json.Marshal(initRequestOut{
 		Version:       queue.ProtocolVersion,
 		RunnerID:      cmd.RunnerID,
 		MachineIndex:  cmd.MachineIndex,
 		Config:        cmd.Config,
 		Tests:         cmd.Tests,
 		PredictionsMS: cmd.PredictionsMS,
+	})
+	if err != nil {
+		return WireRequest{}, fmt.Errorf("encode init request: %w", err)
 	}
+	return WireRequest{
+		Method:      http.MethodPost,
+		Path:        "/api/v1/builds/" + url.PathEscape(cmd.BuildID) + "/init",
+		ContentType: ContentTypeJSON,
+		Body:        body,
+	}, nil
+}
+
+func ParseInitResponse(status int, raw []byte) (InitResponse, error) {
 	var resp InitResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(cmd.BuildID)+"/init", body, &resp, true); err != nil {
+	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return InitResponse{}, err
 	}
 	if err := checkRespVersion(resp.Version, "init"); err != nil {
@@ -141,15 +135,27 @@ func (c *Client) Init(ctx context.Context, cmd queue.InitCommand) (InitResponse,
 	return resp, nil
 }
 
-func (c *Client) Lease(ctx context.Context, buildID string, cmd queue.LeaseCommand) (LeaseResponse, error) {
-	body := leaseRequestOut{
+func EncodeLease(buildID string, cmd queue.LeaseCommand) (WireRequest, error) {
+	body, err := json.Marshal(leaseRequestOut{
 		Version:      queue.ProtocolVersion,
 		RunnerID:     cmd.RunnerID,
 		MachineIndex: cmd.MachineIndex,
 		RequestID:    cmd.RequestID,
+	})
+	if err != nil {
+		return WireRequest{}, fmt.Errorf("encode lease request: %w", err)
 	}
+	return WireRequest{
+		Method:      http.MethodPost,
+		Path:        "/api/v1/builds/" + url.PathEscape(buildID) + "/lease",
+		ContentType: ContentTypeJSON,
+		Body:        body,
+	}, nil
+}
+
+func ParseLeaseResponse(status int, raw []byte) (LeaseResponse, error) {
 	var resp LeaseResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(buildID)+"/lease", body, &resp, true); err != nil {
+	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return LeaseResponse{}, err
 	}
 	if err := checkRespVersion(resp.Version, "lease"); err != nil {
@@ -174,16 +180,26 @@ func (c *Client) Lease(ctx context.Context, buildID string, cmd queue.LeaseComma
 	return resp, nil
 }
 
-// Heartbeat sends a single heartbeat without the multi-minute retry loop; the
-// caller's heartbeat goroutine controls retrying within the lease TTL.
-func (c *Client) Heartbeat(ctx context.Context, buildID string, cmd queue.HeartbeatCommand) (HeartbeatResponse, error) {
-	body := heartbeatRequestOut{
+func EncodeHeartbeat(buildID string, cmd queue.HeartbeatCommand) (WireRequest, error) {
+	body, err := json.Marshal(heartbeatRequestOut{
 		Version:  queue.ProtocolVersion,
 		RunnerID: cmd.RunnerID,
 		LeaseID:  cmd.LeaseID,
+	})
+	if err != nil {
+		return WireRequest{}, fmt.Errorf("encode heartbeat request: %w", err)
 	}
+	return WireRequest{
+		Method:      http.MethodPost,
+		Path:        "/api/v1/builds/" + url.PathEscape(buildID) + "/heartbeat",
+		ContentType: ContentTypeJSON,
+		Body:        body,
+	}, nil
+}
+
+func ParseHeartbeatResponse(status int, raw []byte) (HeartbeatResponse, error) {
 	var resp HeartbeatResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(buildID)+"/heartbeat", body, &resp, false); err != nil {
+	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return HeartbeatResponse{}, err
 	}
 	if err := checkRespVersion(resp.Version, "heartbeat"); err != nil {
@@ -195,15 +211,27 @@ func (c *Client) Heartbeat(ctx context.Context, buildID string, cmd queue.Heartb
 	return resp, nil
 }
 
-func (c *Client) Report(ctx context.Context, buildID string, cmd queue.ReportCommand) (ReportResponse, error) {
-	body := reportRequestOut{
+func EncodeReport(buildID string, cmd queue.ReportCommand) (WireRequest, error) {
+	body, err := json.Marshal(reportRequestOut{
 		Version:  queue.ProtocolVersion,
 		RunnerID: cmd.RunnerID,
 		LeaseID:  cmd.LeaseID,
 		Results:  cmd.Results,
+	})
+	if err != nil {
+		return WireRequest{}, fmt.Errorf("encode report request: %w", err)
 	}
+	return WireRequest{
+		Method:      http.MethodPost,
+		Path:        "/api/v1/builds/" + url.PathEscape(buildID) + "/report",
+		ContentType: ContentTypeJSON,
+		Body:        body,
+	}, nil
+}
+
+func ParseReportResponse(status int, raw []byte) (ReportResponse, error) {
 	var resp ReportResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/builds/"+url.PathEscape(buildID)+"/report", body, &resp, true); err != nil {
+	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return ReportResponse{}, err
 	}
 	if err := checkRespVersion(resp.Version, "report"); err != nil {
@@ -215,9 +243,16 @@ func (c *Client) Report(ctx context.Context, buildID string, cmd queue.ReportCom
 	return resp, nil
 }
 
-func (c *Client) Status(ctx context.Context, buildID string) (StatusResponse, error) {
+func EncodeStatus(buildID string) WireRequest {
+	return WireRequest{
+		Method: http.MethodGet,
+		Path:   "/api/v1/builds/" + url.PathEscape(buildID),
+	}
+}
+
+func ParseStatusResponse(status int, raw []byte) (StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/builds/"+url.PathEscape(buildID), nil, &resp, true); err != nil {
+	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return StatusResponse{}, err
 	}
 	if err := checkRespVersion(resp.Version, "status"); err != nil {
@@ -229,7 +264,7 @@ func (c *Client) Status(ctx context.Context, buildID string) (StatusResponse, er
 	return resp, nil
 }
 
-func (c *Client) ListTests(ctx context.Context, buildID string, cmd queue.ListTestsCommand) (ListTestsResponse, error) {
+func EncodeListTests(buildID string, cmd queue.ListTestsCommand) WireRequest {
 	q := url.Values{}
 	if cmd.Cursor > 0 {
 		q.Set("cursor", strconv.Itoa(cmd.Cursor))
@@ -251,8 +286,15 @@ func (c *Client) ListTests(ctx context.Context, buildID string, cmd queue.ListTe
 	if enc := q.Encode(); enc != "" {
 		path += "?" + enc
 	}
+	return WireRequest{
+		Method: http.MethodGet,
+		Path:   path,
+	}
+}
+
+func ParseListTestsResponse(status int, raw []byte) (ListTestsResponse, error) {
 	var resp ListTestsResponse
-	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp, true); err != nil {
+	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return ListTestsResponse{}, err
 	}
 	if err := checkRespVersion(resp.Version, "list_tests"); err != nil {
@@ -264,66 +306,81 @@ func (c *Client) ListTests(ctx context.Context, buildID string, cmd queue.ListTe
 	return resp, nil
 }
 
-func (c *Client) doJSON(ctx context.Context, method, path string, reqBody any, respOut any, retry bool) error {
-	var payload []byte
-	if reqBody != nil {
-		var err error
-		payload, err = json.Marshal(reqBody)
-		if err != nil {
-			return fmt.Errorf("encode request: %w", err)
-		}
+func (c *Client) Init(ctx context.Context, cmd queue.InitCommand) (InitResponse, error) {
+	req, err := EncodeInit(cmd)
+	if err != nil {
+		return InitResponse{}, err
 	}
-
-	deadline := time.Now().Add(c.retryBudget)
-	backoff := c.retryBase
-
-	for attempt := 0; ; attempt++ {
-		err := c.doOnce(ctx, method, path, payload, respOut)
-		if err == nil || !retry || ctx.Err() != nil || !IsTransientError(err) {
-			return err
-		}
-
-		now := time.Now()
-		if !now.Before(deadline) {
-			return err
-		}
-
-		wait := backoff
-		if wait > c.retryMaxWait {
-			wait = c.retryMaxWait
-		}
-		// Add up to 25% jitter.
-		if jitterMax := wait / 4; jitterMax > 0 {
-			wait += time.Duration(rand.Int64N(int64(jitterMax) + 1))
-		}
-		if rem := deadline.Sub(now); wait > rem {
-			wait = rem
-		}
-
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-		if backoff < c.retryMaxWait {
-			backoff = min(backoff*2, c.retryMaxWait)
-		}
+	status, raw, err := c.doRaw(ctx, req)
+	if err != nil {
+		return InitResponse{}, err
 	}
+	return ParseInitResponse(status, raw)
 }
 
-func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte, respOut any) error {
-	var body io.Reader
-	if payload != nil {
-		body = bytes.NewReader(payload)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+func (c *Client) Lease(ctx context.Context, buildID string, cmd queue.LeaseCommand) (LeaseResponse, error) {
+	req, err := EncodeLease(buildID, cmd)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return LeaseResponse{}, err
 	}
-	if payload != nil {
-		req.Header.Set("Content-Type", ContentTypeJSON)
+	status, raw, err := c.doRaw(ctx, req)
+	if err != nil {
+		return LeaseResponse{}, err
+	}
+	return ParseLeaseResponse(status, raw)
+}
+
+func (c *Client) Heartbeat(ctx context.Context, buildID string, cmd queue.HeartbeatCommand) (HeartbeatResponse, error) {
+	req, err := EncodeHeartbeat(buildID, cmd)
+	if err != nil {
+		return HeartbeatResponse{}, err
+	}
+	status, raw, err := c.doRaw(ctx, req)
+	if err != nil {
+		return HeartbeatResponse{}, err
+	}
+	return ParseHeartbeatResponse(status, raw)
+}
+
+func (c *Client) Report(ctx context.Context, buildID string, cmd queue.ReportCommand) (ReportResponse, error) {
+	req, err := EncodeReport(buildID, cmd)
+	if err != nil {
+		return ReportResponse{}, err
+	}
+	status, raw, err := c.doRaw(ctx, req)
+	if err != nil {
+		return ReportResponse{}, err
+	}
+	return ParseReportResponse(status, raw)
+}
+
+func (c *Client) Status(ctx context.Context, buildID string) (StatusResponse, error) {
+	status, raw, err := c.doRaw(ctx, EncodeStatus(buildID))
+	if err != nil {
+		return StatusResponse{}, err
+	}
+	return ParseStatusResponse(status, raw)
+}
+
+func (c *Client) ListTests(ctx context.Context, buildID string, cmd queue.ListTestsCommand) (ListTestsResponse, error) {
+	status, raw, err := c.doRaw(ctx, EncodeListTests(buildID, cmd))
+	if err != nil {
+		return ListTestsResponse{}, err
+	}
+	return ParseListTestsResponse(status, raw)
+}
+
+func (c *Client) doRaw(ctx context.Context, wr WireRequest) (int, []byte, error) {
+	var body io.Reader
+	if wr.Body != nil {
+		body = bytes.NewReader(wr.Body)
+	}
+	req, err := http.NewRequestWithContext(ctx, wr.Method, c.baseURL+wr.Path, body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("build request: %w", err)
+	}
+	if wr.ContentType != "" {
+		req.Header.Set("Content-Type", wr.ContentType)
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
@@ -334,44 +391,46 @@ func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte
 		// Decide cancellation from the caller's ctx, not errors.Is(err, context.DeadlineExceeded),
 		// because http.Client.Timeout also wraps DeadlineExceeded and must be retried.
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return 0, nil, ctx.Err()
 		}
-		return &transportError{msg: fmt.Sprintf("queue request %s %s failed: %v", method, path, sanitizeTransportError(err))}
+		return 0, nil, &transportError{msg: fmt.Sprintf("queue request %s %s failed: %v", wr.Method, wr.Path, sanitizeTransportError(err))}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return fmt.Errorf("queue server returned redirect %d (redirects are not followed)", resp.StatusCode)
+		return 0, nil, fmt.Errorf("queue server returned redirect %d (redirects are not followed)", resp.StatusCode)
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return 0, nil, ctx.Err()
 		}
-		return &transportError{msg: fmt.Sprintf("reading queue response: %v", err)}
+		return 0, nil, &transportError{msg: fmt.Sprintf("reading queue response: %v", err)}
 	}
 	if len(raw) > MaxResponseBytes {
-		return fmt.Errorf("queue response exceeds %d byte limit", MaxResponseBytes)
+		return 0, nil, fmt.Errorf("queue response exceeds %d byte limit", MaxResponseBytes)
 	}
+	return resp.StatusCode, raw, nil
+}
 
-	if resp.StatusCode != http.StatusOK {
+func decodeWireResponse(status int, raw []byte, out any) error {
+	if status != http.StatusOK {
 		var env errorEnvelope
 		if decErr := json.Unmarshal(raw, &env); decErr == nil && env.Error.Code != "" {
 			return &APIError{
-				HTTPStatus: resp.StatusCode,
+				HTTPStatus: status,
 				Code:       env.Error.Code,
 				Message:    env.Error.Message,
 			}
 		}
 		return &APIError{
-			HTTPStatus: resp.StatusCode,
+			HTTPStatus: status,
 			Code:       "http_error",
-			Message:    http.StatusText(resp.StatusCode),
+			Message:    http.StatusText(status),
 		}
 	}
-
-	if err := json.Unmarshal(raw, respOut); err != nil {
+	if err := json.Unmarshal(raw, out); err != nil {
 		return fmt.Errorf("decoding queue response: %w", err)
 	}
 	return nil
@@ -382,6 +441,12 @@ type transportError struct {
 }
 
 func (e *transportError) Error() string { return e.msg }
+
+// NewTransportError constructs a transient transport error (used by simulation
+// tests to match live HTTP transport failures).
+func NewTransportError(msg string) error {
+	return &transportError{msg: msg}
+}
 
 // IsTransientError reports whether err from Client is a transient network,
 // rate-limit, or 5xx server failure that may succeed on retry. Permanent 4xx

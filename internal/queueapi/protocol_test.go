@@ -152,9 +152,6 @@ func (e protocolEnv) client(t *testing.T, token string) *queueapi.Client {
 		Token:             token,
 		AllowInsecureHTTP: true,
 		HTTPClient:        e.httpClient,
-		RetryBudget:       5 * time.Second,
-		RetryBase:         20 * time.Millisecond,
-		RetryMaxWait:      100 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
