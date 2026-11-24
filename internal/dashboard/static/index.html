@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bunpō Queue</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a href="/" id="brand-link" class="brand">Bunpō Queue</a>
+      <nav aria-label="Dashboard actions" class="row">
+        <span id="refresh-state" class="muted"></span>
+        <button type="button" id="refresh-btn" hidden>Refresh</button>
+        <button type="button" id="signout-btn" hidden>Sign out</button>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="container">
+    <p id="live-status" class="sr-only" aria-live="polite" aria-atomic="true"></p>
+    <div id="error-banner" class="banner banner-error" role="alert" hidden></div>
+
+    <section id="auth-view" class="card auth-card" aria-labelledby="auth-heading">
+      <h1 id="auth-heading">Sign in with a read token</h1>
+      <p class="muted">Enter <code>BUNPO_QUEUE_READ_TOKEN</code>. Stored only in this tab's <code>sessionStorage</code> and sent via the <code>Authorization</code> header.</p>
+      <form id="auth-form" autocomplete="off">
+        <label for="token-input">Read token</label>
+        <input id="token-input" name="token" type="password" required minlength="1" spellcheck="false" autocomplete="off">
+        <button type="submit" class="btn-primary">Open dashboard</button>
+      </form>
+    </section>
+
+    <section id="builds-view" hidden aria-labelledby="builds-heading">
+      <div class="section-head">
+        <h1 id="builds-heading">Recent builds</h1>
+        <span id="builds-count" class="muted"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <caption class="sr-only">Recent queue builds</caption>
+          <thead>
+            <tr>
+              <th scope="col">Build</th><th scope="col">Verdict</th><th scope="col">Tests</th>
+              <th scope="col">Failed</th><th scope="col">Unresolved</th><th scope="col">Created</th><th scope="col">Duration</th>
+            </tr>
+          </thead>
+          <tbody id="builds-tbody"></tbody>
+        </table>
+      </div>
+      <p id="builds-empty" class="muted" hidden>No builds recorded yet.</p>
+    </section>
+
+    <section id="build-view" hidden aria-labelledby="build-heading">
+      <div class="section-head">
+        <div>
+          <a href="/" id="back-link" class="back-link">← All builds</a>
+          <h1 id="build-heading" class="break-word"></h1>
+        </div>
+        <div id="build-verdict-slot"></div>
+      </div>
+
+      <dl id="build-summary" class="summary-grid"></dl>
+      <div id="conflicts-panel" class="card banner-warn" hidden>
+        <h2>Init conflicts</h2>
+        <ul id="conflicts-list"></ul>
+      </div>
+
+      <section class="card" aria-labelledby="timeline-heading">
+        <div class="section-head">
+          <h2 id="timeline-heading">Per-machine timeline</h2>
+          <span id="timeline-meta" class="muted"></span>
+        </div>
+        <div id="timeline-legend" class="row legend" aria-label="Timeline legend"></div>
+        <div id="timeline-wrap" class="timeline-wrap"></div>
+        <div id="lease-detail" class="lease-detail" hidden></div>
+      </section>
+
+      <section class="card" aria-labelledby="slowest-heading">
+        <h2 id="slowest-heading">Slowest files</h2>
+        <div class="table-wrap">
+          <table>
+            <caption class="sr-only">Slowest passing test files</caption>
+            <thead><tr><th scope="col">File</th><th scope="col">Duration</th></tr></thead>
+            <tbody id="slowest-tbody"></tbody>
+          </table>
+        </div>
+        <p id="slowest-empty" class="muted" hidden>No timed passing files yet.</p>
+      </section>
+
+      <section class="card" aria-labelledby="tests-heading">
+        <div class="section-head">
+          <h2 id="tests-heading">Tests &amp; attempt history</h2>
+          <div class="row filter-bar" role="group" aria-label="Filter tests">
+            <button type="button" data-filter="problems" aria-pressed="true">Failed &amp; unresolved</button>
+            <button type="button" data-filter="retried" aria-pressed="false">Retried &amp; history</button>
+            <button type="button" data-filter="all" aria-pressed="false">All (paged)</button>
+          </div>
+        </div>
+        <p id="tests-meta" class="muted"></p>
+        <div id="tests-list" class="tests-list"></div>
+        <div class="pager"><button type="button" id="load-more-btn" hidden>Load next page</button></div>
+      </section>
+    </section>
+  </main>
+
+  <script type="module" src="/dashboard/app.js"></script>
+</body>
+</html>
