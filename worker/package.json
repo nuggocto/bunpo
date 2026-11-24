@@ -1,0 +1,16 @@
+{
+  "name": "bunpo-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:core": "vitest run --config vitest.core.config.ts",
+    "test:do": "WRANGLER_SEND_METRICS=false vitest run --config vitest.do.config.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.9.1",
+    "typescript": "7.0.2",
+    "vitest": "5.1.1",
+    "wrangler": "4.167.0"
+  }
+}

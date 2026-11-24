@@ -639,6 +639,7 @@ type simWorld struct {
 	runners             []*simRunner
 	statusClients       []*simStatusClient
 	oracle              *simOracle
+	exporter            *simExporter
 }
 
 func newSimWorld(seed int64, override *faultProfile) (*simWorld, error) {
@@ -1078,10 +1079,15 @@ func (w *simWorld) restartServer(powerLoss bool) error {
 
 	prevSuppress := w.fs.suppressFaults
 	w.fs.suppressFaults = true
+	restartNow := w.serverClock()
+	preRestartDisk := bytes.Clone(w.fs.pendingFiles[w.buildFile])
 	hErr := w.resetHandler(loaded.Builds, loaded.Damaged)
 	w.fs.suppressFaults = prevSuppress
 	if hErr != nil {
 		return hErr
+	}
+	if err := w.exporter.recordRestart(restartNow, w.buildBroken, preRestartDisk); err != nil {
+		return err
 	}
 	if err := w.oracle.verifyAfterRestart(w, loaded); err != nil {
 		return err
@@ -1320,6 +1326,7 @@ func (w *simWorld) handleServerRequest(ev *simEvent) error {
 	beforeLen := len(w.fs.pendingFiles[w.buildFile])
 	wasInit := w.oracle.initialized
 	w.fs.crashed = false
+	reqNow := w.serverClock()
 	status, body := w.invokeHandler(ev.wire, ev.token)
 
 	dropReply := func(delay int64, msg string) {
@@ -1346,6 +1353,7 @@ func (w *simWorld) handleServerRequest(ev *simEvent) error {
 		if !w.buildBroken {
 			w.buildBroken = true
 			w.stats["broken"]++
+			w.exporter.stop()
 		}
 	}
 	if ev.statusIdx >= 0 && status == http.StatusNotFound && !wasInit {
@@ -1359,6 +1367,9 @@ func (w *simWorld) handleServerRequest(ev *simEvent) error {
 	if status < http.StatusInternalServerError {
 		if after := w.fs.pendingFiles[w.buildFile]; len(after) > beforeLen {
 			newEvents = parseDiskEventsSlice(after[beforeLen:])
+		}
+		if err := w.exporter.recordCommand(reqNow, ev.req, status, body, newEvents); err != nil {
+			return err
 		}
 	}
 	if err := w.oracle.onServerHandled(w, ev.req, status, body, newEvents); err != nil {

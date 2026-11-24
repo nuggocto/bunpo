@@ -41,6 +41,13 @@ func runSeed(t *testing.T, scenarioName string, seed int64, override *faultProfi
 	if err != nil {
 		t.Fatalf("seed %d setup failed: %v", seed, err)
 	}
+	if exportDir := os.Getenv("BUNPO_SIM_EXPORT_DIR"); exportDir != "" {
+		name := fmt.Sprintf("seed-%05d", seed)
+		if scenarioName != "" {
+			name = "named-" + scenarioName
+		}
+		w.exporter = newSimExporter(exportDir, name, seed, w.lim.MinLeaseTTLMS)
+	}
 	if err := w.run(); err != nil {
 		replay := fmt.Sprintf("BUNPO_SIM_SEED=%d go test -v -run '^TestSim$' ./internal/sim", seed)
 		if scenarioName != "" {
@@ -48,6 +55,9 @@ func runSeed(t *testing.T, scenarioName string, seed int64, override *faultProfi
 		}
 		t.Fatalf("seed %d failed: %v\n\nReplay:\n  %s\n\nLast %d trace lines:\n%s",
 			seed, err, replay, traceTail, w.trace.tail())
+	}
+	if err := w.exporter.flush(); err != nil {
+		t.Fatalf("seed %d export failed: %v", seed, err)
 	}
 	return w.trace.digest(), w.stats
 }

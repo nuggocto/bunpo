@@ -35,3 +35,7 @@ go.work.sum
 
 # Build output
 /bin/
+
+# Worker dev dependencies and local Miniflare state
+worker/node_modules/
+worker/.wrangler/
