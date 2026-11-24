@@ -81,6 +81,16 @@ func (l *blockingLog) Append(ctx context.Context, buildID string, events []queue
 	return nil
 }
 
+func (l *blockingLog) Remove(_ context.Context, _ string) error { return nil }
+
+func assertAPIErr(t *testing.T, err error, status int, code string) {
+	t.Helper()
+	var apiErr *queueapi.APIError
+	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != status || (code != "" && apiErr.Code != code) {
+		t.Fatalf("err = %v; want HTTP %d %s", err, status, code)
+	}
+}
+
 func TestValidateTokens(t *testing.T) {
 	exactWrite, exactRead := strings.Repeat("w", queueapi.MinTokenBytes), strings.Repeat("r", queueapi.MinTokenBytes)
 	if err := queueapi.ValidateTokens(exactWrite, exactRead); err != nil {

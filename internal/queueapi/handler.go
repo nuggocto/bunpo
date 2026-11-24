@@ -31,28 +31,32 @@ var ErrAppendUnwritten = errors.New("event append left storage unchanged")
 // EventLog persists decided events before they are applied to in-memory state.
 // One Append call must be all-or-nothing on replay. On error, the log must
 // either prove nothing was written by wrapping ErrAppendUnwritten, or accept
-// that the handler will mark the build broken (500).
+// that the handler will mark the build broken (500). Remove deletes a build's
+// persisted log when expired or evicted.
 type EventLog interface {
 	Append(ctx context.Context, buildID string, events []queue.Event) error
+	Remove(ctx context.Context, buildID string) error
 }
 
 // NopEventLog is an EventLog that succeeds immediately without writing.
 type NopEventLog struct{}
 
 func (NopEventLog) Append(context.Context, string, []queue.Event) error { return nil }
+func (NopEventLog) Remove(context.Context, string) error                { return nil }
 
 // HandlerConfig configures a live-queue HTTP handler.
 type HandlerConfig struct {
-	WriteToken    string
-	ReadToken     string
-	Clock         func() int64
-	Limits        queue.Limits
-	MaxBuilds     int
-	MaxRunning    int
-	RetentionMS   int64
-	Log           EventLog
-	Logger        *slog.Logger
-	InitialBuilds []*queue.State
+	WriteToken     string
+	ReadToken      string
+	Clock          func() int64
+	Limits         queue.Limits
+	MaxBuilds      int
+	MaxRunning     int
+	RetentionMS    int64
+	Log            EventLog
+	Logger         *slog.Logger
+	InitialBuilds  []*queue.State
+	InitialDamaged []string
 }
 
 type authRole int
@@ -69,6 +73,7 @@ type buildEntry struct {
 	lastActivityMS int64
 	broken         bool
 	failedCreate   bool
+	evicted        bool
 }
 
 // Handler serves Bunpō's live-queue HTTP API.
@@ -83,8 +88,9 @@ type Handler struct {
 	log         EventLog
 	logger      *slog.Logger
 
-	mu     sync.Mutex
-	builds map[string]*buildEntry
+	mu      sync.Mutex
+	builds  map[string]*buildEntry
+	damaged map[string]bool
 }
 
 // NewHandler validates configuration and constructs a live-queue HTTP handler.
@@ -122,16 +128,13 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		log:         cfg.Log,
 		logger:      cfg.Logger,
 		builds:      make(map[string]*buildEntry, len(cfg.InitialBuilds)),
+		damaged:     make(map[string]bool, len(cfg.InitialDamaged)),
 	}
-	now := h.clock()
-	for _, st := range cfg.InitialBuilds {
-		if st == nil || !st.Initialized || st.BuildID == "" {
-			continue
-		}
-		h.builds[st.BuildID] = &buildEntry{
-			state:          st,
-			lastActivityMS: now,
-		}
+	for _, name := range cfg.InitialDamaged {
+		h.damaged[name] = true
+	}
+	if len(cfg.InitialBuilds) > 0 {
+		h.loadInitialBuilds(cfg.InitialBuilds, h.clock())
 	}
 	return h, nil
 }
@@ -382,14 +385,9 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request, buildID st
 		return
 	}
 
-	entry := h.lookupBuildLocked(buildID)
-	if entry == nil {
-		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"})
-		return
-	}
-	if entry.broken {
-		entry.mu.Unlock()
-		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
+	entry, apiErr := h.lookupBuildLocked(r.Context(), buildID)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
 		return
 	}
 
@@ -432,14 +430,9 @@ func (h *Handler) handleHeartbeat(w http.ResponseWriter, r *http.Request, buildI
 		return
 	}
 
-	entry := h.lookupBuildLocked(buildID)
-	if entry == nil {
-		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"})
-		return
-	}
-	if entry.broken {
-		entry.mu.Unlock()
-		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
+	entry, apiErr := h.lookupBuildLocked(r.Context(), buildID)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
 		return
 	}
 
@@ -505,14 +498,9 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request, buildID s
 		}
 	}
 
-	entry := h.lookupBuildLocked(buildID)
-	if entry == nil {
-		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"})
-		return
-	}
-	if entry.broken {
-		entry.mu.Unlock()
-		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
+	entry, apiErr := h.lookupBuildLocked(r.Context(), buildID)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
 		return
 	}
 
@@ -539,14 +527,9 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request, buildID s
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request, buildID string) {
-	entry := h.lookupBuildLocked(buildID)
-	if entry == nil {
-		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"})
-		return
-	}
-	if entry.broken {
-		entry.mu.Unlock()
-		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
+	entry, apiErr := h.lookupBuildLocked(r.Context(), buildID)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
 		return
 	}
 
@@ -601,14 +584,9 @@ func (h *Handler) handleListTests(w http.ResponseWriter, r *http.Request, buildI
 		}
 	}
 
-	entry := h.lookupBuildLocked(buildID)
-	if entry == nil {
-		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"})
-		return
-	}
-	if entry.broken {
-		entry.mu.Unlock()
-		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
+	entry, apiErr := h.lookupBuildLocked(r.Context(), buildID)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
 		return
 	}
 
@@ -646,12 +624,11 @@ func (h *Handler) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 		return cmp.Compare(a.id, b.id)
 	})
 
-	var expiredIDs []string
 	summaries := make([]BuildSummary, 0, len(entries))
 	for _, ne := range entries {
 		e := ne.entry
 		e.mu.Lock()
-		if !e.state.Initialized || e.broken {
+		if e.evicted || !e.state.Initialized || e.broken {
 			e.mu.Unlock()
 			continue
 		}
@@ -666,9 +643,8 @@ func (h *Handler) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		v := e.state.Verdict()
-		if v != queue.VerdictRunning && e.state.FinishedAtMS > 0 && now-e.state.FinishedAtMS >= h.retentionMS {
-			expiredIDs = append(expiredIDs, e.state.BuildID)
-			e.mu.Unlock()
+		if isExpired(e.state, now, h.retentionMS) {
+			h.evictLocked(r.Context(), ne.id, e, nil)
 			continue
 		}
 		var fin *int64
@@ -687,14 +663,6 @@ func (h *Handler) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 			HasConflicts:    len(e.state.Conflicts) > 0,
 		})
 		e.mu.Unlock()
-	}
-
-	if len(expiredIDs) > 0 {
-		h.mu.Lock()
-		for _, id := range expiredIDs {
-			delete(h.builds, id)
-		}
-		h.mu.Unlock()
 	}
 
 	slices.SortFunc(summaries, func(a, b BuildSummary) int {
@@ -748,140 +716,320 @@ func (h *Handler) persistAndApply(ctx context.Context, buildID string, entry *bu
 	return nil
 }
 
-// lookupBuildLocked looks up buildID, locks it, and checks retention.
-// Returns nil if not found or expired past retention.
-func (h *Handler) lookupBuildLocked(buildID string) *buildEntry {
+var errBuildBroken = &APIError{
+	HTTPStatus: http.StatusInternalServerError,
+	Code:       ErrCodeInternalError,
+	Message:    "build state is inconsistent",
+}
+
+type evictStatus uint8
+
+const (
+	evictDone evictStatus = iota
+	evictSkipped
+	evictRemoveFailed
+)
+
+// evictLocked removes a build's persisted log before dropping it from h.builds.
+// Caller must hold entry.mu and NOT hold h.mu; entry.mu is always unlocked.
+// When expected is non-nil, entry is re-checked under entry.mu and skipped if
+// its kind or lastActivityMS changed since planning. Broken builds keep their
+// file untouched on disk and are quarantined in h.damaged so a later Init
+// cannot start a second history.
+func (h *Handler) evictLocked(ctx context.Context, buildID string, entry *buildEntry, expected *evictItem) evictStatus {
+	if entry.evicted {
+		entry.mu.Unlock()
+		return evictDone
+	}
+	if expected != nil {
+		cur := entryToEvictItem(buildID, entry, false)
+		if cur.kind != expected.kind || cur.lastActivityMS != expected.lastActivityMS {
+			entry.mu.Unlock()
+			return evictSkipped
+		}
+	}
+	broken := entry.broken
+	if !broken {
+		if err := h.log.Remove(context.WithoutCancel(ctx), buildID); err != nil {
+			h.logger.Error("failed to remove build log; keeping build entry", "build_id", buildID, "err", err)
+			entry.mu.Unlock()
+			return evictRemoveFailed
+		}
+	}
+	entry.evicted = true
+	entry.mu.Unlock()
+
+	h.mu.Lock()
+	if h.builds[buildID] == entry {
+		delete(h.builds, buildID)
+	}
+	if broken {
+		h.damaged[BuildFileName(buildID)] = true
+	}
+	h.mu.Unlock()
+	return evictDone
+}
+
+type buildKind uint8
+
+const (
+	kindBusy buildKind = iota // locked or uninitialized: counts as running, never evicted
+	kindBroken
+	kindRunning
+	kindFinished
+)
+
+type evictItem struct {
+	id             string
+	kind           buildKind
+	createdAtMS    int64
+	finishedAtMS   int64
+	lastActivityMS int64
+	leaseTTL       int64
+	skipEvict      bool
+}
+
+func isExpired(st *queue.State, now, retentionMS int64) bool {
+	return st.Initialized && st.Verdict() != queue.VerdictRunning && st.FinishedAtMS > 0 && now-st.FinishedAtMS >= retentionMS
+}
+
+// planEviction chooses which builds to evict (and whether to refuse admission
+// for slots > 0) purely from build metadata, now, and limits. Startup load uses
+// slots == 0 (may evict oldest running builds); runtime admission uses slots == 1
+// (only idle running builds with now-lastActivityMS > 2*leaseTTL may be evicted).
+func planEviction(items []evictItem, now, retentionMS int64, maxRunning, maxBuilds, slots int) ([]string, *APIError) {
+	running := 0
+	var expired, broken, finished, idleRunning []evictItem
+	for _, it := range items {
+		if it.kind == kindBusy || it.kind == kindRunning {
+			running++
+		}
+		if it.skipEvict {
+			continue
+		}
+		switch it.kind {
+		case kindBroken:
+			broken = append(broken, it)
+		case kindRunning:
+			if slots == 0 || now-it.lastActivityMS > 2*it.leaseTTL {
+				idleRunning = append(idleRunning, it)
+			}
+		case kindFinished:
+			if it.finishedAtMS > 0 && now-it.finishedAtMS >= retentionMS {
+				expired = append(expired, it)
+			} else {
+				finished = append(finished, it)
+			}
+		}
+	}
+
+	cmpID := func(a, b evictItem) int { return cmp.Compare(a.id, b.id) }
+	slices.SortFunc(expired, cmpID)
+	slices.SortFunc(broken, cmpID)
+	slices.SortFunc(finished, func(a, b evictItem) int {
+		return cmp.Or(cmp.Compare(a.finishedAtMS, b.finishedAtMS), cmp.Compare(a.createdAtMS, b.createdAtMS), cmp.Compare(a.id, b.id))
+	})
+	slices.SortFunc(idleRunning, func(a, b evictItem) int {
+		if slots == 0 {
+			return cmp.Or(cmp.Compare(a.createdAtMS, b.createdAtMS), cmp.Compare(a.id, b.id))
+		}
+		return cmp.Or(cmp.Compare(a.lastActivityMS, b.lastActivityMS), cmp.Compare(a.id, b.id))
+	})
+
+	var toEvict []string
+	for _, it := range expired {
+		toEvict = append(toEvict, it.id)
+	}
+	evictedIdle := 0
+	for running+slots > maxRunning && evictedIdle < len(idleRunning) {
+		toEvict = append(toEvict, idleRunning[evictedIdle].id)
+		running--
+		evictedIdle++
+	}
+	if running+slots > maxRunning {
+		return toEvict, &APIError{
+			HTTPStatus: http.StatusServiceUnavailable,
+			Code:       ErrCodeAtCapacity,
+			Message:    fmt.Sprintf("server at running build capacity (%d)", maxRunning),
+		}
+	}
+
+	rem := len(items) - len(toEvict)
+	for _, list := range [][]evictItem{broken, finished, idleRunning[evictedIdle:]} {
+		for i := 0; rem+slots > maxBuilds && i < len(list); i++ {
+			toEvict = append(toEvict, list[i].id)
+			rem--
+		}
+	}
+	if rem+slots > maxBuilds {
+		return toEvict, &APIError{
+			HTTPStatus: http.StatusServiceUnavailable,
+			Code:       ErrCodeAtCapacity,
+			Message:    fmt.Sprintf("server at build capacity (%d)", maxBuilds),
+		}
+	}
+	return toEvict, nil
+}
+
+func (h *Handler) loadInitialBuilds(states []*queue.State, now int64) {
+	ctx := context.Background()
+	sorted := slices.Clone(states)
+	slices.SortFunc(sorted, func(a, b *queue.State) int { return cmp.Compare(a.BuildID, b.BuildID) })
+
+	items := make([]evictItem, 0, len(sorted))
+	for _, st := range sorted {
+		if !st.Initialized || st.BuildID == "" {
+			continue
+		}
+		if st.Verdict() == queue.VerdictRunning {
+			st.ResetActiveLeaseDeadlines(now)
+		}
+		e := &buildEntry{state: st, lastActivityMS: now}
+		h.builds[st.BuildID] = e
+		if st.Verdict() == queue.VerdictRunning && now >= st.DeadlineMS {
+			if evs, _, err := queue.DecideStatus(st, now); err == nil {
+				_ = h.persistAndApply(ctx, st.BuildID, e, evs)
+			}
+		}
+		items = append(items, entryToEvictItem(st.BuildID, e, false))
+	}
+
+	toEvict, _ := planEviction(items, now, h.retentionMS, h.maxRunning, h.maxBuilds, 0)
+	for _, id := range toEvict {
+		if e := h.builds[id]; e != nil {
+			e.mu.Lock()
+			h.evictLocked(ctx, id, e, nil)
+		}
+	}
+}
+
+func entryToEvictItem(id string, e *buildEntry, skip bool) evictItem {
+	it := evictItem{id: id, skipEvict: skip, lastActivityMS: e.lastActivityMS}
+	switch {
+	case e.broken:
+		it.kind = kindBroken
+	case !e.state.Initialized:
+		it.kind = kindBusy
+	case e.state.Verdict() == queue.VerdictRunning:
+		it.kind = kindRunning
+		it.createdAtMS = e.state.CreatedAtMS
+		it.leaseTTL = e.state.Config.LeaseTTLMS
+	default:
+		it.kind = kindFinished
+		it.createdAtMS = e.state.CreatedAtMS
+		it.finishedAtMS = e.state.FinishedAtMS
+	}
+	return it
+}
+
+// lookupBuildLocked looks up buildID, locks it, and checks damaged/retention state.
+func (h *Handler) lookupBuildLocked(ctx context.Context, buildID string) (*buildEntry, *APIError) {
 	now := h.clock()
+	fileName := BuildFileName(buildID)
+	notFound := &APIError{HTTPStatus: http.StatusNotFound, Code: queue.ErrCodeBuildNotFound, Message: "build not found"}
 	for {
 		h.mu.Lock()
-		entry, ok := h.builds[buildID]
+		damaged := h.damaged[fileName]
+		entry := h.builds[buildID]
 		h.mu.Unlock()
-		if !ok {
-			return nil
+		if damaged {
+			return nil, errBuildBroken
+		}
+		if entry == nil {
+			return nil, notFound
 		}
 
 		entry.mu.Lock()
-		if entry.failedCreate {
+		if entry.failedCreate || entry.evicted {
 			entry.mu.Unlock()
 			continue
 		}
-		if !entry.broken && !entry.state.Initialized {
+		if entry.broken {
 			entry.mu.Unlock()
-			return nil
+			return nil, errBuildBroken
 		}
-		if !entry.broken && entry.state.Verdict() != queue.VerdictRunning && entry.state.FinishedAtMS > 0 && now-entry.state.FinishedAtMS >= h.retentionMS {
+		if !entry.state.Initialized {
 			entry.mu.Unlock()
-			h.mu.Lock()
-			if h.builds[buildID] == entry {
-				delete(h.builds, buildID)
-			}
-			h.mu.Unlock()
-			return nil
+			return nil, notFound
 		}
-		return entry
+		if isExpired(entry.state, now, h.retentionMS) {
+			h.evictLocked(ctx, buildID, entry, nil)
+			return nil, notFound
+		}
+		return entry, nil
 	}
 }
 
 // getOrCreateBuildLocked returns the locked buildEntry for buildID, creating
-// one (with deadline finalization, retention, and capacity eviction under
-// pressure) if absent. Lock ordering is strictly h.mu -> entry.mu only for
-// newly created or TryLock-scanned entries, so a slow Append on another build
-// never blocks unrelated builds.
+// one (with deadline finalization, retention, and capacity eviction outside
+// h.mu) if absent.
 func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*buildEntry, bool, *APIError) {
+	type cand struct {
+		id      string
+		entry   *buildEntry
+		planned evictItem
+	}
 	finalizedDeadline := false
+	fileName := BuildFileName(buildID)
+	failedEvict := make(map[string]bool)
 	for {
 		now := h.clock()
 		h.mu.Lock()
+		if h.damaged[fileName] {
+			h.mu.Unlock()
+			return nil, false, errBuildBroken
+		}
 		if existing, ok := h.builds[buildID]; ok {
 			h.mu.Unlock()
 			existing.mu.Lock()
-			if existing.failedCreate {
+			if existing.failedCreate || existing.evicted {
 				existing.mu.Unlock()
 				continue
 			}
-			if !existing.broken && existing.state.Initialized && existing.state.Verdict() != queue.VerdictRunning && existing.state.FinishedAtMS > 0 && now-existing.state.FinishedAtMS >= h.retentionMS {
-				existing.mu.Unlock()
-				h.mu.Lock()
-				if h.builds[buildID] == existing {
-					delete(h.builds, buildID)
+			if !existing.broken && isExpired(existing.state, now, h.retentionMS) {
+				if h.evictLocked(ctx, buildID, existing, nil) != evictDone {
+					return nil, false, &APIError{
+						HTTPStatus: http.StatusServiceUnavailable,
+						Code:       ErrCodeStorageError,
+						Message:    "failed to remove expired build log",
+					}
 				}
-				h.mu.Unlock()
 				continue
 			}
 			return existing, false, nil
 		}
 
-		type finCandidate struct {
-			id         string
-			finishedAt int64
-			createdAt  int64
-		}
-		type idleCandidate struct {
-			id             string
-			lastActivityMS int64
-		}
-		type deadlineCandidate struct {
-			id    string
-			entry *buildEntry
-		}
-
-		running := 0
-		var brokenIDs []string
-		var finished []finCandidate
-		var idleRunning []idleCandidate
-		var pastDeadline []deadlineCandidate
-
+		items := make([]evictItem, 0, len(h.builds))
+		itemByID := make(map[string]evictItem, len(h.builds))
+		var pastDeadline []cand
 		for id, e := range h.builds {
 			if !e.mu.TryLock() {
-				// Conservatively count busy builds as running so we never exceed MaxRunning.
-				running++
+				it := evictItem{id: id, kind: kindBusy}
+				items = append(items, it)
+				itemByID[id] = it
 				continue
 			}
-			if e.broken {
-				brokenIDs = append(brokenIDs, id)
-				e.mu.Unlock()
-				continue
+			if !e.broken && e.state.Initialized && e.state.Verdict() == queue.VerdictRunning && now >= e.state.DeadlineMS {
+				pastDeadline = append(pastDeadline, cand{id: id, entry: e})
+				it := evictItem{id: id, kind: kindBusy}
+				items = append(items, it)
+				itemByID[id] = it
+			} else {
+				it := entryToEvictItem(id, e, failedEvict[id])
+				items = append(items, it)
+				itemByID[id] = it
 			}
-			if !e.state.Initialized {
-				running++
-				e.mu.Unlock()
-				continue
-			}
-			if e.state.Verdict() == queue.VerdictRunning {
-				if now >= e.state.DeadlineMS {
-					pastDeadline = append(pastDeadline, deadlineCandidate{id: id, entry: e})
-				} else {
-					running++
-					if now-e.lastActivityMS > 2*e.state.Config.LeaseTTLMS {
-						idleRunning = append(idleRunning, idleCandidate{id: id, lastActivityMS: e.lastActivityMS})
-					}
-				}
-				e.mu.Unlock()
-				continue
-			}
-			fin := e.state.FinishedAtMS
-			created := e.state.CreatedAtMS
 			e.mu.Unlock()
-			if fin > 0 && now-fin >= h.retentionMS {
-				delete(h.builds, id)
-				continue
-			}
-			finished = append(finished, finCandidate{id: id, finishedAt: fin, createdAt: created})
 		}
 
-		// Finalize deadline-expired builds through the EventLog outside h.mu in
-		// deterministic build-ID order.
 		if len(pastDeadline) > 0 && !finalizedDeadline {
 			finalizedDeadline = true
 			h.mu.Unlock()
-			slices.SortFunc(pastDeadline, func(a, b deadlineCandidate) int {
-				return cmp.Compare(a.id, b.id)
-			})
+			slices.SortFunc(pastDeadline, func(a, b cand) int { return cmp.Compare(a.id, b.id) })
 			for _, dc := range pastDeadline {
 				dc.entry.mu.Lock()
-				if !dc.entry.broken && dc.entry.state.Initialized && dc.entry.state.Verdict() == queue.VerdictRunning && now >= dc.entry.state.DeadlineMS {
-					events, _, err := queue.DecideStatus(dc.entry.state, now)
-					if err == nil && len(events) > 0 {
+				if !dc.entry.evicted && !dc.entry.broken && dc.entry.state.Initialized && dc.entry.state.Verdict() == queue.VerdictRunning && now >= dc.entry.state.DeadlineMS {
+					if events, _, err := queue.DecideStatus(dc.entry.state, now); err == nil {
 						_ = h.persistAndApply(ctx, dc.id, dc.entry, events)
 					}
 				}
@@ -889,58 +1037,27 @@ func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*
 			}
 			continue
 		}
-		// Any still-unfinalized past-deadline builds (for example if Append failed cleanly)
-		// count conservatively toward running so we don't spin.
-		running += len(pastDeadline)
 
-		// Under running-capacity pressure, evict idle abandoned running builds
-		// (no activity for > 2 * lease_ttl_ms), longest idle first.
-		slices.SortFunc(idleRunning, func(a, b idleCandidate) int {
-			return cmp.Or(cmp.Compare(a.lastActivityMS, b.lastActivityMS), cmp.Compare(a.id, b.id))
-		})
-		evictedIdle := 0
-		for running >= h.maxRunning && evictedIdle < len(idleRunning) {
-			delete(h.builds, idleRunning[evictedIdle].id)
-			running--
-			evictedIdle++
-		}
-		if running >= h.maxRunning {
+		toEvict, refuse := planEviction(items, now, h.retentionMS, h.maxRunning, h.maxBuilds, 1)
+		if refuse != nil {
 			h.mu.Unlock()
-			return nil, false, &APIError{
-				HTTPStatus: http.StatusServiceUnavailable,
-				Code:       ErrCodeAtCapacity,
-				Message:    fmt.Sprintf("server at running build capacity (%d)", h.maxRunning),
-			}
+			return nil, false, refuse
 		}
-
-		// Under total-build pressure, evict broken builds, then oldest finished
-		// builds, then remaining idle abandoned running builds.
-		if len(h.builds) >= h.maxBuilds {
-			slices.Sort(brokenIDs)
-			for i := 0; len(h.builds) >= h.maxBuilds && i < len(brokenIDs); i++ {
-				delete(h.builds, brokenIDs[i])
+		if len(toEvict) > 0 {
+			cands := make([]cand, len(toEvict))
+			for i, id := range toEvict {
+				cands[i] = cand{id: id, entry: h.builds[id], planned: itemByID[id]}
 			}
-		}
-		if len(h.builds) >= h.maxBuilds {
-			slices.SortFunc(finished, func(a, b finCandidate) int {
-				return cmp.Or(cmp.Compare(a.finishedAt, b.finishedAt), cmp.Compare(a.createdAt, b.createdAt), cmp.Compare(a.id, b.id))
-			})
-			for i := 0; len(h.builds) >= h.maxBuilds && i < len(finished); i++ {
-				delete(h.builds, finished[i].id)
-			}
-		}
-		if len(h.builds) >= h.maxBuilds {
-			for ; len(h.builds) >= h.maxBuilds && evictedIdle < len(idleRunning); evictedIdle++ {
-				delete(h.builds, idleRunning[evictedIdle].id)
-			}
-		}
-		if len(h.builds) >= h.maxBuilds {
 			h.mu.Unlock()
-			return nil, false, &APIError{
-				HTTPStatus: http.StatusServiceUnavailable,
-				Code:       ErrCodeAtCapacity,
-				Message:    fmt.Sprintf("server at build capacity (%d)", h.maxBuilds),
+			for _, c := range cands {
+				if c.entry != nil {
+					c.entry.mu.Lock()
+					if h.evictLocked(ctx, c.id, c.entry, &c.planned) == evictRemoveFailed {
+						failedEvict[c.id] = true
+					}
+				}
 			}
+			continue
 		}
 
 		entry := &buildEntry{state: queue.NewState(h.limits), lastActivityMS: now}

@@ -2,7 +2,8 @@
 //
 // TLS is terminated by the operator's reverse proxy (or omitted on loopback /
 // private cluster networks). Tokens are read from BUNPO_QUEUE_TOKEN and
-// BUNPO_QUEUE_READ_TOKEN only, never flags.
+// BUNPO_QUEUE_READ_TOKEN only, never flags. Run at most one server per --data
+// directory.
 package main
 
 import (
@@ -39,6 +40,7 @@ func main() {
 func run(args []string, getenv func(string) string) int {
 	fs := flag.NewFlagSet("bunpo-server", flag.ContinueOnError)
 	addr := fs.String("addr", defaultAddr, "TCP address to listen on")
+	dataDir := fs.String("data", "", "directory for persistent build logs (omit for in-memory only)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -50,24 +52,49 @@ func run(args []string, getenv func(string) string) int {
 		return 2
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-
-	handler, err := queueapi.NewHandler(queueapi.HandlerConfig{
-		WriteToken: getenv("BUNPO_QUEUE_TOKEN"),
-		ReadToken:  getenv("BUNPO_QUEUE_READ_TOKEN"),
-		Limits:     queue.DefaultLimits(),
-		Log:        queueapi.NopEventLog{},
-		Logger:     logger,
-	})
-	if err != nil {
+	writeTok, readTok := getenv("BUNPO_QUEUE_TOKEN"), getenv("BUNPO_QUEUE_READ_TOKEN")
+	if err := queueapi.ValidateTokens(writeTok, readTok); err != nil {
 		fmt.Fprintf(os.Stderr, "bunpo-server: %v\n", err)
 		return 2
 	}
 
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	// Listen first so a second server on the same address fails before touching --data.
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bunpo-server: listen %s: %v\n", *addr, err)
 		return 1
+	}
+
+	var eventLog queueapi.EventLog = queueapi.NopEventLog{}
+	var loaded queueapi.LoadResult
+	if *dataDir != "" {
+		osFS, err := queueapi.OpenOSLogFS(*dataDir)
+		if err == nil {
+			defer osFS.Close()
+			diskLog := queueapi.NewDiskLog(osFS, logger)
+			loaded, err = diskLog.Load(queue.DefaultLimits())
+			eventLog = diskLog
+		}
+		if err != nil {
+			_ = ln.Close()
+			fmt.Fprintf(os.Stderr, "bunpo-server: data dir: %v\n", err)
+			return 1
+		}
+		logger.Info("loaded build logs", "data_dir", *dataDir, "builds", len(loaded.Builds), "damaged", len(loaded.Damaged), "truncated", loaded.Truncated, "removed", loaded.Removed)
+	} else {
+		logger.Info("running in memory only; pass --data DIR to persist builds across restarts")
+	}
+
+	handler, err := queueapi.NewHandler(queueapi.HandlerConfig{
+		WriteToken: writeTok, ReadToken: readTok, Limits: queue.DefaultLimits(), Log: eventLog, Logger: logger,
+		InitialBuilds: loaded.Builds, InitialDamaged: loaded.Damaged,
+	})
+	if err != nil {
+		_ = ln.Close()
+		fmt.Fprintf(os.Stderr, "bunpo-server: %v\n", err)
+		return 2
 	}
 
 	srv := &http.Server{
