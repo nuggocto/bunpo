@@ -2,10 +2,12 @@
   Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
+
+/
+  Cache-Control: no-cache
+
+/index.html
   Cache-Control: no-cache
 
 /dashboard/*
-  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
-  X-Content-Type-Options: nosniff
-  Referrer-Policy: no-referrer
   Cache-Control: public, max-age=300

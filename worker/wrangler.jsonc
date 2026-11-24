@@ -19,6 +19,13 @@
     // valid range is 1..20000 and may be raised after testing on a real account.
     "MAX_TESTS": "5000"
   },
+  "assets": {
+    "directory": "../internal/dashboard/static",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none",
+    "run_worker_first": ["/api/*", "/healthz"]
+  },
   "durable_objects": {
     "bindings": [
       {

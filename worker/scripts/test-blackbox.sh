@@ -80,6 +80,26 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
+echo "==> Checking dashboard Static Assets and headers on ${BASE_URL}"
+for p in "/" "/builds/release-1.2.3" "/builds/app.js" "/dashboard/app.js" "/dashboard/core.js" "/dashboard/style.css"; do
+  HDR=$(curl -fsSI "${BASE_URL}${p}" | tr -d '\r')
+  CSP_LINES=$(echo "$HDR" | grep -ic "^content-security-policy:" || true)
+  test "$CSP_LINES" -eq 1
+  echo "$HDR" | grep -qi "^content-security-policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'$"
+  echo "$HDR" | grep -qi "^x-content-type-options: nosniff$"
+  echo "$HDR" | grep -qi "^referrer-policy: no-referrer$"
+  if [[ "$p" == /dashboard/* ]]; then
+    echo "$HDR" | grep -qi "^cache-control: public, max-age=300$"
+  else
+    echo "$HDR" | grep -qi "^cache-control: no-cache$"
+  fi
+done
+for bad in "/dashboard/" "/dashboard/%2e%2e/%2e%2e/dashboard.go" "/%2e%2e/dashboard.go" "/_headers" "/builds/a..b" "/unknown-route"; do
+  CODE=$(curl --path-as-is -sS -o "$TMP_DIR/bad.json" -w "%{http_code}" "${BASE_URL}${bad}")
+  test "$CODE" -eq 404
+  grep -q '"code":"not_found"' "$TMP_DIR/bad.json"
+done
+
 echo "==> Running Go black-box protocol suite against local workerd (${BASE_URL})"
 (
   cd "$ROOT_DIR"

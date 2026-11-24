@@ -86,6 +86,69 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     }
   });
 
+  it("serves dashboard static assets with strict headers, zero DO wakes, and JSON 404 on traversal/unknown paths", async () => {
+    const wantCSP =
+      "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+    const beforeDOs = await listDurableObjectIds(env.BUILD_DO);
+
+    // Static assets (served directly by Cloudflare's Static Assets layer using _headers
+    // before the Worker runs, costing 0 Worker requests and 0 DO wakes).
+    for (const [path, wantCT, wantCache] of [
+      ["/", "text/html", "no-cache"],
+      ["/dashboard/app.js", "javascript", "public, max-age=300"],
+      ["/dashboard/core.js", "javascript", "public, max-age=300"],
+      ["/dashboard/style.css", "text/css", "public, max-age=300"],
+    ] as const) {
+      const resp = await env.ASSETS.fetch(`http://localhost${path}`);
+      expect(resp.status, `ASSETS GET ${path}`).toBe(200);
+      expect(resp.headers.get("Content-Security-Policy"), `CSP on ${path}`).toBe(wantCSP);
+      expect(resp.headers.get("X-Content-Type-Options"), `nosniff on ${path}`).toBe("nosniff");
+      expect(resp.headers.get("Referrer-Policy"), `Referrer-Policy on ${path}`).toBe("no-referrer");
+      expect(resp.headers.get("Cache-Control"), `Cache-Control on ${path}`).toBe(wantCache);
+      expect(resp.headers.get("Content-Type") || "", `CT on ${path}`).toContain(wantCT);
+      expect((await resp.text()).length, `non-empty body on ${path}`).toBeGreaterThan(0);
+    }
+
+    // Build deep-link routes (including IDs with dots) miss Static Assets and are
+    // handled by the Worker via env.ASSETS without waking any Durable Object.
+    for (const path of ["/builds/release-1.2.3", "/builds/app.js"]) {
+      const resp = await exports.default.fetch(`http://localhost${path}`);
+      expect(resp.status, `GET ${path}`).toBe(200);
+      expect(resp.headers.get("Content-Security-Policy"), `CSP on ${path}`).toBe(wantCSP);
+      expect(resp.headers.get("X-Content-Type-Options"), `nosniff on ${path}`).toBe("nosniff");
+      expect(resp.headers.get("Referrer-Policy"), `Referrer-Policy on ${path}`).toBe("no-referrer");
+      expect(resp.headers.get("Cache-Control"), `Cache-Control on ${path}`).toBe("no-cache");
+      expect(resp.headers.get("Content-Type") || "", `CT on ${path}`).toContain("text/html");
+      expect(await resp.text()).toContain("<title>Bunpō Queue</title>");
+    }
+
+    // Traversal, directory listing, _headers, and unknown routes return 404 from ASSETS
+    // and JSON 404 from the Worker fallback.
+    for (const badPath of [
+      "/dashboard",
+      "/dashboard/",
+      "/dashboard/nope.js",
+      "/dashboard/%2e%2e/%2e%2e/dashboard.go",
+      "/%2e%2e/dashboard.go",
+      "/_headers",
+      "/builds/",
+      "/builds/a..b",
+      "/builds/a/b",
+      "/unknown-route",
+    ]) {
+      const assetResp = await env.ASSETS.fetch(`http://localhost${badPath}`);
+      expect(assetResp.status, `ASSETS GET ${badPath}`).toBe(404);
+      const resp = await exports.default.fetch(`http://localhost${badPath}`);
+      expect(resp.status, `Worker GET ${badPath}`).toBe(404);
+      const body = (await resp.json()) as { version: number; error: { code: string } };
+      expect(body.version, `JSON 404 version on ${badPath}`).toBe(1);
+      expect(body.error.code, `JSON 404 code on ${badPath}`).toBe("not_found");
+    }
+
+    const afterDOs = await listDurableObjectIds(env.BUILD_DO);
+    expect(afterDOs.length).toBe(beforeDOs.length);
+  });
+
   it("checks auth in Worker before waking any DO and enforces MAX_TESTS", async () => {
     const beforeIds = await listDurableObjectIds(env.BUILD_DO);
     const badAuth = await req("GET", "/api/v1/builds/uncreated-auth-check", "wrong-token-0123456789");
