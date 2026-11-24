@@ -195,119 +195,223 @@ func TestProtocolBlackBox(t *testing.T) {
 	rc := env.client(t, env.readToken)
 
 	t.Run("healthz and unknown routes and methods", func(t *testing.T) {
-		resp, data := env.rawRequest(t, http.MethodGet, "/healthz", "", nil)
-		if resp.StatusCode != http.StatusOK || string(data) != `{"ok":true}` {
-			t.Fatalf("healthz = %d %s; want 200 {\"ok\":true}", resp.StatusCode, data)
-		}
-		resp, data = env.rawRequest(t, http.MethodPost, "/healthz", "", []byte(`{}`))
-		assertErrorBody(t, resp, data, http.StatusMethodNotAllowed, queueapi.ErrCodeMethodNotAllowed)
-		if resp.Header.Get("Allow") != http.MethodGet {
-			t.Fatalf("Allow = %q; want GET", resp.Header.Get("Allow"))
+		t.Run("GET healthz returns 200 ok", func(t *testing.T) {
+			resp, data := env.rawRequest(t, http.MethodGet, "/healthz", "", nil)
+			if resp.StatusCode != http.StatusOK || string(data) != `{"ok":true}` {
+				t.Fatalf("healthz = %d %s; want 200 {\"ok\":true}", resp.StatusCode, data)
+			}
+		})
+
+		cases := []struct {
+			name       string
+			method     string
+			path       string
+			token      string
+			body       []byte
+			wantStatus int
+			wantCode   string
+			wantAllow  string
+		}{
+			{
+				name:       "POST healthz returns 405 with Allow GET",
+				method:     http.MethodPost,
+				path:       "/healthz",
+				body:       []byte(`{}`),
+				wantStatus: http.StatusMethodNotAllowed,
+				wantCode:   queueapi.ErrCodeMethodNotAllowed,
+				wantAllow:  http.MethodGet,
+			},
+			{
+				name:       "unknown route returns 404",
+				method:     http.MethodGet,
+				path:       "/does-not-exist",
+				wantStatus: http.StatusNotFound,
+				wantCode:   queueapi.ErrCodeNotFound,
+			},
+			{
+				name:       "POST builds list returns 405 with Allow GET",
+				method:     http.MethodPost,
+				path:       "/api/v1/builds",
+				token:      env.writeToken,
+				body:       []byte(`{}`),
+				wantStatus: http.StatusMethodNotAllowed,
+				wantCode:   queueapi.ErrCodeMethodNotAllowed,
+				wantAllow:  http.MethodGet,
+			},
+			{
+				name:       "GET build init returns 405 with Allow POST",
+				method:     http.MethodGet,
+				path:       "/api/v1/builds/foo/init",
+				token:      env.writeToken,
+				wantStatus: http.StatusMethodNotAllowed,
+				wantCode:   queueapi.ErrCodeMethodNotAllowed,
+				wantAllow:  http.MethodPost,
+			},
 		}
 
-		resp, data = env.rawRequest(t, http.MethodGet, "/does-not-exist", "", nil)
-		assertErrorBody(t, resp, data, http.StatusNotFound, queueapi.ErrCodeNotFound)
-
-		resp, data = env.rawRequest(t, http.MethodPost, "/api/v1/builds", env.writeToken, []byte(`{}`))
-		assertErrorBody(t, resp, data, http.StatusMethodNotAllowed, queueapi.ErrCodeMethodNotAllowed)
-		if resp.Header.Get("Allow") != http.MethodGet {
-			t.Fatalf("Allow = %q; want GET", resp.Header.Get("Allow"))
-		}
-
-		resp, data = env.rawRequest(t, http.MethodGet, "/api/v1/builds/foo/init", env.writeToken, nil)
-		assertErrorBody(t, resp, data, http.StatusMethodNotAllowed, queueapi.ErrCodeMethodNotAllowed)
-		if resp.Header.Get("Allow") != http.MethodPost {
-			t.Fatalf("Allow = %q; want POST", resp.Header.Get("Allow"))
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				resp, data := env.rawRequest(t, tc.method, tc.path, tc.token, tc.body)
+				assertErrorBody(t, resp, data, tc.wantStatus, tc.wantCode)
+				if tc.wantAllow != "" && resp.Header.Get("Allow") != tc.wantAllow {
+					t.Fatalf("Allow = %q; want %q", resp.Header.Get("Allow"), tc.wantAllow)
+				}
+			})
 		}
 	})
 
 	t.Run("auth on every route before build lookup or body read", func(t *testing.T) {
 		buildID := uniqueBuildID("auth")
 		routes := []struct {
-			method string
-			path   string
-			isPost bool
+			name        string
+			method      string
+			path        string
+			noTokStatus int
+			wrongStatus int
+			readStatus  int // 0 means read token is allowed (checked separately)
 		}{
-			{http.MethodPost, "/api/v1/builds/" + buildID + "/init", true},
-			{http.MethodPost, "/api/v1/builds/" + buildID + "/lease", true},
-			{http.MethodPost, "/api/v1/builds/" + buildID + "/heartbeat", true},
-			{http.MethodPost, "/api/v1/builds/" + buildID + "/report", true},
-			{http.MethodGet, "/api/v1/builds/" + buildID, false},
-			{http.MethodGet, "/api/v1/builds/" + buildID + "/tests", false},
-			{http.MethodGet, "/api/v1/builds", false},
+			{"POST init", http.MethodPost, "/api/v1/builds/" + buildID + "/init", http.StatusUnauthorized, http.StatusUnauthorized, http.StatusForbidden},
+			{"POST lease", http.MethodPost, "/api/v1/builds/" + buildID + "/lease", http.StatusUnauthorized, http.StatusUnauthorized, http.StatusForbidden},
+			{"POST heartbeat", http.MethodPost, "/api/v1/builds/" + buildID + "/heartbeat", http.StatusUnauthorized, http.StatusUnauthorized, http.StatusForbidden},
+			{"POST report", http.MethodPost, "/api/v1/builds/" + buildID + "/report", http.StatusUnauthorized, http.StatusUnauthorized, http.StatusForbidden},
+			{"GET status", http.MethodGet, "/api/v1/builds/" + buildID, http.StatusUnauthorized, http.StatusUnauthorized, 0},
+			{"GET tests", http.MethodGet, "/api/v1/builds/" + buildID + "/tests", http.StatusUnauthorized, http.StatusUnauthorized, 0},
+			{"GET builds", http.MethodGet, "/api/v1/builds", http.StatusUnauthorized, http.StatusUnauthorized, 0},
 		}
 
 		for _, rt := range routes {
-			// No token -> 401 (never 404 or 400).
-			resp, data := env.rawRequest(t, rt.method, rt.path, "", []byte("not-json"))
-			assertErrorBody(t, resp, data, http.StatusUnauthorized, queueapi.ErrCodeUnauthorized)
+			t.Run(rt.name, func(t *testing.T) {
+				resp, data := env.rawRequest(t, rt.method, rt.path, "", []byte("not-json"))
+				assertErrorBody(t, resp, data, rt.noTokStatus, queueapi.ErrCodeUnauthorized)
 
-			// Wrong token -> 401.
-			resp, data = env.rawRequest(t, rt.method, rt.path, "wrong-token-0123456789abcdef", []byte("not-json"))
-			assertErrorBody(t, resp, data, http.StatusUnauthorized, queueapi.ErrCodeUnauthorized)
+				resp, data = env.rawRequest(t, rt.method, rt.path, "wrong-token-0123456789abcdef", []byte("not-json"))
+				assertErrorBody(t, resp, data, rt.wrongStatus, queueapi.ErrCodeUnauthorized)
 
-			// Read token on POST -> 403 before reading body or revealing 404.
-			if rt.isPost {
-				resp, data = env.rawRequest(t, rt.method, rt.path, env.readToken, []byte("not-json"))
-				assertErrorBody(t, resp, data, http.StatusForbidden, queueapi.ErrCodeForbidden)
-			}
+				if rt.readStatus != 0 {
+					resp, data = env.rawRequest(t, rt.method, rt.path, env.readToken, []byte("not-json"))
+					assertErrorBody(t, resp, data, rt.readStatus, queueapi.ErrCodeForbidden)
+				}
+			})
 		}
 
-		// Unknown build with valid read token -> 404 build_not_found.
-		resp, data := env.rawRequest(t, http.MethodGet, "/api/v1/builds/"+buildID, env.readToken, nil)
-		assertErrorBody(t, resp, data, http.StatusNotFound, queue.ErrCodeBuildNotFound)
+		t.Run("unknown build with valid read token returns 404", func(t *testing.T) {
+			resp, data := env.rawRequest(t, http.MethodGet, "/api/v1/builds/"+buildID, env.readToken, nil)
+			assertErrorBody(t, resp, data, http.StatusNotFound, queue.ErrCodeBuildNotFound)
+		})
 	})
 
 	t.Run("strict JSON and limits at and past bounds", func(t *testing.T) {
-		// Build ID 128 chars OK vs 129 chars 400 vs ".." 400.
-		maxID := strings.Repeat("a", 128)
-		resp, data := env.rawRequest(t, http.MethodGet, "/api/v1/builds/"+maxID, env.readToken, nil)
-		assertErrorBody(t, resp, data, http.StatusNotFound, queue.ErrCodeBuildNotFound)
-
-		tooLongID := strings.Repeat("a", 129)
-		resp, data = env.rawRequest(t, http.MethodGet, "/api/v1/builds/"+tooLongID, env.readToken, nil)
-		assertErrorBody(t, resp, data, http.StatusBadRequest, queue.ErrCodeInvalidRequest)
-
-		resp, data = env.rawRequest(t, http.MethodGet, "/api/v1/builds/a..b", env.readToken, nil)
-		assertErrorBody(t, resp, data, http.StatusBadRequest, queue.ErrCodeInvalidRequest)
-
 		bid := uniqueBuildID("strict")
-		// Unknown member -> 400 invalid_request.
-		resp, data = env.rawRequest(t, http.MethodPost, "/api/v1/builds/"+bid+"/lease", env.writeToken,
-			[]byte(`{"version":1,"runner_id":"r1","machine_index":0,"request_id":"q1","extra":true}`))
-		assertErrorBody(t, resp, data, http.StatusBadRequest, queue.ErrCodeInvalidRequest)
-
-		// Missing required member -> 400 invalid_request.
-		resp, data = env.rawRequest(t, http.MethodPost, "/api/v1/builds/"+bid+"/lease", env.writeToken,
-			[]byte(`{"version":1,"runner_id":"r1","machine_index":0}`))
-		assertErrorBody(t, resp, data, http.StatusBadRequest, queue.ErrCodeInvalidRequest)
-
-		// Unsupported version (even with unknown member!) -> 400 unsupported_version naming both versions.
-		resp, data = env.rawRequest(t, http.MethodPost, "/api/v1/builds/"+bid+"/lease", env.writeToken,
-			[]byte(`{"version":99,"future_field":123}`))
-		assertErrorBody(t, resp, data, http.StatusBadRequest, queueapi.ErrCodeUnsupportedVersion)
-		if !strings.Contains(string(data), "99") || !strings.Contains(string(data), "1") {
-			t.Fatalf("unsupported_version message must name both versions: %s", data)
+		cases := []struct {
+			name        string
+			method      string
+			path        string
+			token       string
+			body        []byte
+			wantStatus  int
+			wantCode    string
+			wantContain []string
+		}{
+			{
+				name:       "build ID at exact 128-byte limit passes validation",
+				method:     http.MethodGet,
+				path:       "/api/v1/builds/" + strings.Repeat("a", 128),
+				token:      env.readToken,
+				wantStatus: http.StatusNotFound,
+				wantCode:   queue.ErrCodeBuildNotFound,
+			},
+			{
+				name:       "build ID at 129 bytes returns 400",
+				method:     http.MethodGet,
+				path:       "/api/v1/builds/" + strings.Repeat("a", 129),
+				token:      env.readToken,
+				wantStatus: http.StatusBadRequest,
+				wantCode:   queue.ErrCodeInvalidRequest,
+			},
+			{
+				name:       "build ID containing double dot returns 400",
+				method:     http.MethodGet,
+				path:       "/api/v1/builds/a..b",
+				token:      env.readToken,
+				wantStatus: http.StatusBadRequest,
+				wantCode:   queue.ErrCodeInvalidRequest,
+			},
+			{
+				name:       "unknown JSON member returns 400",
+				method:     http.MethodPost,
+				path:       "/api/v1/builds/" + bid + "/lease",
+				token:      env.writeToken,
+				body:       []byte(`{"version":1,"runner_id":"r1","machine_index":0,"request_id":"q1","extra":true}`),
+				wantStatus: http.StatusBadRequest,
+				wantCode:   queue.ErrCodeInvalidRequest,
+			},
+			{
+				name:       "missing required JSON member returns 400",
+				method:     http.MethodPost,
+				path:       "/api/v1/builds/" + bid + "/lease",
+				token:      env.writeToken,
+				body:       []byte(`{"version":1,"runner_id":"r1","machine_index":0}`),
+				wantStatus: http.StatusBadRequest,
+				wantCode:   queue.ErrCodeInvalidRequest,
+			},
+			{
+				name:        "unsupported version names both versions even with unknown member",
+				method:      http.MethodPost,
+				path:        "/api/v1/builds/" + bid + "/lease",
+				token:       env.writeToken,
+				body:        []byte(`{"version":99,"future_field":123}`),
+				wantStatus:  http.StatusBadRequest,
+				wantCode:    queueapi.ErrCodeUnsupportedVersion,
+				wantContain: []string{"99", "1"},
+			},
+			{
+				name:       "invalid UTF-8 returns 400",
+				method:     http.MethodPost,
+				path:       "/api/v1/builds/" + bid + "/lease",
+				token:      env.writeToken,
+				body:       []byte{'"', 0xff, '"'},
+				wantStatus: http.StatusBadRequest,
+				wantCode:   queue.ErrCodeInvalidRequest,
+			},
+			{
+				name:       "over 1 MiB on non-init POST returns 413",
+				method:     http.MethodPost,
+				path:       "/api/v1/builds/" + bid + "/lease",
+				token:      env.writeToken,
+				body:       bytes.Repeat([]byte(" "), queueapi.MaxOtherBodyBytes+1),
+				wantStatus: http.StatusRequestEntityTooLarge,
+				wantCode:   queueapi.ErrCodePayloadTooLarge,
+			},
+			{
+				name:       "over 4 MiB on init POST returns 413",
+				method:     http.MethodPost,
+				path:       "/api/v1/builds/" + bid + "/init",
+				token:      env.writeToken,
+				body:       bytes.Repeat([]byte(" "), queueapi.MaxInitBodyBytes+1),
+				wantStatus: http.StatusRequestEntityTooLarge,
+				wantCode:   queueapi.ErrCodePayloadTooLarge,
+			},
+			{
+				name:       "pagination limit 1001 returns 400",
+				method:     http.MethodGet,
+				path:       "/api/v1/builds/" + bid + "/tests?limit=1001",
+				token:      env.readToken,
+				wantStatus: http.StatusBadRequest,
+				wantCode:   queue.ErrCodeInvalidRequest,
+			},
 		}
 
-		// Invalid UTF-8 -> 400.
-		resp, data = env.rawRequest(t, http.MethodPost, "/api/v1/builds/"+bid+"/lease", env.writeToken,
-			[]byte{'"', 0xff, '"'})
-		assertErrorBody(t, resp, data, http.StatusBadRequest, queue.ErrCodeInvalidRequest)
-
-		// Over 1 MiB on non-init POST -> 413 payload_too_large.
-		over1M := bytes.Repeat([]byte(" "), queueapi.MaxOtherBodyBytes+1)
-		resp, data = env.rawRequest(t, http.MethodPost, "/api/v1/builds/"+bid+"/lease", env.writeToken, over1M)
-		assertErrorBody(t, resp, data, http.StatusRequestEntityTooLarge, queueapi.ErrCodePayloadTooLarge)
-
-		// Over 4 MiB on init POST -> 413 payload_too_large.
-		over4M := bytes.Repeat([]byte(" "), queueapi.MaxInitBodyBytes+1)
-		resp, data = env.rawRequest(t, http.MethodPost, "/api/v1/builds/"+bid+"/init", env.writeToken, over4M)
-		assertErrorBody(t, resp, data, http.StatusRequestEntityTooLarge, queueapi.ErrCodePayloadTooLarge)
-
-		// Pagination limit 1001 -> 400.
-		resp, data = env.rawRequest(t, http.MethodGet, "/api/v1/builds/"+bid+"/tests?limit=1001", env.readToken, nil)
-		assertErrorBody(t, resp, data, http.StatusBadRequest, queue.ErrCodeInvalidRequest)
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				resp, data := env.rawRequest(t, tc.method, tc.path, tc.token, tc.body)
+				assertErrorBody(t, resp, data, tc.wantStatus, tc.wantCode)
+				for _, sub := range tc.wantContain {
+					if !strings.Contains(string(data), sub) {
+						t.Fatalf("body %q does not contain %q", data, sub)
+					}
+				}
+			})
+		}
 	})
 
 	t.Run("full lifecycle, idempotency, conflicts, expiry, pagination", func(t *testing.T) {

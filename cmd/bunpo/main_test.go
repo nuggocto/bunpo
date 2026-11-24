@@ -742,40 +742,70 @@ func TestExitCodes(t *testing.T) {
 	split := func(dir string, extra ...string) []string {
 		return append([]string{"split", "--dir", dir}, extra...)
 	}
+	queueEnv := func(k string) string {
+		switch k {
+		case "BUNPO_QUEUE_TOKEN":
+			return "write-secret-token-0123456789abcdef"
+		case "BUNPO_QUEUE_READ_TOKEN":
+			return "read-secret-token-fedcba9876543210"
+		default:
+			return ""
+		}
+	}
 
 	tests := []struct {
 		name  string
 		stdin string
 		args  []string
+		env   func(string) string
 		want  int
 	}{
-		{"no command", "", nil, 2},
-		{"help", "", []string{"help"}, 0},
-		{"command help", "", []string{"split", "-h"}, 0},
-		{"version", "", []string{"version"}, 0},
-		{"version flag", "", []string{"-version"}, 0},
-		{"version long flag", "", []string{"--version"}, 0},
-		{"unknown command", "", []string{"shuffle"}, 2},
-		{"unknown flag", "", []string{"split", "--machines", "2"}, 2},
-		{"missing index", suite, split(dir, "--total", "2"), 2},
-		{"index out of range", suite, split(dir, "--index", "2", "--total", "2"), 2},
-		{"invalid identifier", "/abs/a.py\n", split(dir, "--index", "0", "--total", "2"), 2},
-		{"colliding spellings", "a.py\n./a.py\n", split(dir, "--index", "0", "--total", "2"), 2},
+		{"no command", "", nil, nil, 2},
+		{"help", "", []string{"help"}, nil, 0},
+		{"command help", "", []string{"split", "-h"}, nil, 0},
+		{"version", "", []string{"version"}, nil, 0},
+		{"version flag", "", []string{"-version"}, nil, 0},
+		{"version long flag", "", []string{"--version"}, nil, 0},
+		{"unknown command", "", []string{"shuffle"}, nil, 2},
+		{"unknown flag", "", []string{"split", "--machines", "2"}, nil, 2},
+		{"missing index", suite, split(dir, "--total", "2"), nil, 2},
+		{"index out of range", suite, split(dir, "--index", "2", "--total", "2"), nil, 2},
+		{"invalid identifier", "/abs/a.py\n", split(dir, "--index", "0", "--total", "2"), nil, 2},
+		{"colliding spellings", "a.py\n./a.py\n", split(dir, "--index", "0", "--total", "2"), nil, 2},
 		// A lone CR is not a line ending, so it stays in the identifier.
-		{"carriage return without a newline", "a.py\r", split(dir, "--index", "0", "--total", "2"), 2},
+		{"carriage return without a newline", "a.py\r", split(dir, "--index", "0", "--total", "2"), nil, 2},
 		// A discovery command that found nothing must not pass with no tests run.
-		{"empty test list to split", "", split(dir, "--index", "0", "--total", "2"), 2},
-		{"blank test list to plan", "\n\n", []string{"plan", "--dir", dir, "--total", "2"}, 2},
-		{"empty test list to verify", "", []string{"verify", "--dir", dir}, 2},
-		{"split from a missing plan", "", split(dir, "--index", "0", "--plan"), 2},
-		{"timing file from a newer release", suite, split(newer, "--index", "0", "--total", "1"), 2},
-		{"merge in a missing directory", "", []string{"merge", "--dir", filepath.Join(dir, "nope")}, 2},
+		{"empty test list to split", "", split(dir, "--index", "0", "--total", "2"), nil, 2},
+		{"blank test list to plan", "\n\n", []string{"plan", "--dir", dir, "--total", "2"}, nil, 2},
+		{"empty test list to verify", "", []string{"verify", "--dir", dir}, nil, 2},
+		{"split from a missing plan", "", split(dir, "--index", "0", "--plan"), nil, 2},
+		{"timing file from a newer release", suite, split(newer, "--index", "0", "--total", "1"), nil, 2},
+		{"merge in a missing directory", "", []string{"merge", "--dir", filepath.Join(dir, "nope")}, nil, 2},
+		// Live-queue (--queue) usage errors.
+		{"queue help", "", []string{"--queue", "-h"}, nil, 0},
+		{"queue missing build", suite, []string{"--queue", "http://127.0.0.1:8080", "--total", "1", "--report", "r.xml", "--", "true"}, queueEnv, 2},
+		{"queue invalid build", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "../bad", "--total", "1", "--report", "r.xml", "--", "true"}, queueEnv, 2},
+		{"queue missing token", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--", "true"}, noEnv, 2},
+		{"queue status missing token", "", []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--status"}, noEnv, 2},
+		{"queue plain http to remote host", suite, []string{"--queue", "http://queue.example.com", "--build", "b1", "--total", "1", "--report", "r.xml", "--", "true"}, queueEnv, 2},
+		{"queue missing report", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--", "true"}, queueEnv, 2},
+		{"queue bad format", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--format", "yaml", "--", "true"}, queueEnv, 2},
+		{"queue total 0", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "0", "--report", "r.xml", "--", "true"}, queueEnv, 2},
+		{"queue index out of range", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "2", "--index", "256", "--report", "r.xml", "--", "true"}, queueEnv, 2},
+		{"queue lease-ttl 0", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--lease-ttl", "0s", "--", "true"}, queueEnv, 2},
+		{"queue no command after --", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--"}, queueEnv, 2},
+		{"queue extra argument with --status", "", []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--status", "extra"}, queueEnv, 2},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if code, _, stderr := bunpo(t, tc.stdin, tc.args...); code != tc.want {
-				t.Fatalf("exit %d; want %d\n%s", code, tc.want, stderr)
+			getenv := tc.env
+			if getenv == nil {
+				getenv = noEnv
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, strings.NewReader(tc.stdin), &stdout, &stderr, getenv); code != tc.want {
+				t.Fatalf("exit %d; want %d\n%s", code, tc.want, stderr.String())
 			}
 		})
 	}

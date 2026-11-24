@@ -496,3 +496,73 @@ func TestDiskLogEvictionAndFailedRemovePreservesEntry(t *testing.T) {
 		t.Fatalf("unexpected data dir entries: %v", entries)
 	}
 }
+
+func TestDiskLogSizeMismatchAndBrokenEvictionKeepFile(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := queueapi.OpenOSLogFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close()
+
+	dl1 := queueapi.NewDiskLog(fs, nil)
+	_, c := newTestServer(t, queueapi.HandlerConfig{
+		MaxBuilds:  1,
+		MaxRunning: 1,
+		Log:        dl1,
+	})
+	ctx := context.Background()
+	initCmd := func(id string) queue.InitCommand {
+		return queue.InitCommand{
+			BuildID:       id,
+			RunnerID:      "r1",
+			Config:        defaultTestCfg,
+			Tests:         []string{"a.py"},
+			PredictionsMS: []*int64{nil},
+		}
+	}
+	if _, err := c.Init(ctx, initCmd("split-1")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a second server on the same --data directory appending to split-1.
+	dl2 := queueapi.NewDiskLog(fs, nil)
+	if _, err := dl2.Load(queue.DefaultLimits()); err != nil {
+		t.Fatal(err)
+	}
+	_, leaseEvs, _ := sampleBuildEvents(t, "split-1")
+	if err := dl2.Append(ctx, "split-1", leaseEvs); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, queueapi.BuildFileName("split-1"))
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// dl1 detects sz != expectedSize: must return 500 (broken) and leave file untouched.
+	_, err = c.Lease(ctx, "split-1", queue.LeaseCommand{RunnerID: "r1", RequestID: "q-other"})
+	assertAPIErr(t, err, 500, queueapi.ErrCodeInternalError)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("file changed on size mismatch: len=%d want=%d", len(after), len(before))
+	}
+
+	// Admitting healthy-2 evicts broken split-1 under MaxBuilds=1, leaving
+	// split-1's file untouched on disk and refusing re-init of split-1 with 500.
+	if _, err := c.Init(ctx, initCmd("healthy-2")); err != nil {
+		t.Fatalf("Init healthy-2 should evict broken split-1: %v", err)
+	}
+	afterEvict, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("broken build file was deleted on eviction: %v", err)
+	}
+	if !bytes.Equal(afterEvict, before) {
+		t.Fatalf("broken build file changed on eviction")
+	}
+	_, err = c.Init(ctx, initCmd("split-1"))
+	assertAPIErr(t, err, 500, queueapi.ErrCodeInternalError)
+}
