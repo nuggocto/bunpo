@@ -21,52 +21,191 @@ import (
 func ratMS(ms int64) *big.Rat { return big.NewRat(ms, 1000) }
 
 func TestMapOutcomesAllRows(t *testing.T) {
-	attempts := []queue.LeasedAttemptView{
-		{AttemptID: "0.1", TestIndex: 0, Generation: 1, Test: "a.py"},
-		{AttemptID: "1.1", TestIndex: 1, Generation: 1, Test: "b.py"},
-		{AttemptID: "2.1", TestIndex: 2, Generation: 1, Test: "c.py"},
+	type wantOutcome struct {
+		outcome queue.Outcome
+		timed   bool
+		ms      int64
 	}
-	t.Run("exit 0: passed timed, all-skipped, absent error", func(t *testing.T) {
-		files := map[string]junit.File{
-			"a.py": {Seconds: ratMS(120), Cases: 2, Skipped: 1},
-			"b.py": {Seconds: ratMS(0), Cases: 2, Skipped: 2},
+	makeAttempts := func(paths ...string) []queue.LeasedAttemptView {
+		out := make([]queue.LeasedAttemptView, len(paths))
+		for i, p := range paths {
+			out[i] = queue.LeasedAttemptView{
+				AttemptID:  queue.FormatAttemptID(i, 1),
+				TestIndex:  i,
+				Generation: 1,
+				Test:       p,
+			}
 		}
-		res, extra := MapOutcomes(attempts, 0, false, "junit", files, nil)
-		if extra != nil || res[0].Outcome != queue.OutcomePassed || !res[0].Timed || res[0].DurationMS != 120 ||
-			res[1].Outcome != queue.OutcomeSkipped || res[1].Timed || res[2].Outcome != queue.OutcomeError {
-			t.Fatalf("got (%+v, %v)", res, extra)
-		}
-	})
-	t.Run("non-zero JUnit with failed sibling: clean sibling untimed, skipped error", func(t *testing.T) {
-		files := map[string]junit.File{
-			"a.py": {Seconds: ratMS(50), Cases: 1, Failed: true},
-			"b.py": {Seconds: ratMS(80), Cases: 2},
-			"c.py": {Seconds: ratMS(0), Cases: 2, Skipped: 2},
-		}
-		res, extra := MapOutcomes(attempts, 1, false, "junit", files, nil)
-		if extra != nil || res[0].Outcome != queue.OutcomeFailed || res[0].Timed ||
-			res[1].Outcome != queue.OutcomePassed || res[1].Timed || res[1].DurationMS != 0 ||
-			res[2].Outcome != queue.OutcomeError {
-			t.Fatalf("got (%+v, %v)", res, extra)
-		}
-	})
-	t.Run("signaled, lines non-zero, unreadable, and extra file", func(t *testing.T) {
-		two := attempts[:2]
-		files := map[string]junit.File{"a.py": {Seconds: ratMS(50), Cases: 1, Failed: true}, "b.py": {Seconds: ratMS(80), Cases: 1}}
-		if res, _ := MapOutcomes(two, -1, true, "junit", files, nil); res[0].Outcome != queue.OutcomeFailed || res[1].Outcome != queue.OutcomeError {
-			t.Fatalf("signaled = %+v", res)
-		}
-		if res, _ := MapOutcomes(two, 1, false, "lines", files, nil); res[0].Outcome != queue.OutcomeFailed || res[1].Outcome != queue.OutcomeError {
-			t.Fatalf("lines non-zero = %+v", res)
-		}
-		if res, _ := MapOutcomes(two, 1, false, "junit", nil, errors.New("missing")); res[0].Outcome != queue.OutcomeError || res[1].Outcome != queue.OutcomeError {
-			t.Fatalf("readErr = %+v", res)
-		}
-		files["extra.py"] = junit.File{Seconds: ratMS(10), Cases: 1}
-		if res, extra := MapOutcomes(two, 0, false, "junit", files, nil); extra == nil || !slices.Equal(extra.Extra, []string{"extra.py"}) || res[0].Outcome != queue.OutcomeError {
-			t.Fatalf("extra = (%+v, %v)", res, extra)
-		}
-	})
+		return out
+	}
+
+	cases := []struct {
+		name      string
+		attempts  []queue.LeasedAttemptView
+		exitCode  int
+		signaled  bool
+		format    string
+		files     map[string]junit.File
+		readErr   error
+		want      []wantOutcome
+		wantExtra []string
+	}{
+		{
+			name:     "exit 0 junit: passed timed, all-skipped, absent error",
+			attempts: makeAttempts("a.py", "b.py", "c.py"),
+			exitCode: 0,
+			format:   "junit",
+			files: map[string]junit.File{
+				"a.py": {Seconds: ratMS(120), Cases: 2, Skipped: 1},
+				"b.py": {Seconds: ratMS(0), Cases: 2, Skipped: 2},
+			},
+			want: []wantOutcome{
+				{queue.OutcomePassed, true, 120},
+				{queue.OutcomeSkipped, false, 0},
+				{queue.OutcomeError, false, 0},
+			},
+		},
+		{
+			name:     "exit 0 junit: failed case still reports failed untimed",
+			attempts: makeAttempts("a.py", "b.py"),
+			exitCode: 0,
+			format:   "junit",
+			files: map[string]junit.File{
+				"a.py": {Seconds: ratMS(45), Cases: 2, Failed: true},
+				"b.py": {Seconds: ratMS(80), Cases: 1},
+			},
+			want: []wantOutcome{
+				{queue.OutcomeFailed, false, 0},
+				{queue.OutcomePassed, true, 80},
+			},
+		},
+		{
+			name:     "exit 0 lines: passed timed and failed untimed",
+			attempts: makeAttempts("a.py", "b.py"),
+			exitCode: 0,
+			format:   "lines",
+			files: map[string]junit.File{
+				"a.py": {Seconds: ratMS(90), Cases: 1},
+				"b.py": {Seconds: ratMS(0), Cases: 1, Failed: true},
+			},
+			want: []wantOutcome{
+				{queue.OutcomePassed, true, 90},
+				{queue.OutcomeFailed, false, 0},
+			},
+		},
+		{
+			name:     "non-zero junit with failed sibling: clean sibling untimed, skipped and absent error",
+			attempts: makeAttempts("a.py", "b.py", "c.py", "d.py", "e.py"),
+			exitCode: 1,
+			format:   "junit",
+			files: map[string]junit.File{
+				"a.py": {Seconds: ratMS(50), Cases: 1, Failed: true},
+				"b.py": {Seconds: ratMS(80), Cases: 2},
+				"c.py": {Seconds: ratMS(0), Cases: 2, Skipped: 2},
+				"d.py": {Seconds: ratMS(30), Cases: 2, Skipped: 1},
+			},
+			want: []wantOutcome{
+				{queue.OutcomeFailed, false, 0},
+				{queue.OutcomePassed, false, 0},
+				{queue.OutcomeError, false, 0},
+				{queue.OutcomeError, false, 0},
+				{queue.OutcomeError, false, 0},
+			},
+		},
+		{
+			name:     "non-zero junit with no failed file: all error, never passed",
+			attempts: makeAttempts("a.py", "b.py"),
+			exitCode: 1,
+			format:   "junit",
+			files: map[string]junit.File{
+				"a.py": {Seconds: ratMS(50), Cases: 1},
+				"b.py": {Seconds: ratMS(80), Cases: 1},
+			},
+			want: []wantOutcome{
+				{queue.OutcomeError, false, 0},
+				{queue.OutcomeError, false, 0},
+			},
+		},
+		{
+			name:     "non-zero lines with failed sibling: non-failed becomes error",
+			attempts: makeAttempts("a.py", "b.py"),
+			exitCode: 1,
+			format:   "lines",
+			files: map[string]junit.File{
+				"a.py": {Seconds: ratMS(50), Cases: 1, Failed: true},
+				"b.py": {Seconds: ratMS(80), Cases: 1},
+			},
+			want: []wantOutcome{
+				{queue.OutcomeFailed, false, 0},
+				{queue.OutcomeError, false, 0},
+			},
+		},
+		{
+			name:     "signaled junit with failed sibling: non-failed becomes error",
+			attempts: makeAttempts("a.py", "b.py"),
+			exitCode: -1,
+			signaled: true,
+			format:   "junit",
+			files: map[string]junit.File{
+				"a.py": {Seconds: ratMS(50), Cases: 1, Failed: true},
+				"b.py": {Seconds: ratMS(80), Cases: 1},
+			},
+			want: []wantOutcome{
+				{queue.OutcomeFailed, false, 0},
+				{queue.OutcomeError, false, 0},
+			},
+		},
+		{
+			name:     "unreadable report: all error",
+			attempts: makeAttempts("a.py", "b.py"),
+			exitCode: 1,
+			format:   "junit",
+			readErr:  errors.New("missing report"),
+			want: []wantOutcome{
+				{queue.OutcomeError, false, 0},
+				{queue.OutcomeError, false, 0},
+			},
+		},
+		{
+			name:     "extra unassigned file in report: all error plus ExtraFilesError",
+			attempts: makeAttempts("a.py", "b.py"),
+			exitCode: 0,
+			format:   "junit",
+			files: map[string]junit.File{
+				"a.py":     {Seconds: ratMS(50), Cases: 1},
+				"b.py":     {Seconds: ratMS(80), Cases: 1},
+				"extra.py": {Seconds: ratMS(10), Cases: 1},
+			},
+			want: []wantOutcome{
+				{queue.OutcomeError, false, 0},
+				{queue.OutcomeError, false, 0},
+			},
+			wantExtra: []string{"extra.py"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, extra := MapOutcomes(tc.attempts, tc.exitCode, tc.signaled, tc.format, tc.files, tc.readErr)
+			if len(tc.wantExtra) == 0 {
+				if extra != nil {
+					t.Fatalf("unexpected ExtraFilesError: %v", extra)
+				}
+			} else if extra == nil || !slices.Equal(extra.Extra, tc.wantExtra) {
+				t.Fatalf("extra = %v; want %v", extra, tc.wantExtra)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("len(results) = %d; want %d", len(got), len(tc.want))
+			}
+			for i, w := range tc.want {
+				r := got[i]
+				if r.Outcome != w.outcome || r.Timed != w.timed || r.DurationMS != w.ms {
+					t.Errorf("result[%d] (%s) = (%s, timed=%t, ms=%d); want (%s, timed=%t, ms=%d)",
+						i, tc.attempts[i].Test, r.Outcome, r.Timed, r.DurationMS, w.outcome, w.timed, w.ms)
+				}
+			}
+		})
+	}
 }
 
 func TestFilteredChildEnvStripsTokens(t *testing.T) {
