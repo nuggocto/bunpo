@@ -1,10 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
 import { parseMaxTests } from "./config.ts";
 import {
-  type InitCommand,
+  type ActiveLeaseSeed,
   type ListTestsCommand,
+  type QueueError,
   type QueueEvent,
   type State,
+  type Verdict,
+  ErrCodeInvalidRequest,
+  LeaseDeadlineTracker,
   ProtocolVersion,
   applyEvent,
   decideHeartbeat,
@@ -16,13 +20,12 @@ import {
   defaultLimits,
   extendLease,
   newState,
-  resetActiveLeaseDeadlines,
+  parseSerializedDeadlines,
   stateVerdict,
 } from "./core/index.ts";
 import type { IndexEntry } from "./index-core.ts";
 import {
   type WireError,
-  ErrCodeStorageError,
   parseHeartbeatBody,
   parseInitBody,
   parseLeaseBody,
@@ -32,6 +35,7 @@ import {
 
 export const CATALOG_CHUNK_SIZE = 1_000;
 export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+export const INDEX_RETRY_INTERVAL_MS = 60_000;
 const INDEX_NAME = "global";
 
 export interface DoHttpReply {
@@ -42,6 +46,11 @@ export interface DoHttpReply {
 interface CatalogChunkPayload {
   tests: string[];
   predictions_ms: (number | null)[];
+}
+
+interface IndexSyncState {
+  verdict: Verdict;
+  has_conflicts: boolean;
 }
 
 function okReply(payload: object): DoHttpReply {
@@ -65,8 +74,10 @@ export class BuildDO extends DurableObject<Env> {
   private state: State;
   private nextSeq = 1;
   private schemaReady = false;
-  private pendingWakeReset = false;
-  private indexDirty = false;
+  private readonly deadlines = new LeaseDeadlineTracker();
+  private indexSynced: IndexSyncState | null = null;
+  private lastIndexAttemptMS = 0;
+  private indexSyncInFlight = false;
   private readonly maxTests: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -76,23 +87,33 @@ export class BuildDO extends DurableObject<Env> {
     this.state = this.freshState();
 
     this.ctx.blockConcurrencyWhile(async () => {
-      this.ensureSchema();
       this.replayFromStorage();
+      if (this.state.initialized) {
+        const existingAlarm = await this.ctx.storage.getAlarm();
+        if (existingAlarm === null) {
+          const expected = this.expectedAlarmMS();
+          if (expected !== null) {
+            await this.ctx.storage.setAlarm(expected);
+          }
+        }
+      }
     });
   }
 
+  // Replay always uses the protocol limit (MaxTests = 20,000) so lowering
+  // MAX_TESTS never breaks replay of already-created builds.
   private freshState(): State {
-    const lim = defaultLimits();
-    lim.maxTests = this.maxTests;
-    return newState(lim);
+    return newState(defaultLimits());
   }
 
   private resetMemory(): void {
     this.state = this.freshState();
     this.nextSeq = 1;
     this.schemaReady = false;
-    this.pendingWakeReset = false;
-    this.indexDirty = false;
+    this.deadlines.clear();
+    this.indexSynced = null;
+    this.lastIndexAttemptMS = 0;
+    this.indexSyncInFlight = false;
   }
 
   private ensureSchema(): void {
@@ -113,7 +134,27 @@ export class BuildDO extends DurableObject<Env> {
     this.schemaReady = true;
   }
 
+  private expectedAlarmMS(): number | null {
+    if (!this.state.initialized) {
+      return null;
+    }
+    if (stateVerdict(this.state) === "running") {
+      return this.state.deadlineMS;
+    }
+    return (this.state.finishedAtMS || this.state.lastSeenMS) + RETENTION_MS;
+  }
+
   private replayFromStorage(): void {
+    // Check sqlite_master first so reads on unknown build IDs leave storage
+    // with zero application tables and zero writes.
+    const tables = this.ctx.storage.sql
+      .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'event_log'")
+      .toArray();
+    if (tables.length === 0) {
+      return;
+    }
+    this.schemaReady = true;
+
     const evRows = this.ctx.storage.sql
       .exec<{ seq: number; payload: string }>("SELECT seq, payload FROM event_log ORDER BY seq ASC")
       .toArray();
@@ -153,23 +194,52 @@ export class BuildDO extends DurableObject<Env> {
       this.nextSeq = row.seq + 1;
     }
 
-    const dirtyRows = this.ctx.storage.sql
-      .exec<{ v: string }>("SELECT v FROM meta WHERE k = 'index_dirty'")
+    const metaRows = this.ctx.storage.sql
+      .exec<{ k: string; v: string }>("SELECT k, v FROM meta WHERE k IN ('lease_deadlines', 'index_synced')")
       .toArray();
-    this.indexDirty = dirtyRows.length > 0 && dirtyRows[0]!.v === "1";
-    this.pendingWakeReset = true;
-  }
-
-  private async beforeRequest(nowMS: number): Promise<void> {
-    if (this.pendingWakeReset) {
-      this.pendingWakeReset = false;
-      if (this.state.initialized && stateVerdict(this.state) === "running") {
-        resetActiveLeaseDeadlines(this.state, nowMS);
+    let storedDeadlinesRaw: string | null = null;
+    for (let i = 0; i < metaRows.length; i++) {
+      const row = metaRows[i]!;
+      if (row.k === "lease_deadlines") {
+        storedDeadlinesRaw = row.v;
+      } else if (row.k === "index_synced") {
+        const parsed = JSON.parse(row.v) as Partial<IndexSyncState>;
+        if (typeof parsed.verdict === "string" && typeof parsed.has_conflicts === "boolean") {
+          this.indexSynced = { verdict: parsed.verdict as Verdict, has_conflicts: parsed.has_conflicts };
+        }
       }
     }
-    if (this.indexDirty && this.state.initialized) {
-      await this.trySyncIndex(nowMS);
+
+    if (this.state.initialized) {
+      const activeSeeds: ActiveLeaseSeed[] = [];
+      for (let i = 0; i < this.state.leases.length; i++) {
+        const l = this.state.leases[i]!;
+        if (l.status === "active") {
+          activeSeeds.push({ leaseID: l.lease_id, grantedDeadlineMS: l.deadline_ms });
+        }
+      }
+      const storedDeadlines = parseSerializedDeadlines(storedDeadlinesRaw);
+      const effective = this.deadlines.restoreOnWake(
+        activeSeeds,
+        storedDeadlines,
+        this.state.config.lease_ttl_ms,
+      );
+      for (const [id, effDeadline] of effective) {
+        extendLease(this.state, id, effDeadline);
+      }
     }
+  }
+
+  private needsIndexSync(): boolean {
+    if (!this.state.initialized) {
+      return false;
+    }
+    if (this.indexSynced === null) {
+      return true;
+    }
+    const verdict = stateVerdict(this.state);
+    const hasConflicts = this.state.conflicts.length > 0;
+    return this.indexSynced.verdict !== verdict || this.indexSynced.has_conflicts !== hasConflicts;
   }
 
   private buildIndexEntry(): IndexEntry {
@@ -197,28 +267,47 @@ export class BuildDO extends DurableObject<Env> {
     if (!this.state.initialized) {
       return;
     }
+    this.lastIndexAttemptMS = nowMS;
+    this.indexSyncInFlight = true;
+    const entry = this.buildIndexEntry();
     try {
       const idx = this.env.BUILD_INDEX.get(this.env.BUILD_INDEX.idFromName(INDEX_NAME));
-      await idx.upsert(this.buildIndexEntry(), nowMS);
-      if (this.indexDirty) {
+      await idx.upsert(entry);
+      const synced: IndexSyncState = { verdict: entry.verdict, has_conflicts: entry.has_conflicts };
+      if (this.state.initialized && this.state.buildID === entry.build_id) {
         this.ensureSchema();
-        this.ctx.storage.sql.exec("DELETE FROM meta WHERE k = 'index_dirty'");
-        this.indexDirty = false;
+        this.ctx.storage.sql.exec(
+          "INSERT OR REPLACE INTO meta (k, v) VALUES ('index_synced', ?)",
+          JSON.stringify(synced),
+        );
+        this.indexSynced = synced;
       }
     } catch {
-      // Leave index_dirty = 1 in SQLite and memory; next wake, request, or alarm repairs it.
-      this.indexDirty = true;
+      // Leave indexSynced at its last confirmed state; next wake, alarm, or throttled retry repairs it.
+    } finally {
+      this.indexSyncInFlight = false;
     }
   }
 
-  private persistAndApply(events: QueueEvent[], markIndexDirty: boolean, trustedInit = false): boolean {
-    if (events.length === 0) {
-      return true;
+  private scheduleBackgroundIndexSync(nowMS: number): void {
+    if (!this.needsIndexSync() || this.indexSyncInFlight) {
+      return;
     }
-    this.ensureSchema();
+    if (this.lastIndexAttemptMS !== 0 && nowMS - this.lastIndexAttemptMS < INDEX_RETRY_INTERVAL_MS) {
+      return;
+    }
+    this.lastIndexAttemptMS = nowMS;
+    this.ctx.waitUntil(this.trySyncIndex(nowMS));
+  }
+
+  private persistAndApply(events: QueueEvent[], trustedInit = false): void {
+    if (events.length === 0) {
+      return;
+    }
 
     try {
       this.ctx.storage.transactionSync(() => {
+        this.ensureSchema();
         const first = events[0]!;
         if (first.type === "initialized" && first.initialized) {
           const init = first.initialized;
@@ -264,227 +353,163 @@ export class BuildDO extends DurableObject<Env> {
             JSON.stringify(events),
           );
         }
-
-        if (markIndexDirty) {
-          this.ctx.storage.sql.exec("INSERT OR REPLACE INTO meta (k, v) VALUES ('index_dirty', '1')");
-        }
       });
     } catch (err) {
       // Abort the DO so in-memory state can never diverge from SQLite after a storage failure,
       // and throw so the RPC rejects cleanly instead of resolving against a broken output gate.
+      this.schemaReady = false;
       this.ctx.abort(err instanceof Error ? err.message : "storage transaction failed");
       throw err;
     }
 
     this.nextSeq++;
-    if (markIndexDirty) {
-      this.indexDirty = true;
-    }
     for (let i = 0; i < events.length; i++) {
       const ev = events[i]!;
       applyEvent(this.state, ev, trustedInit && ev.type === "initialized" ? { trustedInit: true } : undefined);
+      if (ev.type === "leased" && ev.leased) {
+        this.deadlines.onGrant(ev.leased.lease_id, ev.leased.deadline_ms);
+      } else if (ev.type === "reported" && ev.reported?.close_lease) {
+        this.deadlines.onClose(ev.reported.lease_id);
+      } else if (ev.type === "expired" && ev.expired) {
+        this.deadlines.onClose(ev.expired.lease_id);
+      } else if (ev.type === "finalized") {
+        this.deadlines.clear();
+      }
     }
-    return true;
   }
 
-  private async afterTransition(prevVerdict: string, hadConflict: boolean, created: boolean, nowMS: number): Promise<void> {
-    if (!this.state.initialized) {
-      return;
+  private persistAndExtendLease(leaseID: number, promisedDeadlineMS: number, nowMS: number): void {
+    const snap = this.deadlines.planExtend(leaseID, nowMS, this.state.config.lease_ttl_ms);
+    if (snap !== null) {
+      try {
+        this.ctx.storage.transactionSync(() => {
+          this.ensureSchema();
+          this.ctx.storage.sql.exec(
+            "INSERT OR REPLACE INTO meta (k, v) VALUES ('lease_deadlines', ?)",
+            JSON.stringify(snap),
+          );
+        });
+      } catch (err) {
+        this.schemaReady = false;
+        this.ctx.abort(err instanceof Error ? err.message : "storage transaction failed");
+        throw err;
+      }
+      this.deadlines.commitPersist(snap);
     }
-    const newVerdict = stateVerdict(this.state);
-    const becameTerminal = prevVerdict === "running" && newVerdict !== "running";
-    const conflictChanged = !hadConflict && this.state.conflicts.length > 0;
+    extendLease(this.state, leaseID, promisedDeadlineMS);
+  }
 
+  private async executeDecision<T extends object>(
+    nowMS: number,
+    decide: () => { events: QueueEvent[]; response: T | null; error: QueueError | null },
+    opts?: { trustedInit?: boolean; onSuccess?: (response: T) => void },
+  ): Promise<DoHttpReply> {
+    const wasInitialized = this.state.initialized;
+    const prevVerdict = wasInitialized ? stateVerdict(this.state) : "running";
+    const hadConflict = this.state.conflicts.length > 0;
+
+    const out = decide();
+    this.persistAndApply(out.events, opts?.trustedInit ?? false);
+    if (!out.error && out.response && opts?.onSuccess) {
+      opts.onSuccess(out.response);
+    }
+
+    // Issue setAlarm in the same synchronous turn as transactionSync so the alarm
+    // commits atomically with the SQLite state transition.
+    const created = !wasInitialized && this.state.initialized;
+    const newVerdict = this.state.initialized ? stateVerdict(this.state) : "running";
+    const becameTerminal = wasInitialized && prevVerdict === "running" && newVerdict !== "running";
+    const conflictChanged = this.state.initialized && !hadConflict && this.state.conflicts.length > 0;
+
+    let alarmPromise: Promise<void> | null = null;
     if (created) {
-      await this.ctx.storage.setAlarm(this.state.deadlineMS);
-      await this.trySyncIndex(nowMS);
-      return;
+      alarmPromise = this.ctx.storage.setAlarm(this.state.deadlineMS);
+    } else if (becameTerminal) {
+      alarmPromise = this.ctx.storage.setAlarm((this.state.finishedAtMS || nowMS) + RETENTION_MS);
     }
-    if (becameTerminal) {
-      const deleteAt = (this.state.finishedAtMS || nowMS) + RETENTION_MS;
-      await this.ctx.storage.setAlarm(deleteAt);
-      await this.trySyncIndex(nowMS);
-      return;
+    if (alarmPromise !== null) {
+      await alarmPromise;
     }
-    if (conflictChanged) {
+
+    if (created || becameTerminal || conflictChanged) {
       await this.trySyncIndex(nowMS);
+    } else {
+      this.scheduleBackgroundIndexSync(nowMS);
     }
+
+    if (out.error) {
+      return errReply(wireErr(out.error.httpStatus, out.error.code, out.error.message));
+    }
+    return okReply(out.response!);
   }
 
-  private willNeedIndexSync(events: QueueEvent[], prevVerdict: string, hadConflict: boolean): boolean {
-    if (events.length === 0) return false;
-    for (let i = 0; i < events.length; i++) {
-      const t = events[i]!.type;
-      if (t === "initialized" || t === "finalized") return true;
-      if (t === "conflicted" && !hadConflict) return true;
-    }
-    if (prevVerdict === "running") {
-      // Check conservatively for reported/expired events that might complete the build.
-      const last = events[events.length - 1]!;
-      if (last.type === "reported" && last.reported?.close_lease) {
-        const remaining = this.state.counts.pending + this.state.counts.leased;
-        let resolvedNow = 0;
-        for (const r of last.reported.results) {
-          if (r.disposition === "accepted") {
-            if (r.outcome !== "error" || r.generation >= this.state.config.max_attempts) {
-              resolvedNow++;
-            }
-          }
-        }
-        // Account for any expired events in the same batch that pushed tests to unresolved.
-        let expiredUnresolved = 0;
-        for (let i = 0; i < events.length - 1; i++) {
-          const ev = events[i]!;
-          if (ev.type === "expired" && ev.expired) {
-            const l = this.state.leases[ev.expired.lease_id - 1];
-            if (l) {
-              for (const a of l.attempts) {
-                const ts = this.state.tests[a.test_index];
-                if (ts && ts.status === "leased" && ts.activeLeaseID === ev.expired.lease_id && ts.generation >= this.state.config.max_attempts) {
-                  expiredUnresolved++;
-                }
-              }
-            }
-          }
-        }
-        return resolvedNow + expiredUnresolved >= remaining;
-      }
-      if (last.type === "expired") {
-        // Rare path: check if expiry exhausts the final active attempts.
-        return this.state.counts.pending === 0;
-      }
-    }
-    return false;
-  }
-
-  async init(nowMS: number, buildID: string, rawBody: string): Promise<DoHttpReply> {
-    await this.beforeRequest(nowMS);
+  async init(buildID: string, rawBody: string, nowOverride?: number): Promise<DoHttpReply> {
+    const nowMS = nowOverride ?? Date.now();
     const parsed = parseInitBody(buildID, rawBody);
     if (!parsed.ok) {
       return errReply(parsed.error);
     }
-    return this.handleInitCmd(nowMS, parsed.value);
+    if (!this.state.initialized && parsed.value.tests.length > this.maxTests) {
+      return errReply(
+        wireErr(
+          400,
+          ErrCodeInvalidRequest,
+          `tests has ${parsed.value.tests.length} entries, over limit ${this.maxTests}`,
+        ),
+      );
+    }
+    return this.executeDecision(nowMS, () => decideInit(this.state, nowMS, parsed.value), {
+      trustedInit: true,
+    });
   }
 
-  private async handleInitCmd(nowMS: number, cmd: InitCommand): Promise<DoHttpReply> {
-    const prevVerdict = this.state.initialized ? stateVerdict(this.state) : "running";
-    const hadConflict = this.state.conflicts.length > 0;
-    const out = decideInit(this.state, nowMS, cmd);
-    const markDirty = this.willNeedIndexSync(out.events, prevVerdict, hadConflict);
-    if (!this.persistAndApply(out.events, markDirty, true)) {
-      return errReply(wireErr(503, ErrCodeStorageError, "failed to persist events"));
-    }
-    const created = !out.error && out.response !== null && out.response.created;
-    await this.afterTransition(prevVerdict, hadConflict, created, nowMS);
-
-    if (out.error) {
-      return errReply(wireErr(out.error.httpStatus, out.error.code, out.error.message));
-    }
-    return okReply(out.response);
-  }
-
-  async lease(nowMS: number, rawBody: string): Promise<DoHttpReply> {
-    await this.beforeRequest(nowMS);
+  async lease(rawBody: string, nowOverride?: number): Promise<DoHttpReply> {
+    const nowMS = nowOverride ?? Date.now();
     const parsed = parseLeaseBody(rawBody);
     if (!parsed.ok) {
       return errReply(parsed.error);
     }
-    const prevVerdict = this.state.initialized ? stateVerdict(this.state) : "running";
-    const hadConflict = this.state.conflicts.length > 0;
-    const out = decideLease(this.state, nowMS, parsed.value);
-    const markDirty = this.willNeedIndexSync(out.events, prevVerdict, hadConflict);
-    if (!this.persistAndApply(out.events, markDirty)) {
-      return errReply(wireErr(503, ErrCodeStorageError, "failed to persist events"));
-    }
-    if (!out.error && out.response && out.response.status === "leased") {
-      extendLease(this.state, out.response.lease_id, out.response.deadline_ms);
-    }
-    await this.afterTransition(prevVerdict, hadConflict, false, nowMS);
-
-    if (out.error) {
-      return errReply(wireErr(out.error.httpStatus, out.error.code, out.error.message));
-    }
-    return okReply(out.response);
+    return this.executeDecision(nowMS, () => decideLease(this.state, nowMS, parsed.value), {
+      onSuccess: (res) => {
+        if (res.status === "leased") {
+          this.persistAndExtendLease(res.lease_id, res.deadline_ms, nowMS);
+        }
+      },
+    });
   }
 
-  async heartbeat(nowMS: number, rawBody: string): Promise<DoHttpReply> {
-    await this.beforeRequest(nowMS);
+  async heartbeat(rawBody: string, nowOverride?: number): Promise<DoHttpReply> {
+    const nowMS = nowOverride ?? Date.now();
     const parsed = parseHeartbeatBody(rawBody);
     if (!parsed.ok) {
       return errReply(parsed.error);
     }
-    const prevVerdict = this.state.initialized ? stateVerdict(this.state) : "running";
-    const hadConflict = this.state.conflicts.length > 0;
-    const out = decideHeartbeat(this.state, nowMS, parsed.value);
-    // Healthy heartbeats emit zero events and never touch SQLite.
-    const markDirty = this.willNeedIndexSync(out.events, prevVerdict, hadConflict);
-    if (!this.persistAndApply(out.events, markDirty)) {
-      return errReply(wireErr(503, ErrCodeStorageError, "failed to persist events"));
-    }
-    if (!out.error && out.response && out.response.held) {
-      extendLease(this.state, parsed.value.lease_id, out.response.deadline_ms);
-    }
-    await this.afterTransition(prevVerdict, hadConflict, false, nowMS);
-
-    if (out.error) {
-      return errReply(wireErr(out.error.httpStatus, out.error.code, out.error.message));
-    }
-    return okReply(out.response);
+    return this.executeDecision(nowMS, () => decideHeartbeat(this.state, nowMS, parsed.value), {
+      onSuccess: (res) => {
+        if (res.held) {
+          this.persistAndExtendLease(parsed.value.lease_id, res.deadline_ms, nowMS);
+        }
+      },
+    });
   }
 
-  async report(nowMS: number, rawBody: string): Promise<DoHttpReply> {
-    await this.beforeRequest(nowMS);
+  async report(rawBody: string, nowOverride?: number): Promise<DoHttpReply> {
+    const nowMS = nowOverride ?? Date.now();
     const parsed = parseReportBody(rawBody);
     if (!parsed.ok) {
       return errReply(parsed.error);
     }
-    const prevVerdict = this.state.initialized ? stateVerdict(this.state) : "running";
-    const hadConflict = this.state.conflicts.length > 0;
-    const out = decideReport(this.state, nowMS, parsed.value);
-    const markDirty = this.willNeedIndexSync(out.events, prevVerdict, hadConflict);
-    if (!this.persistAndApply(out.events, markDirty)) {
-      return errReply(wireErr(503, ErrCodeStorageError, "failed to persist events"));
-    }
-    await this.afterTransition(prevVerdict, hadConflict, false, nowMS);
-
-    if (out.error) {
-      return errReply(wireErr(out.error.httpStatus, out.error.code, out.error.message));
-    }
-    return okReply(out.response);
+    return this.executeDecision(nowMS, () => decideReport(this.state, nowMS, parsed.value));
   }
 
-  async status(nowMS: number): Promise<DoHttpReply> {
-    await this.beforeRequest(nowMS);
-    const prevVerdict = this.state.initialized ? stateVerdict(this.state) : "running";
-    const hadConflict = this.state.conflicts.length > 0;
-    const out = decideStatus(this.state, nowMS);
-    const markDirty = this.willNeedIndexSync(out.events, prevVerdict, hadConflict);
-    if (!this.persistAndApply(out.events, markDirty)) {
-      return errReply(wireErr(503, ErrCodeStorageError, "failed to persist events"));
-    }
-    await this.afterTransition(prevVerdict, hadConflict, false, nowMS);
-
-    if (out.error) {
-      return errReply(wireErr(out.error.httpStatus, out.error.code, out.error.message));
-    }
-    return okReply(out.response);
+  async status(nowOverride?: number): Promise<DoHttpReply> {
+    const nowMS = nowOverride ?? Date.now();
+    return this.executeDecision(nowMS, () => decideStatus(this.state, nowMS));
   }
 
-  async listTests(nowMS: number, cmd: ListTestsCommand): Promise<DoHttpReply> {
-    await this.beforeRequest(nowMS);
-    const prevVerdict = this.state.initialized ? stateVerdict(this.state) : "running";
-    const hadConflict = this.state.conflicts.length > 0;
-    const out = decideListTests(this.state, nowMS, cmd);
-    const markDirty = this.willNeedIndexSync(out.events, prevVerdict, hadConflict);
-    if (!this.persistAndApply(out.events, markDirty)) {
-      return errReply(wireErr(503, ErrCodeStorageError, "failed to persist events"));
-    }
-    await this.afterTransition(prevVerdict, hadConflict, false, nowMS);
-
-    if (out.error) {
-      return errReply(wireErr(out.error.httpStatus, out.error.code, out.error.message));
-    }
-    return okReply(out.response);
+  async listTests(cmd: ListTestsCommand, nowOverride?: number): Promise<DoHttpReply> {
+    const nowMS = nowOverride ?? Date.now();
+    return this.executeDecision(nowMS, () => decideListTests(this.state, nowMS, cmd));
   }
 
   // Lifecycle alarm:
@@ -505,11 +530,11 @@ export class BuildDO extends DurableObject<Env> {
     if (verdict === "running") {
       if (nowMS >= this.state.deadlineMS) {
         const out = decideStatus(this.state, nowMS);
-        if (!this.persistAndApply(out.events, true)) {
-          throw new Error("failed to persist deadline finalization");
-        }
+        this.persistAndApply(out.events);
         const deleteAt = (this.state.finishedAtMS || nowMS) + RETENTION_MS;
-        await this.ctx.storage.setAlarm(deleteAt);
+        // Same synchronous turn as persistAndApply so alarm + finalization commit atomically.
+        const alarmPromise = this.ctx.storage.setAlarm(deleteAt);
+        await alarmPromise;
         await this.trySyncIndex(nowMS);
       } else {
         await this.ctx.storage.setAlarm(this.state.deadlineMS);
@@ -524,7 +549,7 @@ export class BuildDO extends DurableObject<Env> {
       return;
     }
 
-    if (this.indexDirty) {
+    if (this.needsIndexSync()) {
       await this.trySyncIndex(nowMS);
     }
     await this.ctx.storage.setAlarm(deleteAt);

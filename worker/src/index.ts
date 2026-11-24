@@ -32,6 +32,18 @@ function doReplyToResponse(reply: { status: number; body: string }): Response {
   });
 }
 
+function logDOError(buildID: string, method: string, err: unknown): void {
+  console.error(
+    JSON.stringify({
+      event: "do_rpc_error",
+      build_id: buildID,
+      method,
+      error_name: err instanceof Error ? err.name : "Error",
+      error_message: err instanceof Error ? err.message : String(err),
+    }),
+  );
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Validate MAX_TESTS first; any invalid value refuses every request with 500.
@@ -67,15 +79,19 @@ export default {
     }
 
     const rest = path.slice("/api/v1/".length);
-    const nowMS = Date.now();
 
     if (rest === "builds") {
       if (request.method !== "GET") {
         return errorResponse(wireErr(405, ErrCodeMethodNotAllowed, "method not allowed"), { Allow: "GET" });
       }
-      const indexStub = env.BUILD_INDEX.get(env.BUILD_INDEX.idFromName(INDEX_NAME));
-      const builds = await indexStub.list(nowMS);
-      return jsonResponse(200, { version: ProtocolVersion, builds });
+      try {
+        const indexStub = env.BUILD_INDEX.get(env.BUILD_INDEX.idFromName(INDEX_NAME));
+        const builds = await indexStub.list();
+        return jsonResponse(200, { version: ProtocolVersion, builds });
+      } catch (err) {
+        logDOError(INDEX_NAME, "list", err);
+        return errorResponse(wireErr(503, ErrCodeStorageError, "durable object request failed"));
+      }
     }
 
     if (!rest.startsWith("builds/")) {
@@ -99,7 +115,7 @@ export default {
       if (!validBuildID(buildID)) {
         return errorResponse(wireErr(400, ErrCodeInvalidRequest, "invalid build ID"));
       }
-      return callDO(env, buildID, (stub) => stub.status(nowMS));
+      return callDO(env, buildID, "status", (stub) => stub.status());
     }
 
     if (action === "tests") {
@@ -113,7 +129,7 @@ export default {
       if (!parsedQuery.ok) {
         return errorResponse(parsedQuery.error);
       }
-      return callDO(env, buildID, (stub) => stub.listTests(nowMS, parsedQuery.value));
+      return callDO(env, buildID, "listTests", (stub) => stub.listTests(parsedQuery.value));
     }
 
     if (action === "init" || action === "lease" || action === "heartbeat" || action === "report") {
@@ -140,13 +156,13 @@ export default {
 
       switch (action) {
         case "init":
-          return callDO(env, buildID, (stub) => stub.init(nowMS, buildID, rawBody));
+          return callDO(env, buildID, "init", (stub) => stub.init(buildID, rawBody));
         case "lease":
-          return callDO(env, buildID, (stub) => stub.lease(nowMS, rawBody));
+          return callDO(env, buildID, "lease", (stub) => stub.lease(rawBody));
         case "heartbeat":
-          return callDO(env, buildID, (stub) => stub.heartbeat(nowMS, rawBody));
+          return callDO(env, buildID, "heartbeat", (stub) => stub.heartbeat(rawBody));
         case "report":
-          return callDO(env, buildID, (stub) => stub.report(nowMS, rawBody));
+          return callDO(env, buildID, "report", (stub) => stub.report(rawBody));
       }
     }
 
@@ -157,13 +173,15 @@ export default {
 async function callDO(
   env: Env,
   buildID: string,
+  method: string,
   fn: (stub: DurableObjectStub<BuildDO>) => Promise<{ status: number; body: string }>,
 ): Promise<Response> {
   try {
     const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(buildID));
     const reply = await fn(stub);
     return doReplyToResponse(reply);
-  } catch {
+  } catch (err) {
+    logDOError(buildID, method, err);
     return errorResponse(wireErr(503, ErrCodeStorageError, "durable object request failed"));
   }
 }

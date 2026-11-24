@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "types": "WRANGLER_SEND_METRICS=false WRANGLER_LOG_PATH=.wrangler/logs wrangler types",
-    "typecheck": "WRANGLER_SEND_METRICS=false WRANGLER_LOG_PATH=.wrangler/logs wrangler types && tsc --noEmit",
+    "types": "WRANGLER_SEND_METRICS=false WRANGLER_LOG_PATH=\"${WRANGLER_LOG_PATH:-.wrangler/logs}\" wrangler types",
+    "typecheck": "WRANGLER_SEND_METRICS=false WRANGLER_LOG_PATH=\"${WRANGLER_LOG_PATH:-.wrangler/logs}\" wrangler types && tsc --noEmit",
     "test:core": "vitest run --config vitest.core.config.ts",
-    "test:do": "WRANGLER_SEND_METRICS=false WRANGLER_LOG_PATH=.wrangler/logs vitest run --config vitest.do.config.ts"
+    "test:do": "WRANGLER_SEND_METRICS=false WRANGLER_LOG_PATH=\"${WRANGLER_LOG_PATH:-.wrangler/logs}\" vitest run --config vitest.do.config.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.9.1",

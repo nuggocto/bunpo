@@ -21,7 +21,7 @@ interface BuildRow extends Record<string, SqlStorageValue> {
 }
 
 export class BuildIndex extends DurableObject<Env> {
-  private readonly entries = new Map<string, IndexEntry>();
+  private entries = new Map<string, IndexEntry>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -57,24 +57,35 @@ export class BuildIndex extends DurableObject<Env> {
     });
   }
 
-  private pruneExpired(nowMS: number): void {
+  async upsert(entry: IndexEntry, nowOverride?: number): Promise<void> {
+    const nowMS = nowOverride ?? Date.now();
     const expired: string[] = [];
+    const nextEntries = new Map<string, IndexEntry>();
     for (const [id, e] of this.entries) {
       if (e.expires_at_ms <= nowMS) {
         expired.push(id);
+      } else {
+        nextEntries.set(id, e);
       }
     }
-    if (expired.length > 0) {
-      this.ctx.storage.sql.exec("DELETE FROM builds WHERE expires_at_ms <= ?", nowMS);
-      for (let i = 0; i < expired.length; i++) {
-        this.entries.delete(expired[i]!);
-      }
-    }
-  }
+    nextEntries.set(entry.build_id, entry);
 
-  async upsert(entry: IndexEntry, nowMS: number): Promise<void> {
+    const evicted: string[] = [];
+    if (nextEntries.size > MAX_INDEX_BUILDS) {
+      const kept = pruneAndCapIndex(nextEntries.values(), nowMS);
+      const keptSet = new Set(kept.map((e) => e.build_id));
+      for (const id of Array.from(nextEntries.keys())) {
+        if (!keptSet.has(id)) {
+          evicted.push(id);
+          nextEntries.delete(id);
+        }
+      }
+    }
+
     this.ctx.storage.transactionSync(() => {
-      this.pruneExpired(nowMS);
+      if (expired.length > 0) {
+        this.ctx.storage.sql.exec("DELETE FROM builds WHERE expires_at_ms <= ?", nowMS);
+      }
       this.ctx.storage.sql.exec(
         `INSERT OR REPLACE INTO builds (
           build_id, verdict, created_at_ms, finished_at_ms,
@@ -90,23 +101,29 @@ export class BuildIndex extends DurableObject<Env> {
         entry.has_conflicts ? 1 : 0,
         entry.expires_at_ms,
       );
-      this.entries.set(entry.build_id, entry);
-
-      if (this.entries.size > MAX_INDEX_BUILDS) {
-        const kept = pruneAndCapIndex(this.entries.values(), nowMS);
-        const keptSet = new Set(kept.map((e) => e.build_id));
-        for (const id of Array.from(this.entries.keys())) {
-          if (!keptSet.has(id)) {
-            this.ctx.storage.sql.exec("DELETE FROM builds WHERE build_id = ?", id);
-            this.entries.delete(id);
-          }
-        }
+      for (let i = 0; i < evicted.length; i++) {
+        this.ctx.storage.sql.exec("DELETE FROM builds WHERE build_id = ?", evicted[i]!);
       }
     });
+
+    // Mutate in-memory map only after SQLite commits.
+    this.entries = nextEntries;
   }
 
-  async list(nowMS: number): Promise<BuildSummary[]> {
-    this.pruneExpired(nowMS);
+  async list(nowOverride?: number): Promise<BuildSummary[]> {
+    const nowMS = nowOverride ?? Date.now();
+    const expired: string[] = [];
+    for (const [id, e] of this.entries) {
+      if (e.expires_at_ms <= nowMS) {
+        expired.push(id);
+      }
+    }
+    if (expired.length > 0) {
+      this.ctx.storage.sql.exec("DELETE FROM builds WHERE expires_at_ms <= ?", nowMS);
+      for (let i = 0; i < expired.length; i++) {
+        this.entries.delete(expired[i]!);
+      }
+    }
     return pruneAndCapIndex(this.entries.values(), nowMS).map(toBuildSummary);
   }
 }
