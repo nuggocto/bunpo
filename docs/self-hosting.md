@@ -42,22 +42,22 @@ Every command below starts from a clean checkout of this repository, after expor
    npx wrangler login
    ```
 
-3. Upload both bearer tokens as Worker secrets:
+3. Deploy the Worker, Durable Object migrations, and dashboard static assets first:
+
+   ```sh
+   npx wrangler deploy
+   ```
+
+   Deploying before setting secrets avoids creating a draft Worker; until both tokens are uploaded, the Worker answers `/healthz` with `200` and refuses every `/api/v1/*` request with `503 server_misconfigured`. If your account has no `workers.dev` subdomain yet, Wrangler warns and asks `Would you like to register a workers.dev subdomain now?` (default no). Answer yes to register one, or decline and configure a custom route in `worker/wrangler.jsonc`. Once deployed, Wrangler prints the URL (for example `https://bunpo-queue.<subdomain>.workers.dev`).
+
+4. Upload both bearer tokens as Worker secrets:
 
    ```sh
    printf '%s' "$BUNPO_QUEUE_TOKEN" | npx wrangler secret put BUNPO_QUEUE_TOKEN
    printf '%s' "$BUNPO_QUEUE_READ_TOKEN" | npx wrangler secret put BUNPO_QUEUE_READ_TOKEN
    ```
 
-   If `bunpo-queue` does not exist on your account yet, interactive `wrangler secret put` asks `There doesn't seem to be a Worker called "bunpo-queue". Do you want to create a new Worker with that name and add secrets to it?` (default yes). When stdin is piped as above, Wrangler creates a minimal draft Worker automatically and attaches the secret; `wrangler deploy` replaces the draft while keeping the secrets.
-
-4. Deploy the Worker, Durable Object migrations, and dashboard static assets:
-
-   ```sh
-   npx wrangler deploy
-   ```
-
-   If your account has no `workers.dev` subdomain yet, Wrangler warns and asks `Would you like to register a workers.dev subdomain now?` (default no). Answer yes to register one, or decline and configure a custom route in `worker/wrangler.jsonc`. Once deployed, Wrangler prints the URL (for example `https://bunpo-queue.<subdomain>.workers.dev`).
+   On a later `npx wrangler deploy`, Wrangler may warn `You are about to upload a Worker that was last updated via the script API. Edits that have been made via the script API will be overridden by your local code and config. Would you like to continue?` — answer `y`; secrets uploaded with `wrangler secret put` stay intact.
 
 5. Verify `/healthz` and authentication:
 
@@ -100,7 +100,7 @@ npx wrangler delete
 npx wrangler logout
 ```
 
-`wrangler delete` asks `Are you sure you want to delete bunpo-queue? This action cannot be undone.` and deletes the Worker service (`DELETE /accounts/<id>/workers/services/bunpo-queue`), which removes its `BuildDO` and `BuildIndex` Durable Object namespaces and stored SQLite data (prompting for force confirmation if another Worker references them). Remove `BUNPO_QUEUE_URL`, `BUNPO_QUEUE_TOKEN`, and `BUNPO_QUEUE_READ_TOKEN` from GitHub Actions settings if you are decommissioning the server.
+`wrangler delete` asks `Are you sure you want to delete bunpo-queue? This action cannot be undone.` and deletes the Worker service (`DELETE /accounts/<id>/workers/services/bunpo-queue`). Afterward, open **Workers & Pages -> Durable Objects** in the Cloudflare dashboard and check that `BuildDO` and `BuildIndex` are gone; if either remains, delete it there (or deploy a `deleted_classes` migration before deleting the Worker). Remove `BUNPO_QUEUE_URL`, `BUNPO_QUEUE_TOKEN`, and `BUNPO_QUEUE_READ_TOKEN` from GitHub Actions settings if you are decommissioning the server.
 
 ### Cloudflare Free-plan limits and failure modes
 
