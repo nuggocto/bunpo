@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -150,21 +151,41 @@ func TestDashboardPreservesAPIAndHealthzAndHeadersParity(t *testing.T) {
 		t.Fatalf("GET /api/v1/builds = %d %q", apiRec.Code, apiRec.Body.String())
 	}
 
-	// Verify static/_headers (used by Cloudflare Workers Static Assets) matches Go constants.
+	// Verify all three CSP copies (Go, static/_headers, worker/src/index.ts) are identical.
 	rawHeaders, err := os.ReadFile("static/_headers")
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(rawHeaders)
+	headersText := string(rawHeaders)
+	cspLineRe := regexp.MustCompile(`(?m)^\s*Content-Security-Policy:\s*(.+?)\s*$`)
+	headerMatches := cspLineRe.FindAllStringSubmatch(headersText, -1)
+	if len(headerMatches) != 1 {
+		t.Fatalf("static/_headers has %d Content-Security-Policy lines; want 1", len(headerMatches))
+	}
+	if got := headerMatches[0][1]; got != dashboard.CSP {
+		t.Fatalf("static/_headers CSP = %q; want Go CSP %q", got, dashboard.CSP)
+	}
 	for _, want := range []string{
-		"Content-Security-Policy: " + dashboard.CSP,
 		"X-Content-Type-Options: " + dashboard.NoSniff,
 		"Referrer-Policy: " + dashboard.ReferrerPolicy,
 		"Cache-Control: " + dashboard.CacheHTML,
 		"Cache-Control: " + dashboard.CacheAsset,
 	} {
-		if !strings.Contains(text, want) {
+		if !strings.Contains(headersText, want) {
 			t.Fatalf("static/_headers missing %q", want)
 		}
+	}
+
+	rawWorker, err := os.ReadFile("../../worker/src/index.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerCSPRe := regexp.MustCompile(`const\s+DASHBOARD_CSP\s*=\s*"([^"]+)"\s*;`)
+	workerMatch := workerCSPRe.FindStringSubmatch(string(rawWorker))
+	if workerMatch == nil {
+		t.Fatal("worker/src/index.ts missing DASHBOARD_CSP string literal")
+	}
+	if got := workerMatch[1]; got != dashboard.CSP {
+		t.Fatalf("worker/src/index.ts CSP = %q; want Go CSP %q", got, dashboard.CSP)
 	}
 }
