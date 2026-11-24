@@ -1,3 +1,5 @@
+//go:build unix
+
 // Command guidecheck runs the static and live-queue shell steps of every guide
 // in docs/guides against the real test runners, the way a GitHub Actions
 // "shell: bash" step runs them, and checks that each guide selects exactly the

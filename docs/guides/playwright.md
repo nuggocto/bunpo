@@ -223,12 +223,21 @@ pinned too.
 
 ## Live queue
 
-If your machines have uneven speeds, start at different times, or can be
-preempted, run Bunpō in live-queue mode against `bunpo-server` or the
-Cloudflare Worker instead of static splitting. Prefer static splitting when
-machines are equal and start together, on fork pull requests (GitHub Actions
-withholds secrets from fork PRs, so the queue token is unavailable), or when
-your suite has very slow per-batch startup.
+Requires **Bunpō 0.1.0 or later**. If your machines have uneven speeds, start
+at different times, or can be preempted, run Bunpō in live-queue mode against
+`bunpo-server` or the Cloudflare Worker instead of static splitting. Prefer
+static splitting when machines are equal and start together, on fork pull
+requests (GitHub Actions withholds secrets from fork PRs, so the workflow below
+fails on forks with a missing-token error unless you gate the jobs with
+`if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}`
+or use static splitting instead), or when your suite has very slow per-batch
+startup.
+
+If a machine is killed mid-run, its own `test` matrix job stays red in GitHub
+Actions even when the remaining machines finish the build cleanly. Make the
+`bunpo` job your required branch-protection check rather than the `test` matrix
+jobs, and keep `if: ${{ !cancelled() }}` on `bunpo` so a lost machine never
+skips it.
 
 Pay attention to how Playwright setup hooks behave across batches:
 
