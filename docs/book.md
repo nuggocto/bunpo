@@ -357,11 +357,15 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   SQLite-backed Durable Objects (`BuildDO` per build, `BuildIndex` for the
   200-build list). Secrets (`BUNPO_QUEUE_TOKEN`, `BUNPO_QUEUE_READ_TOKEN`) are
   never stored in `worker/wrangler.jsonc` (use `.dev.vars` locally or
-  `wrangler secret`). `MAX_TESTS` defaults to `5,000` based on local
-  measurements under the 10 ms Free-plan CPU assumption and can be raised up to
-  `20,000` after testing on a real account. On 64-machine builds, heartbeats at
-  `lease_ttl_ms / 3` are roughly half of all requests; passing a longer
-  `--lease-ttl` reduces them.
+  `wrangler secret`). Because idle Durable Objects hibernate after ~10 s,
+  `BuildDO` persists active leases' ungraced deadlines into one `meta` row when
+  a heartbeat crosses half a TTL and wakes them with `floor(lease_ttl_ms / 2)`
+  grace, so dead runners still expire promptly across repeated hibernations.
+  `MAX_TESTS` defaults to `5,000` based on local measurements under the 10 ms
+  Free-plan CPU assumption (replaying existing builds always uses the 20,000
+  protocol limit) and can be raised up to `20,000` after testing on a real
+  account. On 64-machine builds, heartbeats at `lease_ttl_ms / 3` are roughly
+  half of all requests; passing a longer `--lease-ttl` reduces them.
 - **`version`** (or **`-version`**, **`--version`**) prints the module version
   from the build information.
 
