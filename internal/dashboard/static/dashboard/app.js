@@ -344,8 +344,8 @@ function renderTimeline() {
     role: "img",
     "aria-label": `Per-machine lease timeline across ${tl.lanes.length} runners`,
   });
-  for (const frac of [0, 0.5, 1]) {
-    const t = svgEl("text", { x: (labelW + frac * chartW).toFixed(1), y: 13, class: "axis-label" });
+  for (const [frac, anchor] of [[0, "start"], [0.5, "middle"], [1, "end"]]) {
+    const t = svgEl("text", { x: (labelW + frac * chartW).toFixed(1), y: 13, class: "axis-label", "text-anchor": anchor });
     t.textContent = formatDuration(tl.spanMS * frac);
     svg.append(t);
   }

@@ -46,6 +46,7 @@ func TestDashboardServesFilesAndHeaders(t *testing.T) {
 		{"/dashboard/app.js", "text/javascript; charset=utf-8", dashboard.CacheAsset, `Authorization`},
 		{"/dashboard/core.js", "text/javascript; charset=utf-8", dashboard.CacheAsset, `export function pollStep`},
 		{"/dashboard/style.css", "text/css; charset=utf-8", dashboard.CacheAsset, `prefers-color-scheme: dark`},
+		{"/dashboard/favicon.svg", "image/svg+xml", dashboard.CacheAsset, `<svg `},
 	}
 
 	for _, tc := range cases {

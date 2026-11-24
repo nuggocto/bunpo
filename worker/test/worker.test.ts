@@ -98,6 +98,7 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
       ["/dashboard/app.js", "javascript", "public, max-age=300"],
       ["/dashboard/core.js", "javascript", "public, max-age=300"],
       ["/dashboard/style.css", "text/css", "public, max-age=300"],
+      ["/dashboard/favicon.svg", "image/svg+xml", "public, max-age=300"],
     ] as const) {
       const resp = await env.ASSETS.fetch(`http://localhost${path}`);
       expect(resp.status, `ASSETS GET ${path}`).toBe(200);

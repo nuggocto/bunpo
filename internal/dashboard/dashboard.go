@@ -18,7 +18,7 @@ const (
 	CacheAsset     = "public, max-age=300"
 )
 
-//go:embed static/index.html static/dashboard/app.js static/dashboard/core.js static/dashboard/style.css
+//go:embed static/index.html static/dashboard/app.js static/dashboard/core.js static/dashboard/style.css static/dashboard/favicon.svg
 var staticFS embed.FS
 
 type assetSpec struct {
@@ -28,9 +28,10 @@ type assetSpec struct {
 }
 
 var assets = map[string]assetSpec{
-	"/dashboard/app.js":    {embedPath: "static/dashboard/app.js", contentType: "text/javascript; charset=utf-8", cache: CacheAsset},
-	"/dashboard/core.js":   {embedPath: "static/dashboard/core.js", contentType: "text/javascript; charset=utf-8", cache: CacheAsset},
-	"/dashboard/style.css": {embedPath: "static/dashboard/style.css", contentType: "text/css; charset=utf-8", cache: CacheAsset},
+	"/dashboard/app.js":      {embedPath: "static/dashboard/app.js", contentType: "text/javascript; charset=utf-8", cache: CacheAsset},
+	"/dashboard/core.js":     {embedPath: "static/dashboard/core.js", contentType: "text/javascript; charset=utf-8", cache: CacheAsset},
+	"/dashboard/style.css":   {embedPath: "static/dashboard/style.css", contentType: "text/css; charset=utf-8", cache: CacheAsset},
+	"/dashboard/favicon.svg": {embedPath: "static/dashboard/favicon.svg", contentType: "image/svg+xml", cache: CacheAsset},
 }
 
 var indexSpec = assetSpec{
