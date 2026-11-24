@@ -38,7 +38,8 @@ jobs:
             echo "::error::Missing required GitHub Actions configuration: ${missing[*]}"
             exit 1
           fi
-          curl -fsS "${BUNPO_QUEUE_URL%/}/healthz" | grep -q '{"ok":true}'
+          health=$(curl -fsS "${BUNPO_QUEUE_URL%/}/healthz")
+          grep -q '{"ok":true}' <<<"$health"
 
   test:
     needs: preflight
@@ -53,13 +54,16 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/go
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
       - name: Build bunpo from source
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
           go build -o "$RUNNER_TEMP/bin/bunpo" ./cmd/bunpo
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
       - name: Install pytest
-        run: python3 -m pip install --quiet pytest==9.0.2
+        run: python -m pip install --quiet pytest==9.2.0
       - name: Create sample pytest suite and batch runner
         run: |
           mkdir -p "$RUNNER_TEMP/suite/tests"
@@ -95,6 +99,25 @@ jobs:
           fi
           EOF
           chmod +x "$RUNNER_TEMP/suite/run-batch.sh"
+      - name: Wait for machine 0 to join build
+        if: ${{ matrix.machine != 0 }}
+        env:
+          BUNPO_QUEUE_URL: ${{ vars.BUNPO_QUEUE_URL }}
+          BUNPO_QUEUE_READ_TOKEN: ${{ secrets.BUNPO_QUEUE_READ_TOKEN }}
+          BUILD_ID: trial-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.scenario }}
+        run: |
+          deadline=$(( $(date +%s) + 180 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            body=$(curl -sS -H "Authorization: Bearer $BUNPO_QUEUE_READ_TOKEN" \
+              "${BUNPO_QUEUE_URL%/}/api/v1/builds/$BUILD_ID" 2>/dev/null || true)
+            if jq -e '(.runners // []) | any(.machine_index == 0 and (.leases // 0) > 0)' >/dev/null 2>&1 <<<"$body"; then
+              echo "Machine 0 has joined and leased a batch; starting survivor."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Timed out after 180s waiting for machine 0 to join build $BUILD_ID"
+          exit 1
       - name: Run live-queue worker
         working-directory: ${{ runner.temp }}/suite
         env:

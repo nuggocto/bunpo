@@ -34,7 +34,7 @@ pid=$!
 
 ok=0
 for _ in $(seq 1 30); do
-	if curl -fsS "$url/healthz" 2>/dev/null | grep -q '{"ok":true}'; then
+	if health=$(curl -fsS "$url/healthz" 2>/dev/null) && grep -q '{"ok":true}' <<<"$health"; then
 		ok=1
 		break
 	fi
@@ -49,5 +49,7 @@ if [ "$ok" -ne 1 ]; then
 	exit 1
 fi
 
-curl -fsSI "$url/" | grep -qi "^content-security-policy:"
-curl -fsS "$url/" | grep -q "Bunpō Queue"
+hdr=$(curl -fsSI "$url/")
+grep -qi "^content-security-policy:" <<<"$hdr"
+body=$(curl -fsS "$url/")
+grep -q "Bunpō Queue" <<<"$body"
