@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nuggocto/bunpo/internal/dashboard"
 	"github.com/nuggocto/bunpo/internal/queue"
 	"github.com/nuggocto/bunpo/internal/queueapi"
 )
@@ -98,7 +99,7 @@ func run(args []string, getenv func(string) string) int {
 	}
 
 	srv := &http.Server{
-		Handler:           handler,
+		Handler:           dashboard.Wrap(handler),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
