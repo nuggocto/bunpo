@@ -12,6 +12,7 @@
 import { performance } from "node:perf_hooks";
 
 const MAX_REQUESTS = 1500;
+const FETCH_TIMEOUT_MS = 60_000;
 const SIZES = [1000, 5000, 10000, 20000];
 const IDLE_WAKE_MS = 15_000;
 const DEAD_TTL_MS = 10_000;
@@ -48,7 +49,7 @@ function validateBaseURL(u) {
   die(`unsupported URL scheme in BUNPO_QUEUE_URL: ${parsed.protocol}`);
 }
 
-const plannedMaxRequests = 1 + 2 + SIZES.length * 6 + 7 + 16 + 7; // ~60 requests, hard cap 1500
+const plannedMaxRequests = 1 + 2 + SIZES.length * 6 + 7 + 16 + 7; // 57 planned, hard cap 1500
 
 if (!rawURL || !writeToken || !readToken) {
   console.error("Usage:");
@@ -59,7 +60,7 @@ if (!rawURL || !writeToken || !readToken) {
 const baseURL = validateBaseURL(rawURL);
 
 console.log(`Target: ${baseURL}`);
-console.log(`Planned requests: ~${plannedMaxRequests} (hard client cap: ${MAX_REQUESTS})`);
+console.log(`Planned requests: up to ${plannedMaxRequests} (hard client cap: ${MAX_REQUESTS})`);
 console.log("Checks: /healthz, auth (401/403), sizes 1k/5k/10k/20k + 15s idle wake, retry, dead-runner expiry (<=1.5 TTL), dashboard headers.");
 
 if (!confirmed) {
@@ -71,14 +72,22 @@ let requestCount = 0;
 
 function classifyError(status, text, json, err) {
   if (err) {
+    if (err.name === "TimeoutError" || err.name === "AbortError") {
+      return { kind: "network_error", detail: `request timed out after ${FETCH_TIMEOUT_MS / 1000}s` };
+    }
     return { kind: "network_error", detail: err.cause?.code || err.message || String(err) };
   }
+  // Worker catches Durable Object exceptions (CPU limit, quota, or SQLite error)
+  // and answers 503 storage_error; check the wrangler tail capture for the cause.
+  if (status === 503 && json?.error?.code === "storage_error") {
+    return {
+      kind: "do_error",
+      code: "storage_error",
+      detail: "503 storage_error (Durable Object threw; check wrangler tail capture for CPU limit, quota, or storage exception)",
+    };
+  }
   const lower = (text || "").toLowerCase();
-  if (
-    status === 503 ||
-    status === 500 ||
-    status === 524
-  ) {
+  if (status === 503 || status === 500 || status === 524) {
     if (lower.includes("1102") || lower.includes("exceeded cpu") || lower.includes("cpu time") || lower.includes("worker exceeded resource")) {
       return { kind: "cpu_limit", detail: `HTTP ${status}: ${text.slice(0, 160)}` };
     }
@@ -98,6 +107,11 @@ function classifyError(status, text, json, err) {
   return { kind: "http_error", detail: `HTTP ${status}: ${text.slice(0, 160)}` };
 }
 
+function formatFailure(r, fallback) {
+  if (r.failure) return `${r.failure.kind} - ${r.failure.detail}`;
+  return fallback || `HTTP ${r.status}: ${(r.text || "").slice(0, 160)}`;
+}
+
 async function req(method, path, { token = "", body = undefined } = {}) {
   if (requestCount >= MAX_REQUESTS) {
     throw new Error(`request cap (${MAX_REQUESTS}) reached`);
@@ -115,6 +129,7 @@ async function req(method, path, { token = "", body = undefined } = {}) {
       headers,
       body: body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
       redirect: "manual",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
   } catch (err) {
     const ms = Math.round(performance.now() - t0);
@@ -146,12 +161,19 @@ function makeTests(n) {
   return { tests, preds };
 }
 
+// Only sizes above the default 5,000 limit may skip, and only when the server
+// explicitly reports the MAX_TESTS over-limit message.
+function isMaxTestsLimitRejection(size, r) {
+  if (size <= 5000) return false;
+  if (r.status !== 400 || r.json?.error?.code !== "invalid_request") return false;
+  const msg = String(r.json?.error?.message || "");
+  return /tests has \d+ entries, over limit \d+/i.test(msg);
+}
+
 const runTag = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
-const results = [];
 let overallFailed = false;
 
 function record(name, pass, detail) {
-  results.push({ name, pass, detail });
   if (!pass) overallFailed = true;
   console.log(`[${pass ? "PASS" : "FAIL"}] ${name}: ${detail}`);
 }
@@ -160,24 +182,24 @@ function record(name, pass, detail) {
 {
   const r = await req("GET", "/healthz");
   const ok = r.status === 200 && r.json?.ok === true;
-  record("healthz", ok, ok ? `200 ok (${r.ms} ms)` : r.failure?.detail || `status ${r.status}`);
+  record("healthz", ok, ok ? `200 ok (${r.ms} ms)` : formatFailure(r));
 }
 
 // 2. Auth: wrong token -> 401, read token on POST -> 403
 {
   const r401 = await req("GET", "/api/v1/builds", { token: "wrong-token-0123456789abcdef" });
   const ok401 = r401.status === 401 && r401.json?.error?.code === "unauthorized";
-  record("auth-wrong-token-401", ok401, ok401 ? `401 unauthorized (${r401.ms} ms)` : r401.failure?.detail || `status ${r401.status}`);
+  record("auth-wrong-token-401", ok401, ok401 ? `401 unauthorized (${r401.ms} ms)` : formatFailure(r401));
 
   const r403 = await req("POST", `/api/v1/builds/trial-auth-${runTag}/init`, {
     token: readToken,
     body: { version: 1 },
   });
   const ok403 = r403.status === 403 && r403.json?.error?.code === "forbidden";
-  record("auth-read-post-403", ok403, ok403 ? `403 forbidden (${r403.ms} ms)` : r403.failure?.detail || `status ${r403.status}`);
+  record("auth-read-post-403", ok403, ok403 ? `403 forbidden (${r403.ms} ms)` : formatFailure(r403));
 }
 
-// 3. Size sweep: 1k, 5k, 10k, 20k (skip sizes above MAX_TESTS)
+// 3. Size sweep: 1k, 5k, 10k, 20k (only >5k may skip when blocked by MAX_TESTS)
 const sizeRows = [];
 for (const n of SIZES) {
   const bid = `trial-${n}-${runTag}`;
@@ -202,7 +224,7 @@ for (const n of SIZES) {
     },
   });
 
-  if (initR.status === 400 && initR.json?.error?.code === "invalid_request") {
+  if (isMaxTestsLimitRejection(n, initR)) {
     row.init = `${initR.ms}ms`;
     row.verdict = "SKIP (MAX_TESTS)";
     sizeRows.push(row);
@@ -213,7 +235,7 @@ for (const n of SIZES) {
     row.init = `${initR.ms}ms`;
     row.verdict = `FAIL (${initR.failure?.kind || initR.status})`;
     sizeRows.push(row);
-    record(`size-${n}`, false, `init failed: ${initR.failure?.kind} - ${initR.failure?.detail}`);
+    record(`size-${n}`, false, `init failed: ${formatFailure(initR)}`);
     continue;
   }
   row.init = `${initR.ms}ms`;
@@ -226,7 +248,7 @@ for (const n of SIZES) {
     row.lease = `${leaseR.ms}ms`;
     row.verdict = `FAIL (${leaseR.failure?.kind || leaseR.status})`;
     sizeRows.push(row);
-    record(`size-${n}`, false, `lease failed: ${leaseR.failure?.kind} - ${leaseR.failure?.detail}`);
+    record(`size-${n}`, false, `lease failed: ${formatFailure(leaseR)}`);
     continue;
   }
   row.lease = `${leaseR.ms}ms`;
@@ -247,7 +269,7 @@ for (const n of SIZES) {
     row.report = `${repR.ms}ms`;
     row.verdict = `FAIL (${repR.failure?.kind || repR.status})`;
     sizeRows.push(row);
-    record(`size-${n}`, false, `report failed: ${repR.failure?.kind} - ${repR.failure?.detail}`);
+    record(`size-${n}`, false, `report failed: ${formatFailure(repR)}`);
     continue;
   }
   row.report = `${repR.ms}ms`;
@@ -257,7 +279,7 @@ for (const n of SIZES) {
     row.status = `${stR.ms}ms`;
     row.verdict = `FAIL (${stR.failure?.kind || stR.status})`;
     sizeRows.push(row);
-    record(`size-${n}`, false, `status failed: ${stR.failure?.kind || stR.status}`);
+    record(`size-${n}`, false, `status failed: ${formatFailure(stR, `unexpected counts: ${JSON.stringify(stR.json?.counts)}`)}`);
     continue;
   }
   row.status = `${stR.ms}ms`;
@@ -268,7 +290,7 @@ for (const n of SIZES) {
     row.list = `${listR.ms}ms`;
     row.verdict = `FAIL (${listR.failure?.kind || "not listed"})`;
     sizeRows.push(row);
-    record(`size-${n}`, false, `list failed: build ${bid} not in /api/v1/builds`);
+    record(`size-${n}`, false, `list failed: ${formatFailure(listR, `build ${bid} not in /api/v1/builds`)}`);
     continue;
   }
   row.list = `${listR.ms}ms`;
@@ -280,7 +302,7 @@ for (const n of SIZES) {
     row.wake = `${wakeR.ms}ms`;
     row.verdict = `FAIL (${wakeR.failure?.kind || wakeR.status})`;
     sizeRows.push(row);
-    record(`size-${n}`, false, `wake failed: ${wakeR.failure?.kind} - ${wakeR.failure?.detail}`);
+    record(`size-${n}`, false, `wake failed: ${formatFailure(wakeR, `unexpected counts: ${JSON.stringify(wakeR.json?.counts)}`)}`);
     continue;
   }
   row.wake = `${wakeR.ms}ms`;
@@ -303,14 +325,14 @@ for (const n of SIZES) {
     },
   });
   let ok = initR.status === 200;
-  let detail = ok ? "" : `init ${initR.failure?.detail}`;
+  let detail = ok ? "" : `init: ${formatFailure(initR)}`;
   if (ok) {
     const l1 = await req("POST", `/api/v1/builds/${bid}/lease`, {
       token: writeToken,
       body: { version: 1, runner_id: "retry-r0", machine_index: 0, request_id: "q1" },
     });
     ok = l1.status === 200 && l1.json?.attempts?.[0]?.generation === 1;
-    if (!ok) detail = `lease1 ${l1.failure?.detail || l1.status}`;
+    if (!ok) detail = `lease1: ${formatFailure(l1)}`;
     if (ok) {
       const a1 = l1.json.attempts[0];
       const r1 = await req("POST", `/api/v1/builds/${bid}/report`, {
@@ -323,7 +345,7 @@ for (const n of SIZES) {
         },
       });
       ok = r1.status === 200 && r1.json?.verdict === "running";
-      if (!ok) detail = `report1 ${r1.failure?.detail || r1.text}`;
+      if (!ok) detail = `report1: ${formatFailure(r1)}`;
     }
     if (ok) {
       const l2 = await req("POST", `/api/v1/builds/${bid}/lease`, {
@@ -331,7 +353,7 @@ for (const n of SIZES) {
         body: { version: 1, runner_id: "retry-r0", machine_index: 0, request_id: "q2" },
       });
       ok = l2.status === 200 && l2.json?.attempts?.[0]?.generation === 2;
-      if (!ok) detail = `lease2 ${l2.failure?.detail || l2.text}`;
+      if (!ok) detail = `lease2: ${formatFailure(l2)}`;
       if (ok) {
         const a2 = l2.json.attempts[0];
         const r2 = await req("POST", `/api/v1/builds/${bid}/report`, {
@@ -344,7 +366,7 @@ for (const n of SIZES) {
           },
         });
         ok = r2.status === 200 && r2.json?.verdict === "passed";
-        detail = ok ? "attempt 1 error -> attempt 2 passed -> verdict passed" : `report2 ${r2.failure?.detail || r2.text}`;
+        detail = ok ? "attempt 1 error -> attempt 2 passed -> verdict passed" : `report2: ${formatFailure(r2)}`;
       }
     }
   }
@@ -366,7 +388,7 @@ for (const n of SIZES) {
     },
   });
   let ok = initR.status === 200;
-  let detail = ok ? "" : `init ${initR.failure?.detail}`;
+  let detail = ok ? "" : `init: ${formatFailure(initR)}`;
   if (ok) {
     const tLease = performance.now();
     const deadLease = await req("POST", `/api/v1/builds/${bid}/lease`, {
@@ -374,7 +396,7 @@ for (const n of SIZES) {
       body: { version: 1, runner_id: "dead-r0", machine_index: 0, request_id: "dead-q1" },
     });
     ok = deadLease.status === 200 && deadLease.json?.status === "leased";
-    if (!ok) detail = `dead lease failed: ${deadLease.failure?.detail || deadLease.text}`;
+    if (!ok) detail = `dead lease: ${formatFailure(deadLease)}`;
     if (ok) {
       // Wait 11s so a Cloudflare DO hibernates (>10s) and the 10s lease TTL elapses;
       // with floor(ttl/2)=5s wake grace, reassignment must happen within 1.5*TTL (15s).
@@ -411,7 +433,6 @@ for (const n of SIZES) {
         const attempts = testsR.json?.tests?.[0]?.attempts || [];
         const serverDeltaMS =
           attempts.length >= 2 ? attempts[1].leased_at_ms - attempts[0].leased_at_ms : elapsedMS;
-        // Allow up to 1.5*TTL + 1.5s poll/RTT margin on wall time, and check server timestamps.
         const withinBudget = serverDeltaMS <= DEAD_TTL_MS * 1.5 + 1500 && rep.status === 200 && rep.json?.verdict === "passed";
         ok = withinBudget;
         detail = `reassigned in ${serverDeltaMS} ms server time (${elapsedMS} ms wall, budget <= ${DEAD_TTL_MS * 1.5} ms + poll margin)`;
@@ -431,10 +452,10 @@ for (const n of SIZES) {
     ["/dashboard/style.css", "public, max-age=300"],
     ["/dashboard/favicon.svg", "public, max-age=300"],
   ];
-  let bad = [];
+  const bad = [];
   for (const [p, wantCache] of checks) {
     const r = await req("GET", p);
-    if (r.status !== 200) bad.push(`${p}: status ${r.status}`);
+    if (r.status !== 200) bad.push(`${p}: ${formatFailure(r)}`);
     else if (r.headers.get("content-security-policy") !== EXPECTED_CSP) bad.push(`${p}: CSP mismatch`);
     else if (r.headers.get("x-content-type-options") !== "nosniff") bad.push(`${p}: missing nosniff`);
     else if (r.headers.get("referrer-policy") !== "no-referrer") bad.push(`${p}: missing no-referrer`);
@@ -442,7 +463,7 @@ for (const n of SIZES) {
   }
   const r404 = await req("GET", "/_headers");
   if (r404.status !== 404 || r404.json?.error?.code !== "not_found") {
-    bad.push(`/_headers: expected JSON 404, got ${r404.status}`);
+    bad.push(`/_headers: expected JSON 404, got ${formatFailure(r404)}`);
   }
   record("dashboard-headers", bad.length === 0, bad.length === 0 ? "all 6 assets + /_headers 404 verified" : bad.join("; "));
 }
@@ -458,8 +479,8 @@ for (const r of sizeRows) {
 
 console.log(`\nTotal requests sent: ${requestCount} / ${MAX_REQUESTS}`);
 console.log("\nWhat to check in the Cloudflare dashboard (Workers & Pages -> bunpo-queue):");
-console.log("  1. Metrics -> CPU time (p50 and p99): note p50/p99 per request size.");
-console.log("  2. Metrics / Logs -> Errors: confirm zero 'exceeded CPU' (error 1102) or quota errors.");
+console.log("  1. Metrics -> CPU time (p50 and p99) and your wrangler tail jq CPU summary.");
+console.log("  2. Metrics / Logs -> Errors: confirm zero 'exceeded CPU' (error 1102), do_error, or quota errors.");
 console.log("  3. Durable Objects -> BuildDO / BuildIndex: check requests and SQLite rows written.");
 
 process.exit(overallFailed ? 1 : 0);
