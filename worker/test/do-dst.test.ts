@@ -1,6 +1,7 @@
 // Seeded Deterministic Simulation Test driving the REAL SQLite BuildDO inside
-// local workerd with evictDurableObject() injected at seeded points, asserting
-// every single response matches the pure TypeScript core byte-for-byte.
+// local workerd with evictDurableObject() injected at seeded points (including
+// after EVERY request with a dead runner), asserting every single response
+// matches the pure TypeScript core + LeaseDeadlineTracker byte-for-byte.
 //
 // Replay a single failing seed:
 //   BUNPO_DO_DST_SEED=<seed> npm run test:do
@@ -9,11 +10,15 @@ import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
+  type ActiveLeaseSeed,
   type Config,
   type InitCommand,
   type LeaseCommand,
   type Outcome,
+  type QueueEvent,
   type ReportCommand,
+  type SerializedDeadlines,
+  LeaseDeadlineTracker,
   ProtocolVersion,
   applyEvent,
   decideHeartbeat,
@@ -25,11 +30,10 @@ import {
   defaultLimits,
   extendLease,
   newState,
-  resetActiveLeaseDeadlines,
   stateVerdict,
 } from "../src/core/index.ts";
 
-// Deterministic xorshift64* PRNG (BigInt-free 32-bit mulberry32 for speed).
+// Deterministic 32-bit mulberry32 PRNG.
 function makeRng(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
@@ -61,25 +65,34 @@ function sortKeys(value: unknown): unknown {
   return value;
 }
 
-async function runSeedThroughRealDO(seed: number): Promise<void> {
+interface DstOptions {
+  evictEveryRequest?: boolean;
+  deadRunner?: boolean;
+  prefix: string;
+}
+
+async function runSeedThroughRealDO(seed: number, opts: DstOptions): Promise<void> {
   const rng = makeRng(seed);
-  const bid = `dst-seed-${seed}`;
+  const bid = `${opts.prefix}-${seed}`;
   const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
 
-  const lim = defaultLimits();
-  lim.maxTests = 5_000;
-  const oracle = newState(lim);
+  const oracle = newState(defaultLimits());
+  const tracker = new LeaseDeadlineTracker();
+  let storedDeadlines: SerializedDeadlines | null = null;
+  const grantedDeadlines = new Map<number, number>();
+  const lastRealDeadlines = new Map<number, number>();
 
   const numTests = 3 + randInt(rng, 7);
   const numRunners = 2 + randInt(rng, 3);
   const ttlMS = 10_000;
+  const graceMS = Math.floor(ttlMS / 2);
   const maxAttempts = 2 + randInt(rng, 2);
   const maxBatch = 1 + randInt(rng, 3);
-  const shortTimeout = rng() < 0.15;
+  const shortTimeout = !opts.deadRunner && rng() < 0.15;
   const cfg: Config = {
     machines: numRunners,
     lease_ttl_ms: ttlMS,
-    build_timeout_ms: shortTimeout ? ttlMS * 2 : ttlMS * 20,
+    build_timeout_ms: shortTimeout ? ttlMS * 2 : ttlMS * 30,
     max_attempts: maxAttempts,
     max_batch: maxBatch,
   };
@@ -88,25 +101,69 @@ async function runSeedThroughRealDO(seed: number): Promise<void> {
   const preds = tests.map(() => (rng() < 0.25 ? null : 100 + randInt(rng, 1500)));
 
   let now = 1_700_000_000_000;
-  let pendingWakeReset = false;
   let evictedCount = 0;
+  let currentlyEvicted = false;
 
-  const maybeEvict = async (stepLabel: string) => {
-    // Evict with ~25% probability on every step so evictions happen across every state transition.
-    if (rng() < 0.25) {
-      await evictDurableObject(stub);
-      pendingWakeReset = true;
-      evictedCount++;
+  const applyOracleEvents = (events: QueueEvent[], trustedInit = false) => {
+    for (const ev of events) {
+      applyEvent(oracle, ev, trustedInit && ev.type === "initialized" ? { trustedInit: true } : undefined);
+      if (ev.type === "leased" && ev.leased) {
+        tracker.onGrant(ev.leased.lease_id, ev.leased.deadline_ms);
+        grantedDeadlines.set(ev.leased.lease_id, ev.leased.deadline_ms);
+        lastRealDeadlines.set(ev.leased.lease_id, ev.leased.deadline_ms);
+      } else if (ev.type === "reported" && ev.reported?.close_lease) {
+        tracker.onClose(ev.reported.lease_id);
+      } else if (ev.type === "expired" && ev.expired) {
+        tracker.onClose(ev.expired.lease_id);
+      } else if (ev.type === "finalized") {
+        tracker.clear();
+      }
     }
-    void stepLabel;
   };
 
-  const syncOracleWake = (atMS: number) => {
-    if (pendingWakeReset) {
-      pendingWakeReset = false;
-      if (oracle.initialized && stateVerdict(oracle) === "running") {
-        resetActiveLeaseDeadlines(oracle, atMS);
+  const extendOracleLease = (leaseID: number, promisedDeadlineMS: number, atMS: number) => {
+    const snap = tracker.planExtend(leaseID, atMS, oracle.config.lease_ttl_ms);
+    if (snap !== null) {
+      storedDeadlines = snap;
+      tracker.commitPersist(snap);
+    }
+    const prevReal = lastRealDeadlines.get(leaseID) ?? 0;
+    if (atMS + oracle.config.lease_ttl_ms > prevReal) {
+      lastRealDeadlines.set(leaseID, atMS + oracle.config.lease_ttl_ms);
+    }
+    extendLease(oracle, leaseID, promisedDeadlineMS);
+  };
+
+  const doEvictAndSyncWake = async () => {
+    if (currentlyEvicted) {
+      return;
+    }
+    await evictDurableObject(stub);
+    currentlyEvicted = true;
+    evictedCount++;
+    if (oracle.initialized) {
+      const activeSeeds: ActiveLeaseSeed[] = [];
+      for (const l of oracle.leases) {
+        if (l.status === "active") {
+          activeSeeds.push({
+            leaseID: l.lease_id,
+            grantedDeadlineMS: grantedDeadlines.get(l.lease_id)!,
+          });
+        }
       }
+      const effective = tracker.restoreOnWake(activeSeeds, storedDeadlines, oracle.config.lease_ttl_ms);
+      for (const [id, eff] of effective) {
+        // Wake grace must never exceed lastRealDeadline + floor(ttl/2).
+        const maxAllowed = (lastRealDeadlines.get(id) ?? 0) + graceMS;
+        expect(eff, `seed=${seed} lease=${id} exceeded wake grace bound`).toBeLessThanOrEqual(maxAllowed);
+        extendLease(oracle, id, eff);
+      }
+    }
+  };
+
+  const maybeEvict = async () => {
+    if (opts.evictEveryRequest || rng() < 0.25) {
+      await doEvictAndSyncWake();
     }
   };
 
@@ -116,6 +173,7 @@ async function runSeedThroughRealDO(seed: number): Promise<void> {
     expectedStatus: number,
     expectedBodyObj: unknown,
   ) => {
+    currentlyEvicted = false;
     if (doReply.status !== expectedStatus) {
       throw new Error(
         `seed ${seed} (evictions=${evictedCount}) @ ${stepLabel}: status=${doReply.status}, want ${expectedStatus}\nDO body: ${doReply.body}`,
@@ -130,7 +188,7 @@ async function runSeedThroughRealDO(seed: number): Promise<void> {
     }
   };
 
-  // Step 0: init from runner-0 (and optional duplicate/conflicting init).
+  // Step 0: init from runner-0.
   const initCmd: InitCommand = {
     build_id: bid,
     runner_id: "r0",
@@ -141,49 +199,61 @@ async function runSeedThroughRealDO(seed: number): Promise<void> {
   };
   {
     const raw = JSON.stringify({ version: ProtocolVersion, ...initCmd, build_id: undefined });
-    syncOracleWake(now);
     const out = decideInit(oracle, now, initCmd);
-    for (const ev of out.events) applyEvent(oracle, ev, { trustedInit: true });
-    const rep = await stub.init(now, bid, raw);
+    applyOracleEvents(out.events, true);
+    const rep = await stub.init(bid, raw, now);
     assertMatch("init", rep, 200, { version: ProtocolVersion, ...out.response });
-    await maybeEvict("after-init");
+    await maybeEvict();
   }
 
-  // Track active leases per runner for realistic interleavings (heartbeats, expiries, stale/dup reports, conflicts).
   const runnerLeases = new Map<
     string,
     { leaseID: number; reqID: string; attempts: { attempt_id: string; test_index: number; generation: number }[] }
   >();
   let reqSeq = 1;
+  let deadLeaseID: number | null = null;
 
-  for (let step = 0; step < 45; step++) {
-    now += 500 + randInt(rng, 4_500); // occasionally jumps past TTL (10_000 ms)
-    if (rng() < 0.12) {
-      now += ttlMS + 500; // force lease expiry
+  // In deadRunner mode, r0 takes one lease and then dies forever while other runners continue
+  // working and the DO is evicted after every single request.
+  if (opts.deadRunner) {
+    const leaseCmd: LeaseCommand = { runner_id: "r0", machine_index: 0, request_id: `req-${reqSeq++}` };
+    const raw = JSON.stringify({ version: ProtocolVersion, ...leaseCmd });
+    const out = decideLease(oracle, now, leaseCmd);
+    applyOracleEvents(out.events);
+    if (!out.error && out.response?.status === "leased") {
+      extendOracleLease(out.response.lease_id, out.response.deadline_ms, now);
+      deadLeaseID = out.response.lease_id;
+    }
+    const rep = await stub.lease(raw, now);
+    assertMatch("dead-r0-lease", rep, 200, { version: ProtocolVersion, ...out.response });
+    await maybeEvict();
+  }
+
+  const totalSteps = opts.deadRunner ? 35 : 45;
+  for (let step = 0; step < totalSteps; step++) {
+    now += 1_000 + randInt(rng, 4_500);
+    if (!opts.deadRunner && rng() < 0.12) {
+      now += ttlMS + graceMS + 500;
     }
 
-    const rIdx = randInt(rng, numRunners);
+    // In deadRunner mode, r0 never sends another request after leasing.
+    const rIdx = opts.deadRunner ? 1 + randInt(rng, numRunners - 1) : randInt(rng, numRunners);
     const runnerID = `r${rIdx}`;
     const actionRoll = rng();
     const held = runnerLeases.get(runnerID);
 
     if (actionRoll < 0.12) {
-      // Status check
-      syncOracleWake(now);
       const out = decideStatus(oracle, now);
-      for (const ev of out.events) applyEvent(oracle, ev);
+      applyOracleEvents(out.events);
       const rep = await stub.status(now);
       assertMatch(`step-${step}-status`, rep, 200, { version: ProtocolVersion, ...out.response });
     } else if (actionRoll < 0.22) {
-      // ListTests check
       const listCmd = { cursor: 0, limit: 3, retried: rng() < 0.5 };
-      syncOracleWake(now);
       const out = decideListTests(oracle, now, listCmd);
-      for (const ev of out.events) applyEvent(oracle, ev);
-      const rep = await stub.listTests(now, listCmd);
+      applyOracleEvents(out.events);
+      const rep = await stub.listTests(listCmd, now);
       assertMatch(`step-${step}-list`, rep, 200, { version: ProtocolVersion, ...out.response });
     } else if (actionRoll < 0.28) {
-      // Divergent or duplicate init
       const div = rng() < 0.5;
       const c2: InitCommand = {
         build_id: bid,
@@ -201,10 +271,9 @@ async function runSeedThroughRealDO(seed: number): Promise<void> {
         tests: c2.tests,
         predictions_ms: c2.predictions_ms,
       });
-      syncOracleWake(now);
       const out = decideInit(oracle, now, c2);
-      for (const ev of out.events) applyEvent(oracle, ev);
-      const rep = await stub.init(now, bid, raw);
+      applyOracleEvents(out.events);
+      const rep = await stub.init(bid, raw, now);
       if (out.error) {
         assertMatch(`step-${step}-init-err`, rep, out.error.httpStatus, {
           version: ProtocolVersion,
@@ -214,22 +283,19 @@ async function runSeedThroughRealDO(seed: number): Promise<void> {
         assertMatch(`step-${step}-init-dup`, rep, 200, { version: ProtocolVersion, ...out.response });
       }
     } else if (held && actionRoll < 0.52) {
-      // Heartbeat
       const hbCmd = { runner_id: runnerID, lease_id: held.leaseID };
       const raw = JSON.stringify({ version: ProtocolVersion, ...hbCmd });
-      syncOracleWake(now);
       const out = decideHeartbeat(oracle, now, hbCmd);
-      for (const ev of out.events) applyEvent(oracle, ev);
+      applyOracleEvents(out.events);
       if (!out.error && out.response?.held) {
-        extendLease(oracle, hbCmd.lease_id, out.response.deadline_ms);
+        extendOracleLease(hbCmd.lease_id, out.response.deadline_ms, now);
       }
-      const rep = await stub.heartbeat(now, raw);
+      const rep = await stub.heartbeat(raw, now);
       assertMatch(`step-${step}-hb`, rep, 200, { version: ProtocolVersion, ...out.response });
       if (!out.response?.held) {
         runnerLeases.delete(runnerID);
       }
     } else if (held && actionRoll < 0.85) {
-      // Report (normal, duplicate, or stale if expired)
       const outcomes: Outcome[] = ["passed", "passed", "passed", "skipped", "error", "failed"];
       const repCmd: ReportCommand = {
         runner_id: runnerID,
@@ -248,17 +314,14 @@ async function runSeedThroughRealDO(seed: number): Promise<void> {
         }),
       };
       const raw = JSON.stringify({ version: ProtocolVersion, ...repCmd });
-      syncOracleWake(now);
       const out = decideReport(oracle, now, repCmd);
-      for (const ev of out.events) applyEvent(oracle, ev);
-      const rep = await stub.report(now, raw);
+      applyOracleEvents(out.events);
+      const rep = await stub.report(raw, now);
       assertMatch(`step-${step}-report`, rep, 200, { version: ProtocolVersion, ...out.response });
-      // Keep held 20% of the time to trigger duplicate/conflict report on a later step!
       if (rng() >= 0.2) {
         runnerLeases.delete(runnerID);
       }
     } else {
-      // Lease (fresh or repeated request_id)
       const reuseReq = held && rng() < 0.4;
       const leaseCmd: LeaseCommand = {
         runner_id: runnerID,
@@ -266,13 +329,12 @@ async function runSeedThroughRealDO(seed: number): Promise<void> {
         request_id: reuseReq ? held.reqID : `req-${reqSeq++}`,
       };
       const raw = JSON.stringify({ version: ProtocolVersion, ...leaseCmd });
-      syncOracleWake(now);
       const out = decideLease(oracle, now, leaseCmd);
-      for (const ev of out.events) applyEvent(oracle, ev);
+      applyOracleEvents(out.events);
       if (!out.error && out.response?.status === "leased") {
-        extendLease(oracle, out.response.lease_id, out.response.deadline_ms);
+        extendOracleLease(out.response.lease_id, out.response.deadline_ms, now);
       }
-      const rep = await stub.lease(now, raw);
+      const rep = await stub.lease(raw, now);
       if (out.error) {
         assertMatch(`step-${step}-lease-err`, rep, out.error.httpStatus, {
           version: ProtocolVersion,
@@ -290,22 +352,24 @@ async function runSeedThroughRealDO(seed: number): Promise<void> {
       }
     }
 
-    await maybeEvict(`after-step-${step}`);
+    await maybeEvict();
 
-    if (stateVerdict(oracle) !== "running" && step > 10 && rng() < 0.4) {
+    if (!opts.deadRunner && stateVerdict(oracle) !== "running" && step > 10 && rng() < 0.4) {
       break;
     }
   }
 
-  // Final eviction + status check verifying full SQLite replay parity.
-  if (!pendingWakeReset) {
-    await evictDurableObject(stub);
-    pendingWakeReset = true;
+  // In deadRunner mode, verify r0's abandoned lease expired well before build timeout.
+  if (opts.deadRunner && deadLeaseID !== null) {
+    const deadLease = oracle.leases[deadLeaseID - 1]!;
+    expect(deadLease.status, `seed=${seed}: dead runner lease ${deadLeaseID} never expired`).not.toBe("active");
   }
+
+  // Final eviction + status check verifying full SQLite replay parity.
+  await doEvictAndSyncWake();
   now += 100;
-  syncOracleWake(now);
   const finalOut = decideStatus(oracle, now);
-  for (const ev of finalOut.events) applyEvent(oracle, ev);
+  applyOracleEvents(finalOut.events);
   const finalRep = await stub.status(now);
   assertMatch("final-status", finalRep, 200, { version: ProtocolVersion, ...finalOut.response });
 }
@@ -316,14 +380,42 @@ describe("Durable Object seeded eviction DST", () => {
       "BUNPO_DO_DST_SEED"
     ];
     if (single) {
-      await runSeedThroughRealDO(Number(single));
+      await runSeedThroughRealDO(Number(single), { prefix: "dst-seed" });
       return;
     }
 
     const totalSeeds = 200;
     for (let seed = 1; seed <= totalSeeds; seed++) {
       try {
-        await runSeedThroughRealDO(seed);
+        await runSeedThroughRealDO(seed, { prefix: "dst-seed" });
+      } catch (err) {
+        throw new Error(
+          `${err instanceof Error ? err.message : String(err)}\n\nReplay:\n  BUNPO_DO_DST_SEED=${seed} npm run test:do`,
+        );
+      }
+    }
+  });
+
+  it("matches pure core with eviction after EVERY request and expires dead runners within ttl/2", async () => {
+    const single = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+      "BUNPO_DO_DST_SEED"
+    ];
+    if (single) {
+      await runSeedThroughRealDO(Number(single), {
+        prefix: "dst-every",
+        evictEveryRequest: true,
+        deadRunner: true,
+      });
+      return;
+    }
+
+    for (let seed = 1; seed <= 50; seed++) {
+      try {
+        await runSeedThroughRealDO(seed, {
+          prefix: "dst-every",
+          evictEveryRequest: true,
+          deadRunner: true,
+        });
       } catch (err) {
         throw new Error(
           `${err instanceof Error ? err.message : String(err)}\n\nReplay:\n  BUNPO_DO_DST_SEED=${seed} npm run test:do`,

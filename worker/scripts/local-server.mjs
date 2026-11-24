@@ -1,13 +1,9 @@
 // Starts the production Worker (src/index.ts) on local workerd via Miniflare
 // for the Go black-box protocol suite and bunpo --queue E2E tests.
 //
-// Why Miniflare here instead of `wrangler dev --local`:
-// workerd evicts idle Durable Objects after 10 seconds locally (vs 70-140 s in
-// production), which collides with TestProtocolBlackBox's 10.08 s single-runner
-// idle sleep at the 10 s minimum lease TTL. Setting unsafePreventEviction in
-// this test harness prevents the local 10 s dev timer from firing mid-sleep
-// without altering production Worker code or relaxing protocol TTL bounds.
-// Real DO eviction is tested separately in test/worker.test.ts and test/do-dst.test.ts.
+// Runs with real local workerd Durable Object eviction (10 s idle hibernation)
+// — no unsafePreventEviction — so black-box and E2E tests exercise the exact
+// hibernation and lease-deadline persistence behavior used in production.
 
 import { buildSync } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
@@ -54,8 +50,8 @@ const mf = new Miniflare(
       BUNPO_QUEUE_READ_TOKEN: readToken,
     },
     durableObjects: {
-      BUILD_DO: { className: "BuildDO", useSQLite: true, unsafePreventEviction: true },
-      BUILD_INDEX: { className: "BuildIndex", useSQLite: true, unsafePreventEviction: true },
+      BUILD_DO: { className: "BuildDO", useSQLite: true },
+      BUILD_INDEX: { className: "BuildIndex", useSQLite: true },
     },
   }),
 );

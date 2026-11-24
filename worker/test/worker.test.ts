@@ -1,7 +1,7 @@
 import { env, exports } from "cloudflare:workers";
 import { evictDurableObject, listDurableObjectIds, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
-import { type BuildDO, RETENTION_MS } from "../src/build-do.ts";
+import { describe, expect, it, vi } from "vitest";
+import { BuildDO, INDEX_RETRY_INTERVAL_MS, RETENTION_MS } from "../src/build-do.ts";
 import workerEntry from "../src/index.ts";
 
 const WRITE_TOKEN = "test-write-token-0123456789abcdef";
@@ -106,6 +106,29 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     expect((r.json["error"] as { code: string }).code).toBe("invalid_request");
   });
 
+  it("leaves SQLite storage empty when GET hits an unknown build ID", async () => {
+    const bid = "unknown-empty-db-check";
+    const r = await req("GET", `/api/v1/builds/${bid}`, READ_TOKEN);
+    expect(r.status).toBe(404);
+    expect((r.json["error"] as { code: string }).code).toBe("build_not_found");
+
+    const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
+    const inspection = await runInDurableObject(stub, async (_inst, state) => {
+      const dbSize = state.storage.sql.databaseSize;
+      const alarm = await state.storage.getAlarm();
+      const tables = state.storage.sql
+        .exec<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'",
+        )
+        .toArray();
+      return { tableCount: tables.length, dbSize, alarm };
+    });
+    expect(inspection.tableCount).toBe(0);
+    // An untouched SQLite DO in workerd occupies at most one empty 4 KiB header page.
+    expect(inspection.dbSize).toBeLessThanOrEqual(4096);
+    expect(inspection.alarm).toBeNull();
+  });
+
   it("enforces body size while streaming without Content-Length", async () => {
     // Stream > 1 MiB to /lease without Content-Length header.
     const chunk = new Uint8Array(64 * 1024).fill(0x20);
@@ -196,6 +219,105 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     expect(st.json["verdict"]).toBe("passed");
   });
 
+  it("expires a dead runner lease within ttl/2 even when DO hibernates before every poll", async () => {
+    const bid = "dead-runner-hibernation";
+    const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
+    const ttlMS = 15_000;
+    const graceMS = Math.floor(ttlMS / 2); // 7,500 ms
+    let now = Date.now();
+
+    const initRaw = makeInitBody({
+      config: {
+        machines: 2,
+        lease_ttl_ms: ttlMS,
+        build_timeout_ms: 300_000,
+        max_attempts: 3,
+        max_batch: 1,
+      },
+      tests: ["tests/a.py", "tests/b.py"],
+      predictions_ms: [200, 100],
+    });
+    const initR = await stub.init(bid, initRaw, now);
+    expect(initR.status).toBe(200);
+
+    // Runner A leases tests/a.py and heartbeats twice (forcing a lease_deadlines meta write), then dies.
+    const lA = await stub.lease(
+      JSON.stringify({ version: 1, runner_id: "runner-a", machine_index: 0, request_id: "a-1" }),
+      now,
+    );
+    expect(lA.status).toBe(200);
+    const leaseA = JSON.parse(lA.body) as { lease_id: number; attempts: { test: string }[] };
+    expect(leaseA.attempts[0]!.test).toBe("tests/a.py");
+
+    // Heartbeat past grace triggers one meta write; then runner A stops forever.
+    now += 10_000;
+    const hbA = await stub.heartbeat(
+      JSON.stringify({ version: 1, runner_id: "runner-a", lease_id: leaseA.lease_id }),
+      now,
+    );
+    expect(hbA.status).toBe(200);
+    expect((JSON.parse(hbA.body) as { held: boolean }).held).toBe(true);
+    const lastRealDeadlineA = now + ttlMS;
+
+    // Runner B finishes tests/b.py.
+    const lB = await stub.lease(
+      JSON.stringify({ version: 1, runner_id: "runner-b", machine_index: 1, request_id: "b-1" }),
+      now,
+    );
+    const leaseB = JSON.parse(lB.body) as {
+      lease_id: number;
+      attempts: { attempt_id: string; test_index: number; generation: number }[];
+    };
+    await stub.report(
+      JSON.stringify({
+        version: 1,
+        runner_id: "runner-b",
+        lease_id: leaseB.lease_id,
+        results: [
+          {
+            attempt_id: leaseB.attempts[0]!.attempt_id,
+            test_index: leaseB.attempts[0]!.test_index,
+            generation: leaseB.attempts[0]!.generation,
+            outcome: "passed",
+            timed: true,
+            duration_ms: 80,
+          },
+        ],
+      }),
+      now + 100,
+    );
+
+    // Now Runner B polls every 12 s with a full DO eviction before EVERY poll.
+    // Under the old reset-on-wake rule this stayed "wait" forever; under LeaseDeadlineTracker
+    // runner-a's lease MUST expire by lastRealDeadlineA + graceMS.
+    let reapedAt: number | null = null;
+    for (let poll = 1; poll <= 5; poll++) {
+      now += 12_000;
+      await evictDurableObject(stub);
+      const r = await stub.lease(
+        JSON.stringify({ version: 1, runner_id: "runner-b", machine_index: 1, request_id: `b-poll-${poll}` }),
+        now,
+      );
+      expect(r.status).toBe(200);
+      const parsed = JSON.parse(r.body) as {
+        status: string;
+        attempts?: { test: string; generation: number }[];
+      };
+      if (parsed.status === "leased") {
+        expect(parsed.attempts![0]!.test).toBe("tests/a.py");
+        expect(parsed.attempts![0]!.generation).toBe(2);
+        reapedAt = now;
+        break;
+      }
+      expect(parsed.status).toBe("wait");
+      // Never still waiting once strictly past lastRealDeadlineA + graceMS.
+      expect(now).toBeLessThan(lastRealDeadlineA + graceMS);
+    }
+    expect(reapedAt).not.toBeNull();
+    expect(reapedAt!).toBeGreaterThanOrEqual(lastRealDeadlineA);
+    expect(reapedAt!).toBeLessThanOrEqual(lastRealDeadlineA + graceMS + 12_000);
+  });
+
   it("handles deadline alarm, +7d cleanup alarm, duplicate alarm delivery, and re-init after deleteAll", async () => {
     const bid = "alarm-lifecycle";
     const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
@@ -256,7 +378,107 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     expect(ran).toBe(true);
   });
 
-  it("aborts DO on storage failure without diverging in-memory state", async () => {
+  it("restores a missing alarm on wake for both running and terminal builds", async () => {
+    const bid = "alarm-wake-restore";
+    const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
+
+    const initR = await req(
+      "POST",
+      `/api/v1/builds/${bid}/init`,
+      WRITE_TOKEN,
+      makeInitBody({ tests: ["only.py"], predictions_ms: [100] }),
+    );
+    expect(initR.status).toBe(200);
+    const deadlineMS = initR.json["deadline_ms"] as number;
+
+    // Delete alarm while running, evict, wake -> alarm restored to deadlineMS.
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.deleteAlarm();
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
+    await evictDurableObject(stub);
+
+    const stRunning = await req("GET", `/api/v1/builds/${bid}`, READ_TOKEN);
+    expect(stRunning.status).toBe(200);
+    const restoredRunning = await runInDurableObject(stub, async (_inst, state) => state.storage.getAlarm());
+    expect(restoredRunning).toBe(deadlineMS);
+
+    // Finish the build, delete +7d cleanup alarm, evict, wake -> alarm restored to finishedAt + RETENTION_MS.
+    const l = await req(
+      "POST",
+      `/api/v1/builds/${bid}/lease`,
+      WRITE_TOKEN,
+      JSON.stringify({ version: 1, runner_id: "r1", machine_index: 0, request_id: "q1" }),
+    );
+    const leaseID = l.json["lease_id"] as number;
+    const rep = await req(
+      "POST",
+      `/api/v1/builds/${bid}/report`,
+      WRITE_TOKEN,
+      JSON.stringify({
+        version: 1,
+        runner_id: "r1",
+        lease_id: leaseID,
+        results: [
+          { attempt_id: "0.1", test_index: 0, generation: 1, outcome: "passed", timed: true, duration_ms: 50 },
+        ],
+      }),
+    );
+    expect(rep.status).toBe(200);
+    const stDone = await req("GET", `/api/v1/builds/${bid}`, READ_TOKEN);
+    const finishedAt = stDone.json["finished_at_ms"] as number;
+
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.deleteAlarm();
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
+    await evictDurableObject(stub);
+
+    const stAfter = await req("GET", `/api/v1/builds/${bid}`, READ_TOKEN);
+    expect(stAfter.status).toBe(200);
+    expect(stAfter.json["verdict"]).toBe("passed");
+    const restoredTerminal = await runInDurableObject(stub, async (_inst, state) => state.storage.getAlarm());
+    expect(restoredTerminal).toBe(finishedAt + RETENTION_MS);
+  });
+
+  it("replays existing builds even if MAX_TESTS is lowered below their test count", async () => {
+    const bid = "lowered-max-tests-replay";
+    const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
+
+    const body5 = makeInitBody({
+      tests: ["t/1.py", "t/2.py", "t/3.py", "t/4.py", "t/5.py"],
+      predictions_ms: [10, 20, 30, 40, 50],
+    });
+    const initR = await req("POST", `/api/v1/builds/${bid}/init`, WRITE_TOKEN, body5);
+    expect(initR.status).toBe(200);
+
+    // Construct a fresh BuildDO against the same SQLite storage with MAX_TESTS lowered to "2".
+    const replayRes = await runInDurableObject(stub, async (_inst, state) => {
+      const loweredEnv = { ...env, MAX_TESTS: "2" } as unknown as Env;
+      const loweredDO = new BuildDO(state, loweredEnv);
+      await state.blockConcurrencyWhile(async () => {});
+      const st = await loweredDO.status();
+      const dupInit = await loweredDO.init(bid, body5);
+      return { st, dupInit };
+    });
+    expect(replayRes.st.status).toBe(200);
+    expect((JSON.parse(replayRes.st.body) as { counts: { total: number } }).counts.total).toBe(5);
+    expect(replayRes.dupInit.status).toBe(200);
+    expect((JSON.parse(replayRes.dupInit.body) as { created: boolean }).created).toBe(false);
+
+    // A NEW uninitialized build under MAX_TESTS="2" still rejects >2 tests with 400 invalid_request.
+    const freshStub = env.BUILD_DO.get(env.BUILD_DO.idFromName("lowered-max-tests-new"));
+    const newRes = await runInDurableObject(freshStub, async (_inst, state) => {
+      const loweredEnv = { ...env, MAX_TESTS: "2" } as unknown as Env;
+      const loweredDO = new BuildDO(state, loweredEnv);
+      await state.blockConcurrencyWhile(async () => {});
+      return loweredDO.init("lowered-max-tests-new", body5);
+    });
+    expect(newRes.status).toBe(400);
+    expect((JSON.parse(newRes.body) as { error: { code: string } }).error.code).toBe("invalid_request");
+  });
+
+  it("aborts DO on storage failure without diverging state and logs structured JSON without secrets", async () => {
     const bid = "storage-fail-abort";
     const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
 
@@ -270,15 +492,30 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
       );
     });
 
-    // Note: ctx.abort() tears down the DO cleanly; calling the Worker returns 503 storage_error.
-    const failedLease = await req(
-      "POST",
-      `/api/v1/builds/${bid}/lease`,
-      WRITE_TOKEN,
-      JSON.stringify({ version: 1, runner_id: "runner-a", machine_index: 0, request_id: "q-fail" }),
-    );
-    expect(failedLease.status).toBe(503);
-    expect((failedLease.json["error"] as { code: string }).code).toBe("storage_error");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failedLease = await req(
+        "POST",
+        `/api/v1/builds/${bid}/lease`,
+        WRITE_TOKEN,
+        JSON.stringify({ version: 1, runner_id: "runner-a", machine_index: 0, request_id: "q-fail" }),
+      );
+      expect(failedLease.status).toBe(503);
+      expect((failedLease.json["error"] as { code: string }).code).toBe("storage_error");
+
+      expect(errSpy).toHaveBeenCalled();
+      const rawLog = String(errSpy.mock.calls[0]![0]);
+      expect(rawLog).not.toContain(WRITE_TOKEN);
+      expect(rawLog).not.toContain("q-fail");
+      const parsedLog = JSON.parse(rawLog) as Record<string, unknown>;
+      expect(parsedLog["event"]).toBe("do_rpc_error");
+      expect(parsedLog["build_id"]).toBe(bid);
+      expect(parsedLog["method"]).toBe("lease");
+      expect(typeof parsedLog["error_name"]).toBe("string");
+      expect(typeof parsedLog["error_message"]).toBe("string");
+    } finally {
+      errSpy.mockRestore();
+    }
 
     // Acquire a fresh stub because ctx.abort() permanently invalidates the aborted stub.
     const freshStub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
@@ -323,50 +560,97 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     expect((stB.json["counts"] as { total: number; pending: number }).pending).toBe(2);
   });
 
-  it("repairs stale BuildIndex entry on next wake/request if final index update failed", async () => {
+  it("throttles failed BuildIndex retries to once per minute and repairs on wake without blocking replies", async () => {
     const bid = "index-repair-test";
     const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
 
-    const initR = await req(
-      "POST",
-      `/api/v1/builds/${bid}/init`,
-      WRITE_TOKEN,
-      makeInitBody({ tests: ["only.py"], predictions_ms: [100] }),
+    let now = Date.now();
+    const initR = await stub.init(
+      bid,
+      makeInitBody({ tests: ["only.py"], predictions_ms: [100], config: { machines: 1, lease_ttl_ms: 30_000, build_timeout_ms: 300_000, max_attempts: 3, max_batch: 1 } }),
+      now,
     );
     expect(initR.status).toBe(200);
 
-    const leaseR = await req(
-      "POST",
-      `/api/v1/builds/${bid}/lease`,
-      WRITE_TOKEN,
+    const leaseR = await stub.lease(
       JSON.stringify({ version: 1, runner_id: "r1", machine_index: 0, request_id: "q1" }),
+      now,
     );
     expect(leaseR.status).toBe(200);
-    const leaseID = leaseR.json["lease_id"] as number;
+    const leaseID = (JSON.parse(leaseR.body) as { lease_id: number }).lease_id;
 
-    // Force the BuildIndex RPC to fail during the final report by sabotaging env.BUILD_INDEX inside the DO.
+    // Force BuildIndex RPC to fail and count how many times it is called.
     await runInDurableObject(stub, async (inst: BuildDO) => {
-      const target = inst as unknown as { env: { BUILD_INDEX: unknown } };
-      const realIdx = target.env.BUILD_INDEX;
+      const target = inst as unknown as { env: { BUILD_INDEX: unknown }; __failCount?: number };
+      target.__failCount = 0;
       target.env = {
         ...target.env,
         BUILD_INDEX: {
           idFromName: () => "broken",
           get: () => ({
             upsert: async () => {
+              target.__failCount = (target.__failCount ?? 0) + 1;
               throw new Error("simulated BuildIndex outage");
             },
           }),
         },
       };
-      // Keep reference just to avoid unused var lint.
-      void realIdx;
     });
 
-    const repR = await req(
-      "POST",
-      `/api/v1/builds/${bid}/report`,
-      WRITE_TOKEN,
+    // Trigger an init conflict so BuildIndex sync is attempted and fails while build is still running.
+    now += 1_000;
+    const confR = await stub.init(
+      bid,
+      makeInitBody({
+        runner_id: "r2",
+        tests: ["extra.py", "only.py"],
+        predictions_ms: [100, 100],
+      }),
+      now,
+    );
+    expect(confR.status).toBe(409);
+
+    const callsAfterConflict = await runInDurableObject(
+      stub,
+      async (inst: BuildDO) => (inst as unknown as { __failCount: number }).__failCount,
+    );
+    expect(callsAfterConflict).toBe(1);
+
+    // Send 4 heartbeats within 60 s (at +10s, +20s, +30s, +40s):
+    // BuildIndex must NOT be retried on every heartbeat.
+    for (let i = 1; i <= 4; i++) {
+      now += 10_000;
+      const hb = await stub.heartbeat(
+        JSON.stringify({ version: 1, runner_id: "r1", lease_id: leaseID }),
+        now,
+      );
+      expect(hb.status).toBe(200);
+      expect((JSON.parse(hb.body) as { held: boolean }).held).toBe(true);
+    }
+    const callsWithinMinute = await runInDurableObject(
+      stub,
+      async (inst: BuildDO) => (inst as unknown as { __failCount: number }).__failCount,
+    );
+    expect(callsWithinMinute).toBe(1);
+
+    // Advance another 20 s (total 60 s since failed attempt, still within 30 s lease TTL):
+    // exactly one background retry fires via waitUntil.
+    now += INDEX_RETRY_INTERVAL_MS - 40_000;
+    const hbAfterMin = await stub.heartbeat(
+      JSON.stringify({ version: 1, runner_id: "r1", lease_id: leaseID }),
+      now,
+    );
+    expect(hbAfterMin.status).toBe(200);
+    expect((JSON.parse(hbAfterMin.body) as { held: boolean }).held).toBe(true);
+    await expect
+      .poll(async () =>
+        runInDurableObject(stub, async (inst: BuildDO) => (inst as unknown as { __failCount: number }).__failCount),
+      )
+      .toBe(2);
+
+    // Now finish the build while BuildIndex is still broken; client's report still succeeds.
+    now += 1_000;
+    const repR = await stub.report(
       JSON.stringify({
         version: 1,
         runner_id: "r1",
@@ -382,10 +666,11 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
           },
         ],
       }),
+      now,
     );
-    // Client's committed report still succeeds!
     expect(repR.status).toBe(200);
-    expect(repR.json["verdict"]).toBe("passed");
+    // An init conflict was recorded earlier, so the final verdict is "unresolved" even though all tests passed.
+    expect((JSON.parse(repR.body) as { verdict: string }).verdict).toBe("unresolved");
 
     // BuildIndex still says "running" because the update failed.
     const listBefore = await req("GET", "/api/v1/builds", READ_TOKEN);
@@ -394,17 +679,22 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     );
     expect(bBefore?.verdict).toBe("running");
 
-    // Evict DO so it wakes with real env.BUILD_INDEX and reads index_dirty='1' from SQLite.
+    // Evict DO so it wakes with real env.BUILD_INDEX, compares index_synced meta row against current state,
+    // and repairs BuildIndex in the background without blocking GET.
     await evictDurableObject(stub);
     const st = await req("GET", `/api/v1/builds/${bid}`, READ_TOKEN);
     expect(st.status).toBe(200);
-    expect(st.json["verdict"]).toBe("passed");
+    expect(st.json["verdict"]).toBe("unresolved");
 
-    // BuildIndex is now repaired to "passed"!
-    const listAfter = await req("GET", "/api/v1/builds", READ_TOKEN);
-    const bAfter = (listAfter.json["builds"] as { build_id: string; verdict: string }[]).find(
-      (b) => b.build_id === bid,
-    );
-    expect(bAfter?.verdict).toBe("passed");
+    // BuildIndex is repaired to "unresolved" with has_conflicts=true.
+    await expect
+      .poll(async () => {
+        const listAfter = await req("GET", "/api/v1/builds", READ_TOKEN);
+        const bAfter = (
+          listAfter.json["builds"] as { build_id: string; verdict: string; has_conflicts: boolean }[]
+        ).find((b) => b.build_id === bid);
+        return bAfter ? `${bAfter.verdict}:${bAfter.has_conflicts}` : "missing";
+      })
+      .toBe("unresolved:true");
   });
 });

@@ -475,8 +475,10 @@ func TestProtocolBlackBox(t *testing.T) {
 			t.Fatalf("hb = %+v, err=%v", hb, err)
 		}
 
-		// Wait past TTL so l1 expires, then heartbeat returns held=false and stale_request on old request_id.
-		time.Sleep(time.Duration(env.ttlMS+80) * time.Millisecond)
+		// Wait past TTL plus wake grace (floor(ttl/2) for hibernating Durable Objects,
+		// see docs/queue-protocol.md §5.1) so l1 expires even if the server hibernates
+		// during the idle gap, then verify held=false and 409 stale_request.
+		time.Sleep(time.Duration(env.ttlMS+env.ttlMS/2+200) * time.Millisecond)
 		hbDead, err := wc.Heartbeat(ctx, bid, queue.HeartbeatCommand{RunnerID: "runner-1", LeaseID: l1.LeaseID})
 		if err != nil || hbDead.Held {
 			t.Fatalf("hbDead = %+v, err=%v; want held=false", hbDead, err)

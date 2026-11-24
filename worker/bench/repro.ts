@@ -5,10 +5,12 @@
 // Usage: node bench/repro.ts
 
 import {
+  type ActiveLeaseSeed,
   type Config,
   type InitCommand,
   type QueueEvent,
   type ReportCommand,
+  LeaseDeadlineTracker,
   applyEvent,
   decideInit,
   decideLease,
@@ -18,7 +20,6 @@ import {
   defaultLimits,
   extendLease,
   newState,
-  resetActiveLeaseDeadlines,
 } from "../src/core/index.ts";
 
 function generateTests(count: number): { tests: string[]; predictions: (number | null)[] } {
@@ -212,7 +213,18 @@ for (const testCount of [1_000, 5_000, 10_000, 20_000]) {
           }
         }
       }
-      resetActiveLeaseDeadlines(s, t + 100);
+      const tracker = new LeaseDeadlineTracker();
+      const activeSeeds: ActiveLeaseSeed[] = [];
+      for (let i = 0; i < s.leases.length; i++) {
+        const l = s.leases[i]!;
+        if (l.status === "active") {
+          activeSeeds.push({ leaseID: l.lease_id, grantedDeadlineMS: l.deadline_ms });
+        }
+      }
+      const eff = tracker.restoreOnWake(activeSeeds, null, s.config.lease_ttl_ms);
+      for (const [id, dl] of eff) {
+        extendLease(s, id, dl);
+      }
     });
 
     rows.push({
