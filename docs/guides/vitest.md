@@ -227,6 +227,112 @@ pinned too.
   `bunpo split --index "$INDEX" --plan`, and download the same snapshot in the
   final job before `bunpo merge`.
 
+## Live queue
+
+If your machines have uneven speeds, start at different times, or can be
+preempted, run Bunpō in live-queue mode against `bunpo-server` or the
+Cloudflare Worker instead of static splitting. Prefer static splitting when
+machines are equal and start together, on fork pull requests (GitHub Actions
+withholds secrets from fork PRs, so the queue token is unavailable), or when
+your suite has very slow per-batch startup.
+
+Live-queue mode uses the same `vitest.config.ts` from above because
+`bunpo --queue` sets `BUNPO_TESTS_FILE` before each batch and reads
+`bunpo-times.txt` via `--format lines`. Each leased batch starts a fresh Vitest
+process, so `globalSetup` and `setupFiles` run once per batch rather than once
+per machine. Move slow one-time setup to a step before `bunpo --queue`, or stay
+on static splitting if per-batch startup dominates.
+
+Save this helper as `run-batch.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+mine=()
+while IFS= read -r path; do
+  [ -n "$path" ] && mine+=("$path")
+done < "$BUNPO_TESTS_FILE"
+
+# Given no files, Vitest would run the whole suite.
+if [ "${#mine[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+exec npx vitest run
+```
+
+Then point the workflow at your queue server (`BUNPO_QUEUE_URL` repository
+variable, plus `BUNPO_QUEUE_TOKEN` and `BUNPO_QUEUE_READ_TOKEN` secrets):
+
+```yaml
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        machine: [0, 1, 2, 3]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci
+      - uses: nuggocto/bunpo@v0
+      - uses: actions/cache/restore@v6
+        with:
+          path: .bunpo/timings.json
+          key: bunpo-timings-${{ github.sha }}
+          restore-keys: bunpo-timings-
+      - name: Run tests from the live queue
+        env:
+          INDEX: ${{ strategy.job-index }}
+          TOTAL: ${{ strategy.job-total }}
+          BUNPO_QUEUE_URL: ${{ vars.BUNPO_QUEUE_URL }}
+          BUNPO_QUEUE_TOKEN: ${{ secrets.BUNPO_QUEUE_TOKEN }}
+        run: |
+          npx vitest list --filesOnly |
+            bunpo --queue "$BUNPO_QUEUE_URL" --build "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+              --index "$INDEX" --total "$TOTAL" --format lines --report bunpo-times.txt -- bash run-batch.sh
+
+  bunpo:
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: nuggocto/bunpo@v0
+      - uses: actions/cache/restore@v6
+        with:
+          path: .bunpo/timings.json
+          key: bunpo-timings-${{ github.sha }}
+          restore-keys: bunpo-timings-
+      - name: Check build status
+        env:
+          BUNPO_QUEUE_URL: ${{ vars.BUNPO_QUEUE_URL }}
+          BUNPO_QUEUE_READ_TOKEN: ${{ secrets.BUNPO_QUEUE_READ_TOKEN }}
+        run: bunpo --queue "$BUNPO_QUEUE_URL" --build "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --status
+      - name: Merge timings
+        run: bunpo merge
+      - if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test.result == 'success' }}
+        uses: actions/cache/save@v6
+        with:
+          path: .bunpo/timings.json
+          key: bunpo-timings-${{ github.run_id }}-${{ github.run_attempt }}
+```
+
 ## If something fails
 
 - **`record` says files were not assigned to this machine.** The runner ran
