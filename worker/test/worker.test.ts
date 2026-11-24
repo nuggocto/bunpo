@@ -403,7 +403,8 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     const restoredRunning = await runInDurableObject(stub, async (_inst, state) => state.storage.getAlarm());
     expect(restoredRunning).toBe(deadlineMS);
 
-    // Finish the build, delete +7d cleanup alarm, evict, wake -> alarm restored to finishedAt + RETENTION_MS.
+    // Finish the build: verify terminal +7d cleanup alarm is scheduled immediately,
+    // then delete it, evict, wake -> alarm restored to finishedAt + RETENTION_MS.
     const l = await req(
       "POST",
       `/api/v1/builds/${bid}/lease`,
@@ -427,6 +428,9 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     expect(rep.status).toBe(200);
     const stDone = await req("GET", `/api/v1/builds/${bid}`, READ_TOKEN);
     const finishedAt = stDone.json["finished_at_ms"] as number;
+
+    const scheduledTerminal = await runInDurableObject(stub, async (_inst, state) => state.storage.getAlarm());
+    expect(scheduledTerminal).toBe(finishedAt + RETENTION_MS);
 
     await runInDurableObject(stub, async (_inst, state) => {
       await state.storage.deleteAlarm();
@@ -485,8 +489,10 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     const initR = await req("POST", `/api/v1/builds/${bid}/init`, WRITE_TOKEN, makeInitBody());
     expect(initR.status).toBe(200);
 
-    // Inject a one-shot SQLite transaction failure by creating a failing trigger on event_log.
-    await runInDurableObject(stub, async (_inst, state) => {
+    // Inject a one-shot SQLite transaction failure and tag the live DO instance so we can
+    // confirm ctx.abort() actually tore down the isolate instead of keeping it alive in memory.
+    await runInDurableObject(stub, async (inst, state) => {
+      (inst as unknown as { __preAbortTag?: boolean }).__preAbortTag = true;
       state.storage.sql.exec(
         "CREATE TRIGGER fail_once BEFORE INSERT ON event_log BEGIN SELECT RAISE(ABORT, 'injected disk failure'); END",
       );
@@ -519,9 +525,11 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
 
     // Acquire a fresh stub because ctx.abort() permanently invalidates the aborted stub.
     const freshStub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
-    await runInDurableObject(freshStub, async (_inst, state) => {
+    const tagAfterAbort = await runInDurableObject(freshStub, async (inst, state) => {
       state.storage.sql.exec("DROP TRIGGER IF EXISTS fail_once");
+      return (inst as unknown as { __preAbortTag?: boolean }).__preAbortTag;
     });
+    expect(tagAfterAbort).toBeUndefined();
     const st = await req("GET", `/api/v1/builds/${bid}`, READ_TOKEN);
     expect(st.status).toBe(200);
     const counts = st.json["counts"] as { pending: number; leased: number };
@@ -696,5 +704,195 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
         return bAfter ? `${bAfter.verdict}:${bAfter.has_conflicts}` : "missing";
       })
       .toBe("unresolved:true");
+
+    // Once repaired and persisted to meta.index_synced, neither the live DO (>60 s later)
+    // nor a freshly woken DO should call BuildIndex.upsert again.
+    await runInDurableObject(stub, async (inst: BuildDO) => {
+      const target = inst as unknown as { env: { BUILD_INDEX: unknown }; __spuriousCalls?: number };
+      target.__spuriousCalls = 0;
+      target.env = {
+        ...target.env,
+        BUILD_INDEX: {
+          idFromName: () => "spy",
+          get: () => ({
+            upsert: async () => {
+              target.__spuriousCalls = (target.__spuriousCalls ?? 0) + 1;
+            },
+          }),
+        },
+      };
+    });
+    const stLive = await stub.status(now + INDEX_RETRY_INTERVAL_MS + 5_000);
+    expect(stLive.status).toBe(200);
+    const liveSpurious = await runInDurableObject(
+      stub,
+      async (inst: BuildDO) => (inst as unknown as { __spuriousCalls: number }).__spuriousCalls,
+    );
+    expect(liveSpurious).toBe(0);
+
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (inst: BuildDO) => {
+      const target = inst as unknown as { env: { BUILD_INDEX: unknown }; __spuriousCalls?: number };
+      target.__spuriousCalls = 0;
+      target.env = {
+        ...target.env,
+        BUILD_INDEX: {
+          idFromName: () => "spy",
+          get: () => ({
+            upsert: async () => {
+              target.__spuriousCalls = (target.__spuriousCalls ?? 0) + 1;
+            },
+          }),
+        },
+      };
+    });
+    const stSynced = await stub.status(now + INDEX_RETRY_INTERVAL_MS + 10_000);
+    expect(stSynced.status).toBe(200);
+    const spuriousCalls = await runInDurableObject(
+      stub,
+      async (inst: BuildDO) => (inst as unknown as { __spuriousCalls: number }).__spuriousCalls,
+    );
+    expect(spuriousCalls).toBe(0);
+  });
+
+  it("repairs verdict-only BuildIndex mismatch on wake and prunes closed leases from lease_deadlines", async () => {
+    const bid = "verdict-repair-and-prune";
+    const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
+    let now = Date.now();
+    const ttlMS = 10_000;
+
+    await stub.init(
+      bid,
+      makeInitBody({
+        config: { machines: 3, lease_ttl_ms: ttlMS, build_timeout_ms: 300_000, max_attempts: 3, max_batch: 1 },
+        tests: ["t/1.py", "t/2.py", "t/3.py"],
+        predictions_ms: [100, 100, 100],
+      }),
+      now,
+    );
+
+    // Three leases: l1 reports (closed by report), l2 expires (closed by expiry), l3 heartbeats past grace.
+    const l1 = JSON.parse(
+      (await stub.lease(JSON.stringify({ version: 1, runner_id: "r1", machine_index: 0, request_id: "q1" }), now)).body,
+    ) as { lease_id: number; attempts: { attempt_id: string; test_index: number; generation: number }[] };
+    const l2 = JSON.parse(
+      (await stub.lease(JSON.stringify({ version: 1, runner_id: "r2", machine_index: 1, request_id: "q2" }), now)).body,
+    ) as { lease_id: number };
+    const l3 = JSON.parse(
+      (await stub.lease(JSON.stringify({ version: 1, runner_id: "r3", machine_index: 2, request_id: "q3" }), now)).body,
+    ) as { lease_id: number; attempts: { attempt_id: string; test_index: number; generation: number }[] };
+
+    // Close l1 via report at t+1s.
+    now += 1_000;
+    await stub.report(
+      JSON.stringify({
+        version: 1,
+        runner_id: "r1",
+        lease_id: l1.lease_id,
+        results: [
+          {
+            attempt_id: l1.attempts[0]!.attempt_id,
+            test_index: l1.attempts[0]!.test_index,
+            generation: l1.attempts[0]!.generation,
+            outcome: "passed",
+            timed: true,
+            duration_ms: 50,
+          },
+        ],
+      }),
+      now,
+    );
+
+    // Heartbeat l3 at t+6s (> ttl/2 -> writes lease_deadlines); l1 must be pruned, l2+l3 still active.
+    now += 5_000;
+    await stub.heartbeat(JSON.stringify({ version: 1, runner_id: "r3", lease_id: l3.lease_id }), now);
+    const metaAfterReport = await runInDurableObject(stub, async (_inst, state) => {
+      const row = state.storage.sql
+        .exec<{ v: string }>("SELECT v FROM meta WHERE k = 'lease_deadlines'")
+        .toArray()[0]!;
+      return JSON.parse(row.v) as Record<string, number>;
+    });
+    expect(metaAfterReport[String(l1.lease_id)]).toBeUndefined();
+    expect(metaAfterReport[String(l3.lease_id)]).toBeDefined();
+
+    // Advance past l2's expiry (t+12s); l1's runner requests a lease which expires l2, then l3 heartbeats past grace.
+    now += 6_000;
+    const l4 = JSON.parse(
+      (await stub.lease(JSON.stringify({ version: 1, runner_id: "r1", machine_index: 0, request_id: "q4" }), now)).body,
+    ) as { lease_id: number; attempts: { attempt_id: string; test_index: number; generation: number }[] };
+    await stub.heartbeat(JSON.stringify({ version: 1, runner_id: "r3", lease_id: l3.lease_id }), now);
+    const metaAfterExpire = await runInDurableObject(stub, async (_inst, state) => {
+      const row = state.storage.sql
+        .exec<{ v: string }>("SELECT v FROM meta WHERE k = 'lease_deadlines'")
+        .toArray()[0]!;
+      return JSON.parse(row.v) as Record<string, number>;
+    });
+    expect(metaAfterExpire[String(l2.lease_id)]).toBeUndefined();
+    expect(metaAfterExpire[String(l3.lease_id)]).toBeDefined();
+
+    // Now break BuildIndex and finish remaining tests (verdict running -> passed, has_conflicts stays false).
+    await runInDurableObject(stub, async (inst: BuildDO) => {
+      const target = inst as unknown as { env: { BUILD_INDEX: unknown } };
+      target.env = {
+        ...target.env,
+        BUILD_INDEX: {
+          idFromName: () => "broken",
+          get: () => ({
+            upsert: async () => {
+              throw new Error("outage");
+            },
+          }),
+        },
+      };
+    });
+    now += 500;
+    await stub.report(
+      JSON.stringify({
+        version: 1,
+        runner_id: "r3",
+        lease_id: l3.lease_id,
+        results: [
+          {
+            attempt_id: l3.attempts[0]!.attempt_id,
+            test_index: l3.attempts[0]!.test_index,
+            generation: l3.attempts[0]!.generation,
+            outcome: "passed",
+            timed: true,
+            duration_ms: 50,
+          },
+        ],
+      }),
+      now,
+    );
+    await stub.report(
+      JSON.stringify({
+        version: 1,
+        runner_id: "r1",
+        lease_id: l4.lease_id,
+        results: [
+          {
+            attempt_id: l4.attempts[0]!.attempt_id,
+            test_index: l4.attempts[0]!.test_index,
+            generation: l4.attempts[0]!.generation,
+            outcome: "passed",
+            timed: true,
+            duration_ms: 50,
+          },
+        ],
+      }),
+      now + 100,
+    );
+
+    // Evict and wake -> verdict-only mismatch (running vs passed, has_conflicts=false) MUST repair BuildIndex!
+    await evictDurableObject(stub);
+    const st = await req("GET", `/api/v1/builds/${bid}`, READ_TOKEN);
+    expect(st.status).toBe(200);
+    expect(st.json["verdict"]).toBe("passed");
+    await expect
+      .poll(async () => {
+        const list = await req("GET", "/api/v1/builds", READ_TOKEN);
+        return (list.json["builds"] as { build_id: string; verdict: string }[]).find((b) => b.build_id === bid)?.verdict;
+      })
+      .toBe("passed");
   });
 });

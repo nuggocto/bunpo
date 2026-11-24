@@ -240,7 +240,8 @@ describe("LeaseDeadlineTracker (hibernation wake deadline rule)", () => {
     tracker.onClose(1);
     expect(() => tracker.planExtend(1, 6_000, 10_001)).toThrow(/not active/);
 
-    // restoreOnWake ignores stale storedMeta entries <= grantedDeadlineMS and closed lease IDs.
+    // restoreOnWake clears stale previous leases and ignores storedMeta entries <= grantedDeadlineMS.
+    tracker.onGrant(99, 50_000);
     const restored = tracker.restoreOnWake(
       [{ leaseID: 2, grantedDeadlineMS: 20_000 }],
       { "1": 99_999, "2": 15_000 },
@@ -248,6 +249,21 @@ describe("LeaseDeadlineTracker (hibernation wake deadline rule)", () => {
     );
     expect(restored.get(2)).toBe(25_000);
     expect(restored.has(1)).toBe(false);
+    // Lease 99 must have been cleared on restoreOnWake so it never leaks into later snapshots.
+    expect(tracker.planExtend(2, 16_000, 10_001)).toEqual({ "2": 26_001 });
+
+    // Monotonic base & uncommitted planExtend rollback:
+    // If lease 2 gets an earlier timestamp, base must not move backwards; and if lease 2's
+    // non-null snapshot is NOT committed, another lease's snapshot must not include it.
+    const t2 = new LeaseDeadlineTracker();
+    t2.onGrant(1, 10_000);
+    t2.onGrant(2, 10_000);
+    expect(t2.planExtend(1, 4_000, 10_000)).toBeNull(); // base[1] = 14_000 (within grace 15_000)
+    expect(t2.planExtend(1, 1_000, 10_000)).toBeNull(); // backward clock: base[1] must stay 14_000
+    // Lease 1 requests write (16_000 > 15_000) but caller does NOT commitPersist (simulating failed write).
+    expect(t2.planExtend(1, 6_000, 10_000)).toEqual({ "1": 16_000, "2": 10_000 });
+    // Now lease 2 triggers a write: snapshot must see lease 1's committed base (14_000), NOT uncommitted 16_000!
+    expect(t2.planExtend(2, 6_000, 10_000)).toEqual({ "1": 14_000, "2": 16_000 });
 
     // parseSerializedDeadlines validation.
     expect(parseSerializedDeadlines(null)).toBeNull();
