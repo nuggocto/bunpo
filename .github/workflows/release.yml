@@ -67,7 +67,52 @@ jobs:
       - name: run the installed bunpo
         run: |
           test "$(bunpo version)" = "bunpo $GITHUB_REF_NAME"
+          ! command -v bunpo-server >/dev/null 2>&1
           printf 'tests/a.py\ntests/b.py\n' | bunpo split --dir "$RUNNER_TEMP/smoke" --index 0 --total 2
+      - name: smoke test bunpo-server release binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
+        run: |
+          case "$RUNNER_OS_NAME" in
+            Linux) os=linux ;;
+            macOS) os=darwin ;;
+            Windows) os=windows ;;
+          esac
+          case "$RUNNER_ARCH_NAME" in
+            X64) arch=amd64 ;;
+            ARM64) arch=arm64 ;;
+          esac
+          ext=""
+          [ "$os" = windows ] && ext=.exe
+          asset="bunpo-server-$os-$arch$ext"
+          dir="$RUNNER_TEMP/server-smoke"
+          mkdir -p "$dir"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --pattern SHA256SUMS --dir "$dir"
+          want=$(awk -v f="$asset" '$2 == f { print $1 }' "$dir/SHA256SUMS")
+          if command -v sha256sum >/dev/null; then
+            got=$(sha256sum <"$dir/$asset" | cut -d' ' -f1)
+          else
+            got=$(shasum -a 256 <"$dir/$asset" | cut -d' ' -f1)
+          fi
+          test -n "$want" && test "$want" = "$got"
+          chmod +x "$dir/$asset"
+          BUNPO_QUEUE_TOKEN="release-check-write-token-012345" \
+          BUNPO_QUEUE_READ_TOKEN="release-check-read-token-fedcba98" \
+            "$dir/$asset" --addr 127.0.0.1:18080 >/dev/null 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/healthz 2>/dev/null | grep -q '{"ok":true}'; then
+              ok=1
+              break
+            fi
+            sleep 0.2
+          done
+          test "$ok" -eq 1
+          curl -fsS http://127.0.0.1:18080/ | grep -q 'Bunpō Queue'
 
   # Promotes a checked stable tag out of prerelease and moves the major tag
   # (`uses: nuggocto/bunpo@v0`). A prerelease such as v0.0.3-rc.1 stays a

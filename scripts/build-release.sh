@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Cross-compiles bunpo for every supported platform into OUTDIR, with a
-# SHA256SUMS file. For a tag such as v0.0.3, it also checks that every binary
-# reports that version.
+# Cross-compiles bunpo and bunpo-server for every supported platform into
+# OUTDIR, with a SHA256SUMS file. For a tag such as v0.1.0, it also checks
+# that every binary reports that version.
 #
-#   scripts/build-release.sh v0.0.3 dist
+#   scripts/build-release.sh v0.1.0 dist
 set -euo pipefail
 
 version=${1:?usage: build-release.sh VERSION OUTDIR}
 out=${2:?usage: build-release.sh VERSION OUTDIR}
 targets=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64)
+pkgs=(bunpo bunpo-server)
 
 # OUTDIR must be new or empty, so the script never deletes anything it did
 # not make.
@@ -27,17 +28,20 @@ for target in "${targets[@]}"; do
 	arch=${target#*/}
 	ext=""
 	[ "$os" = windows ] && ext=.exe
-	bin="$build/bunpo-$os-$arch$ext"
 
-	# No cgo and no local paths, so the binary is the same wherever it is built.
-	CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags="-s -w" -o "$bin" ./cmd/bunpo
+	for pkg in "${pkgs[@]}"; do
+		bin="$build/$pkg-$os-$arch$ext"
 
-	# Go stamps the version from the Git tag; a mismatch means the build did
-	# not run on a clean checkout of that tag.
-	if [[ $version == v* ]]; then
-		stamped=$(go version -m "$bin" | awk '$1 == "mod" { print $3 }')
-		[ "$stamped" = "$version" ] || { echo "$bin reports $stamped, want $version" >&2; exit 1; }
-	fi
+		# No cgo and no local paths, so the binary is the same wherever it is built.
+		CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags="-s -w" -o "$bin" "./cmd/$pkg"
+
+		# Go stamps the version from the Git tag; a mismatch means the build did
+		# not run on a clean checkout of that tag.
+		if [[ $version == v* ]]; then
+			stamped=$(go version -m "$bin" | awk '$1 == "mod" { print $3 }')
+			[ "$stamped" = "$version" ] || { echo "$bin reports $stamped, want $version" >&2; exit 1; }
+		fi
+	done
 done
 
 if command -v sha256sum >/dev/null; then
