@@ -5,6 +5,7 @@ const BUILD_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export const BASE_POLL_MS = 10_000;
 export const MAX_POLL_MS = 60_000;
 export const MAX_POLL_FAILURES = 5;
+export const PAGE_LIMIT = 200;
 
 const STATUS_META = {
   passed: { symbol: "✓", label: "passed" },
@@ -56,6 +57,13 @@ export function formatDuration(ms) {
   return h > 0 ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m ${String(sec % 60).padStart(2, "0")}s`;
 }
 
+// Untimed attempts carry duration_ms=0 on the wire; show wall time when positive, else omit.
+export function formatAttemptDuration(a) {
+  if (a?.timed && typeof a.duration_ms === "number" && a.duration_ms >= 0) return formatDuration(a.duration_ms);
+  if (a?.leased_at_ms > 0 && a?.finished_at_ms > a.leased_at_ms) return formatDuration(a.finished_at_ms - a.leased_at_ms);
+  return "";
+}
+
 export function formatTimeLeft(deadlineMS, nowMS, verdict) {
   if (verdict !== "running") return "Finished";
   if (typeof deadlineMS !== "number") return "—";
@@ -71,6 +79,54 @@ export function sortBuilds(builds) {
   return [...builds].sort(
     (a, b) => b.created_at_ms - a.created_at_ms || (a.build_id < b.build_id ? -1 : a.build_id > b.build_id ? 1 : 0),
   );
+}
+
+// Guards async fetches with one monotonic generation bumped on navigation and sign-out.
+export function createGuardedLoader(fetchJSON) {
+  let gen = 0;
+  return {
+    invalidate: () => ++gen,
+    current: () => gen,
+    isCurrent: (g) => g === gen,
+    async fetch(path, expectedGen) {
+      if (expectedGen !== gen) return { stale: true };
+      try {
+        const value = await fetchJSON(path);
+        return expectedGen === gen ? { stale: false, ok: true, value } : { stale: true };
+      } catch (error) {
+        return expectedGen === gen ? { stale: false, ok: false, error } : { stale: true };
+      }
+    },
+  };
+}
+
+export async function fetchBuildInitial(loader, gen, buildID, testsQS, onStatus) {
+  const enc = encodeURIComponent(buildID);
+  const st = await loader.fetch(`/api/v1/builds/${enc}`, gen);
+  if (st.stale || !st.ok) return st;
+  if (onStatus) onStatus(st.value);
+  const [tl, tests] = await Promise.all([
+    loader.fetch(`/api/v1/builds/${enc}/tests?cursor=0&limit=${PAGE_LIMIT}`, gen),
+    loader.fetch(`/api/v1/builds/${enc}/tests?${testsQS}`, gen),
+  ]);
+  if (tl.stale || tests.stale || !loader.isCurrent(gen)) return { stale: true };
+  if (!tl.ok) return tl;
+  if (!tests.ok) return tests;
+  return { stale: false, ok: true, value: { status: st.value, timeline: tl.value, tests: tests.value } };
+}
+
+// Updates page 1 on refresh without collapsing later pages the user explicitly loaded.
+export function mergeRefreshedPage(existing, existingNextCursor, pagesLoaded, freshPage) {
+  const freshTests = freshPage?.tests || [];
+  const freshNext = freshPage?.next_cursor ?? null;
+  if (pagesLoaded <= 1 || freshNext === null) {
+    return { tests: freshTests, nextCursor: freshNext, pagesLoaded: 1 };
+  }
+  return {
+    tests: freshTests.concat(existing.filter((t) => t.test_index >= freshNext)),
+    nextCursor: existingNextCursor,
+    pagesLoaded,
+  };
 }
 
 export function buildTimeline(status, tests, nowMS) {
@@ -97,7 +153,7 @@ export function buildTimeline(status, tests, nowMS) {
       if (a.leased_at_ms < entry.startMS) entry.startMS = a.leased_at_ms;
       if (fin > entry.endMS) entry.endMS = fin;
       entry.counts[a.status] = (entry.counts[a.status] || 0) + 1;
-      entry.tests.push({ test: t.test, generation: a.generation, status: a.status, durationMS: a.duration_ms });
+      entry.tests.push({ test: t.test, generation: a.generation, status: a.status, durationText: formatAttemptDuration(a) });
     }
   }
 
@@ -215,13 +271,20 @@ export function pollStep(state, ev) {
         s.active = false;
         s.stoppedReason = "finished";
         cancel();
+      } else if (ev.manual) {
+        s.active = true;
+        s.stoppedReason = null;
+        s.lastPollMS = now;
+        cancel();
+        if (s.visible) schedule(BASE_POLL_MS);
       } else if (s.active && s.visible) {
         schedule(BASE_POLL_MS);
       }
       break;
     case "response_error": {
       s.inFlight = false;
-      const retryable = ev.httpStatus === 429 || ev.httpStatus === 503;
+      const code = ev.httpStatus;
+      const retryable = code === 0 || code === 429 || (code >= 500 && code < 600);
       if (!retryable || s.failures + 1 >= MAX_POLL_FAILURES) {
         s.active = false;
         s.stoppedReason = retryable ? "max_retries" : "error";
