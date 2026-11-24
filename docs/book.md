@@ -353,6 +353,15 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   before serving; restored running builds reset active lease deadlines to
   `now + lease_ttl_ms`; and retention or capacity eviction deletes non-broken
   files before allowing reuse of the build ID.
+- **Cloudflare Worker (`worker/`)** serves the same HTTP JSON protocol on
+  SQLite-backed Durable Objects (`BuildDO` per build, `BuildIndex` for the
+  200-build list). Secrets (`BUNPO_QUEUE_TOKEN`, `BUNPO_QUEUE_READ_TOKEN`) are
+  never stored in `worker/wrangler.jsonc` (use `.dev.vars` locally or
+  `wrangler secret`). `MAX_TESTS` defaults to `5,000` based on local
+  measurements under the 10 ms Free-plan CPU assumption and can be raised up to
+  `20,000` after testing on a real account. On 64-machine builds, heartbeats at
+  `lease_ttl_ms / 3` are roughly half of all requests; passing a longer
+  `--lease-ttl` reduces them.
 - **`version`** (or **`-version`**, **`--version`**) prints the module version
   from the build information.
 
@@ -647,7 +656,7 @@ assignment is verified.
 | `junit.MaxCases` | 2,000,000 | test cases in one report |
 | all reports | 1 GiB | one `record` call |
 | test list | 64 MiB | standard input of `split`, `plan`, `verify` |
-| `queue.MaxTests` | 20,000 distinct tests | one live-queue build |
+| `queue.MaxTests` | 20,000 distinct tests (Worker `MAX_TESTS` default: 5,000) | one live-queue build |
 | `queue.MaxTestIDBytes` | 4,096 bytes | one canonical test ID in the live queue |
 | `queue.MaxMachines` | 256 | live-queue `--total` |
 | `queue.MaxRunners` | 1,024 distinct runners | one live-queue build |

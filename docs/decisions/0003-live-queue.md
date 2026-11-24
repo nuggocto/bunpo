@@ -2,7 +2,7 @@
 
 Date: 2026-11-23. Status: accepted.
 
-Implementation status: the pure state machine (`internal/queue`), HTTP wire protocol, client, and persistent CRC-32C disk event log (`internal/queueapi`), standalone server (`cmd/bunpo-server`, in-memory or persistent via `--data DIR`), and `bunpo --queue` worker and `--status` commands are implemented. The Cloudflare Worker (`BuildDO` and `BuildIndex`) and the dashboard are decided here and specified in `docs/queue-protocol.md`, but not yet built.
+Implementation status: the pure state machine (`internal/queue` and `worker/src/core`), HTTP wire protocol, client, and persistent CRC-32C disk event log (`internal/queueapi`), standalone server (`cmd/bunpo-server`, in-memory or persistent via `--data DIR`), `bunpo --queue` worker and `--status` commands, and the Cloudflare Worker (`worker/`, SQLite `BuildDO` and `BuildIndex`) are implemented. Only the dashboard remains planned.
 
 ## Context
 
@@ -81,15 +81,35 @@ Each file starts with `bunpo-queue-log 1\n`, followed by one line per `Append`: 
 - **Torn tail vs. damage on load:** A file with zero complete records had its `init` never answered and is removed. An invalid final record at real `EOF` is treated as a torn tail from an uncompleted write: logged, truncated to the last valid offset, and `fsync`ed. Any I/O read error, wrong header version, invalid record followed by more bytes, build-ID mismatch, or `Apply` error is treated as damage: the file is left untouched on disk, the server logs the error, that build answers `500`, and all other builds load normally. Every accepted file and the directory are `fsync`ed once before serving so bytes that survived a process kill in the OS page cache cannot vanish on a later power loss after the server answers from them.
 - **Eviction and deletion:** Retention and capacity eviction delete non-broken files before allowing a build ID to be reused; a failed `Remove` keeps the build entry so two histories cannot collide. Evicted broken builds leave their file untouched on disk and remain quarantined (`500`).
 
-### Cloudflare Worker topology (not yet built)
+### Cloudflare Worker topology and measurements
 
-One SQLite-backed Durable Object (`BuildDO`) will own each build, storing the immutable test catalog in chunked rows and appending one row per event. Each `BuildDO` will use two lifecycle alarms: one at `build_deadline` to finalize abandoned builds, and once terminal, one at `+7 days` to call `ctx.storage.deleteAll()`. A separate `BuildIndex` Durable Object will hold up to 200 recent build summaries and receive at most two RPCs per build (on `init` and when the build reaches a terminal verdict).
+One SQLite-backed Durable Object (`BuildDO`) owns each build, storing the immutable test catalog in 1,000-test chunks (`catalog_chunks`, `INTEGER PRIMARY KEY`, ~68 KB/row, well under SQLite's 100 KB statement and 8 MB row limits) and appending one row per `Append` (`event_log`, `INTEGER PRIMARY KEY`, no `AUTOINCREMENT`, no extra index). The Worker checks bearer tokens in constant time over SHA-256 digests before waking any Durable Object, streams and bounds request bodies while reading, and forwards raw JSON text so bodies are parsed once inside `BuildDO`. Each `BuildDO` runs `transactionSync` per `Append` (aborting via `ctx.abort()` on storage error so memory cannot diverge), skips redundant per-path validation and SHA-256 re-hashing on its own SQLite `initialized` row during wake replay while still applying every event through `Apply`, and uses two lifecycle alarms: one at `build_deadline` to finalize abandoned builds (rescheduling to `+7 days`), and once terminal, one at `+7 days` to call `ctx.storage.deleteAll()` and reset memory.
 
-The Worker will implement the same pure state machine in TypeScript and run the same shared JSON test vectors (`internal/queue/testdata/vectors/*.json`) and black-box HTTP protocol test suite as `cmd/bunpo-server`.
+A separate SQLite-backed `BuildIndex` Durable Object holds up to 200 recent build summaries with `expires_at_ms` and lazy pruning, receiving at most two RPCs per build (on `init` and on terminal verdict or first conflict). If an index update fails, `BuildDO` keeps `index_dirty=1` in SQLite and repairs the entry on the next wake, request, or alarm.
+
+The Worker implements the same pure state machine in TypeScript (`worker/src/core`), using native `node:crypto` (`nodejs_compat`, `createHash("sha256")`) for the build digest, and passes the shared JSON test vectors, Go simulator differential traces (well-behaved and hostile), seeded DO eviction tests, and the Go black-box HTTP protocol test suite (`BUNPO_TEST_SERVER_URL`).
+
+#### Local measurements (10-minute build, 60-byte test paths, 60 s lease TTL)
+
+Storage rows and database sizes were measured inside local `workerd` (`cursor.rowsRead`, `cursor.rowsWritten`, `databaseSize`). Because timers do not advance inside `workerd` during synchronous CPU work, CPU times were measured on the same TypeScript code under Node 26 via `process.cpuUsage()` (warm p50 / max, reproducible with `node worker/bench/repro.ts`). Lifecycle rows written include `catalog_chunks`, `event_log`, schema, `setAlarm`, `BuildIndex`, and 7-day `deleteAll()`.
+
+| Tests | Machines | DO Reqs | Data / Lifecycle Rows Written | SQLite Size | Warm `init` CPU | Warm `wake` CPU | Free Builds/Day (First Limit Hit) |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 1,000 | 8 | 426 | 202 / 410 | 300 KiB | 0.52 / 2.65 ms | 0.78 / 2.24 ms | 173 (DO GB-s/day) |
+| 1,000 | 64 | 2,889 | 956 / 1,918 | 388 KiB | 0.36 / 1.35 ms | 0.68 / 1.72 ms | 34 (DO reqs/day) |
+| 5,000 | 8 | 483 | 262 / 530 | 1.18 MiB | 2.40 / 3.78 ms | 2.46 / 5.57 ms | 173 (DO GB-s/day) |
+| 5,000 | 64 | 3,315 | 1,504 / 3,014 | 1.47 MiB | 2.14 / 4.03 ms | 2.40 / 5.23 ms | 30 (DO reqs/day) |
+| 10,000 | 8 | 517 | 303 / 612 | 2.28 MiB | 3.90 / 12.66 ms | 3.76 / 5.57 ms | 163 (rows written/day) |
+| 10,000 | 64 | 3,520 | 1,723 / 3,452 | 2.78 MiB | 3.95 / 8.86 ms | 4.20 / 5.25 ms | 28 (DO reqs & rows written) |
+| 20,000 | 8 | 590 | 399 / 804 | 4.47 MiB | 7.52 / 13.17 ms | 9.75 / 38.77 ms | 124 (rows written/day) |
+| 20,000 | 64 | 3,691 | 1,935 / 3,876 | 5.12 MiB | 7.55 / 13.96 ms | 15.91 / 25.83 ms | 25 (rows written/day) |
+
+- **Worker `MAX_TESTS` default (5,000):** The protocol and Go server keep `20,000`. On the Worker, `MAX_TESTS` in `worker/wrangler.jsonc` defaults to `5,000` (valid range `1..20,000`; invalid values fail closed with `500` on every request). What cannot be measured locally is the real Free-plan CPU limit inside a Durable Object (Cloudflare documents `10 ms` on Workers Free and `30 s` on Durable Objects without naming Free) and Cloudflare's exact CPU speed, so `5,000` is chosen from local measurements under the conservative `10 ms` assumption with margin and can be raised up to `20,000` after testing on a real account.
+- **64-machine heartbeats:** At 64 machines and the default 60 s `--lease-ttl` (heartbeats every 20 s), heartbeats are roughly half of all Worker and DO requests (`1,628–1,679` of `2,886–3,688` over a 10-minute build). Passing a longer `--lease-ttl` (up to `10m`) cuts heartbeat volume proportionally.
 
 ## Consequences
 
-- A 20,000-test build will write roughly 1,000–2,000 SQLite rows instead of ~120,000, and healthy heartbeats write zero rows.
+- Measured on local `workerd`, a 20,000-test build writes `399` SQLite data rows (`804` lifecycle rows including 7-day `deleteAll()`) at 8 machines and `1,935` data rows (`3,876` lifecycle rows) at 64 machines—instead of ~120,000—and healthy heartbeats write zero rows.
 - With `--data DIR` (and in the planned Durable Object backend), restarting `bunpo-server` cannot change past decisions or accept a stale result, at the cost of one `fsync` per mutating decision and delaying expiry of in-flight leases by up to one TTL. Without `--data`, `bunpo-server` stays in memory only: a restart loses running builds, runners receive `404` and exit `1`, and nothing can pass across a restart.
 - Both Go and TypeScript will maintain a copy of the small state machine; shared deterministic JSON vectors catch behavioral drift before deployment.
 - Runners using `--bail`, `-x`, or `--max-failures` still fail the build safely (the failing file marks the build `failed`), though unrun files in that batch report as `error` (and may be retried) while clean siblings that finished before stopping report `passed` untimed.

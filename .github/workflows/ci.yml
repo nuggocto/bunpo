@@ -196,3 +196,42 @@ jobs:
         with:
           path: .bunpo/timings.json
           key: bunpo-timings-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # Tests the Cloudflare Worker locally against workerd/Miniflare (zero secrets,
+  # zero Cloudflare API calls, installs with scripts disabled).
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      WRANGLER_SEND_METRICS: "false"
+      WRANGLER_LOG_PATH: worker/.wrangler/logs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/go
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.13.1"
+      - name: npm ci (scripts disabled)
+        working-directory: worker
+        run: npm ci --ignore-scripts
+      - name: typecheck
+        working-directory: worker
+        run: npm run typecheck
+      - name: core vector tests
+        working-directory: worker
+        run: npm run test:core
+      - name: differential replay (well-behaved + hostile)
+        run: |
+          mkdir -p "$RUNNER_TEMP/diff-traces"
+          BUNPO_SIM_EXPORT_DIR="$RUNNER_TEMP/diff-traces" BUNPO_SIM_COUNT=500 go test -count=1 -run '^TestSim$' ./internal/sim
+          BUNPO_SIM_HOSTILE_DIR="$RUNNER_TEMP/diff-traces" go test -count=1 -run '^TestExportHostileCommands$' ./internal/sim
+          (cd worker && BUNPO_SIM_EXPORT_DIR="$RUNNER_TEMP/diff-traces" npm run test:core)
+      - name: Durable Object lifecycle and eviction DST
+        working-directory: worker
+        run: npm run test:do
+      - name: black-box protocol and bunpo --queue E2E against local workerd
+        run: ./worker/scripts/test-blackbox.sh
