@@ -41,6 +41,8 @@ interface ExportedSeed {
   seed: number;
   name: string;
   min_lease_ttl_ms: number;
+  max_tests?: number;
+  max_runners?: number;
   steps: ExportedStep[];
 }
 
@@ -139,6 +141,12 @@ describe("differential replay against Go simulator", () => {
       const lim = defaultLimits();
       if (seed.min_lease_ttl_ms > 0) {
         lim.minLeaseTTLMS = seed.min_lease_ttl_ms;
+      }
+      if (seed.max_tests && seed.max_tests > 0) {
+        lim.maxTests = seed.max_tests;
+      }
+      if (seed.max_runners && seed.max_runners > 0) {
+        lim.maxRunners = seed.max_runners;
       }
 
       let st = newState(lim);

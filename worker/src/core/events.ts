@@ -165,7 +165,14 @@ export function outcomeToAttemptStatus(o: Outcome): AttemptStatus {
   }
 }
 
-export function applyEvent(s: State, ev: QueueEvent): void {
+export interface ApplyOptions {
+  // Skip redundant per-path validation and SHA-256 re-hashing on an initialized
+  // event that was already validated by decideInit or persisted to our own SQLite.
+  // All structural preconditions and every other event type still validate in full.
+  trustedInit?: boolean;
+}
+
+export function applyEvent(s: State, ev: QueueEvent, opts?: ApplyOptions): void {
   if (ev.at_ms < 0) {
     throw new Error("event at_ms must not be negative");
   }
@@ -175,7 +182,7 @@ export function applyEvent(s: State, ev: QueueEvent): void {
 
   switch (ev.type) {
     case "initialized":
-      applyInitialized(s, ev.at_ms, ev.initialized);
+      applyInitialized(s, ev.at_ms, ev.initialized, opts?.trustedInit === true);
       return;
     case "conflicted":
       applyConflicted(s, ev.at_ms, ev.conflicted);
@@ -197,7 +204,7 @@ export function applyEvent(s: State, ev: QueueEvent): void {
   }
 }
 
-function applyInitialized(s: State, atMS: number, d: InitializedData | undefined): void {
+function applyInitialized(s: State, atMS: number, d: InitializedData | undefined, trustedInit: boolean): void {
   if (s.initialized) {
     throw new Error("build already initialized");
   }
@@ -212,13 +219,27 @@ function applyInitialized(s: State, atMS: number, d: InitializedData | undefined
     throw cfgErr;
   }
   const lim = effectiveLimits(s.limits);
-  const testsErr = validateTestList(d.tests, d.predictions_ms, lim.maxTests);
-  if (testsErr) {
-    throw testsErr;
-  }
-  const wantDigest = configDigest(d.config, d.tests);
-  if (d.digest !== wantDigest) {
-    throw new Error(`initialized digest ${JSON.stringify(d.digest)} does not match computed ${JSON.stringify(wantDigest)}`);
+  if (trustedInit) {
+    if (d.tests.length === 0 || d.tests.length > lim.maxTests) {
+      throw new Error(`initialized tests count ${d.tests.length} outside 1..${lim.maxTests}`);
+    }
+    if (d.predictions_ms.length !== d.tests.length) {
+      throw new Error(
+        `initialized predictions_ms length ${d.predictions_ms.length} does not match tests length ${d.tests.length}`,
+      );
+    }
+    if (!/^[0-9a-f]{64}$/.test(d.digest)) {
+      throw new Error(`initialized digest ${JSON.stringify(d.digest)} is not a 64-hex SHA-256`);
+    }
+  } else {
+    const testsErr = validateTestList(d.tests, d.predictions_ms, lim.maxTests);
+    if (testsErr) {
+      throw testsErr;
+    }
+    const wantDigest = configDigest(d.config, d.tests);
+    if (d.digest !== wantDigest) {
+      throw new Error(`initialized digest ${JSON.stringify(d.digest)} does not match computed ${JSON.stringify(wantDigest)}`);
+    }
   }
   if (d.deadline_ms < atMS) {
     throw new Error(`initialized deadline_ms ${d.deadline_ms} precedes at_ms ${atMS}`);

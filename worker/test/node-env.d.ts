@@ -29,3 +29,13 @@ declare module "node:path" {
   export function join(...paths: string[]): string;
   export function resolve(...paths: string[]): string;
 }
+
+declare module "node:crypto" {
+  export interface Hash {
+    update(data: string | Uint8Array): this;
+    digest(encoding: "hex"): string;
+    digest(): Uint8Array;
+  }
+  export function createHash(algorithm: string): Hash;
+  export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean;
+}

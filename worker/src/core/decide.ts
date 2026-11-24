@@ -978,11 +978,17 @@ export function decideStatus(s: State, nowMS: number): DecideOutcome<StatusRespo
     const t = s.tests[i]!;
     const st = useOverlay ? overlayTestStatus(ov, s, i) : t.status;
     if (st === "passed" && t.timed) {
-      slowest.push({
-        test_index: t.index,
-        test: t.path,
-        duration_ms: t.durationMS,
-      });
+      // Keep only the top MaxStatusSlowest (20) items sorted by duration_ms desc,
+      // test_index asc, avoiding O(N log N) allocations across all passed tests.
+      if (slowest.length < MaxStatusSlowest) {
+        insertSlowest(slowest, { test_index: t.index, test: t.path, duration_ms: t.durationMS });
+      } else {
+        const last = slowest[MaxStatusSlowest - 1]!;
+        if (t.durationMS > last.duration_ms || (t.durationMS === last.duration_ms && t.index < last.test_index)) {
+          slowest.pop();
+          insertSlowest(slowest, { test_index: t.index, test: t.path, duration_ms: t.durationMS });
+        }
+      }
     }
     if (st === "failed") {
       failedProblems.push({
@@ -999,14 +1005,6 @@ export function decideStatus(s: State, nowMS: number): DecideOutcome<StatusRespo
         generation: t.generation,
       });
     }
-  }
-
-  slowest.sort((a, b) => {
-    const diff = b.duration_ms - a.duration_ms;
-    return diff !== 0 ? diff : a.test_index - b.test_index;
-  });
-  if (slowest.length > MaxStatusSlowest) {
-    slowest.length = MaxStatusSlowest;
   }
 
   const problemCount = failedProblems.length + unresolvedProblems.length;
@@ -1140,4 +1138,16 @@ export function decideListTests(s: State, nowMS: number, cmd: ListTestsCommand):
     },
     error: null,
   };
+}
+
+function insertSlowest(list: SlowestTest[], item: SlowestTest): void {
+  let pos = list.length;
+  while (pos > 0) {
+    const prev = list[pos - 1]!;
+    if (prev.duration_ms > item.duration_ms || (prev.duration_ms === item.duration_ms && prev.test_index < item.test_index)) {
+      break;
+    }
+    pos--;
+  }
+  list.splice(pos, 0, item);
 }

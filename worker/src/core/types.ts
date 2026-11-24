@@ -1,5 +1,5 @@
+import { createHash } from "node:crypto";
 import { isCanonicalPOSIXTestID, compareUTF8, median } from "./canonical.ts";
-import { Sha256 } from "./sha256.ts";
 
 export const ProtocolVersion = 1;
 
@@ -387,15 +387,15 @@ export function validateTestList(
 }
 
 export function configDigest(cfg: Config, tests: readonly string[]): string {
-  const h = new Sha256();
-  h.updateString(
+  const h = createHash("sha256");
+  h.update(
     `bunpo queue ${ProtocolVersion}\nmachines ${cfg.machines}\nlease_ttl_ms ${cfg.lease_ttl_ms}\nbuild_timeout_ms ${cfg.build_timeout_ms}\nmax_attempts ${cfg.max_attempts}\nmax_batch ${cfg.max_batch}\n`,
   );
-  for (let i = 0; i < tests.length; i++) {
-    h.updateString(tests[i]!);
-    h.updateByte(0x0a);
+  if (tests.length > 0) {
+    h.update(tests.join("\n"));
+    h.update("\n");
   }
-  return h.digestHex();
+  return h.digest("hex");
 }
 
 export function computeEffectivePredictions(predictions: readonly (number | null)[]): number[] {

@@ -16,6 +16,8 @@ type exportedSeed struct {
 	Seed          int64          `json:"seed"`
 	Name          string         `json:"name"`
 	MinLeaseTTLMS int64          `json:"min_lease_ttl_ms"`
+	MaxTests      int            `json:"max_tests,omitempty"`
+	MaxRunners    int            `json:"max_runners,omitempty"`
 	Steps         []exportedStep `json:"steps"`
 }
 
