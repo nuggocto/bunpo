@@ -270,9 +270,10 @@ export class BuildDO extends DurableObject<Env> {
         }
       });
     } catch (err) {
-      // Abort the DO so in-memory state can never diverge from SQLite after a storage failure.
+      // Abort the DO so in-memory state can never diverge from SQLite after a storage failure,
+      // and throw so the RPC rejects cleanly instead of resolving against a broken output gate.
       this.ctx.abort(err instanceof Error ? err.message : "storage transaction failed");
-      return false;
+      throw err;
     }
 
     this.nextSeq++;

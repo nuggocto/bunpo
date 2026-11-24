@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Runs the Go black-box protocol suite (BUNPO_TEST_SERVER_URL) and bunpo --queue
+# end-to-end tests against a local workerd instance started by wrangler dev --local.
+# Zero Cloudflare API calls, zero telemetry, always stops wrangler on exit.
+
+ROOT_DIR=$(cd "$(dirname "$0")/../.." && pwd)
+WORKER_DIR="$ROOT_DIR/worker"
+TMP_DIR=$(mktemp -d)
+DEV_VARS="$WORKER_DIR/.dev.vars"
+HAD_DEV_VARS=0
+WRANGLER_PID=""
+
+cleanup() {
+  if [ -n "$WRANGLER_PID" ]; then
+    kill "$WRANGLER_PID" 2>/dev/null || true
+    wait "$WRANGLER_PID" 2>/dev/null || true
+  fi
+  if [ "$HAD_DEV_VARS" -eq 0 ]; then
+    rm -f "$DEV_VARS"
+  else
+    mv "$TMP_DIR/dev.vars.bak" "$DEV_VARS"
+  fi
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+if [ -f "$DEV_VARS" ]; then
+  HAD_DEV_VARS=1
+  cp "$DEV_VARS" "$TMP_DIR/dev.vars.bak"
+fi
+
+WRITE_TOKEN="blackbox-write-token-0123456789abcdef"
+READ_TOKEN="blackbox-read-token-fedcba9876543210"
+PORT="${BUNPO_WORKER_TEST_PORT:-18787}"
+BASE_URL="http://127.0.0.1:${PORT}"
+
+cat > "$DEV_VARS" <<EOF
+BUNPO_QUEUE_TOKEN=${WRITE_TOKEN}
+BUNPO_QUEUE_READ_TOKEN=${READ_TOKEN}
+EOF
+
+export WRANGLER_SEND_METRICS=false
+export WRANGLER_LOG_PATH="$WORKER_DIR/.wrangler/logs"
+mkdir -p "$WRANGLER_LOG_PATH"
+
+# Starts local workerd via worker/scripts/local-server.mjs (Miniflare + esbuild)
+# with isolated persistence dir inside TMP_DIR and stops it on exit.
+(
+  cd "$WORKER_DIR"
+  BUNPO_QUEUE_TOKEN="$WRITE_TOKEN" \
+  BUNPO_QUEUE_READ_TOKEN="$READ_TOKEN" \
+  BUNPO_WORKER_TEST_PORT="$PORT" \
+  BUNPO_WORKER_PERSIST_DIR="$TMP_DIR/do-state" \
+  exec node ./scripts/local-server.mjs
+) > "$TMP_DIR/wrangler.log" 2>&1 &
+WRANGLER_PID=$!
+
+# Wait for /healthz.
+ready=0
+for _ in $(seq 1 60); do
+  if curl -fsS "${BASE_URL}/healthz" 2>/dev/null | grep -q '{"ok":true}'; then
+    ready=1
+    break
+  fi
+  if ! kill -0 "$WRANGLER_PID" 2>/dev/null; then
+    echo "wrangler dev exited early:" >&2
+    cat "$TMP_DIR/wrangler.log" >&2
+    exit 1
+  fi
+  sleep 0.5
+done
+if [ "$ready" -ne 1 ]; then
+  echo "wrangler dev did not become ready in time:" >&2
+  cat "$TMP_DIR/wrangler.log" >&2
+  exit 1
+fi
+
+echo "==> Running Go black-box protocol suite against local workerd (${BASE_URL})"
+(
+  cd "$ROOT_DIR"
+  BUNPO_TEST_SERVER_URL="$BASE_URL" \
+  BUNPO_TEST_WRITE_TOKEN="$WRITE_TOKEN" \
+  BUNPO_TEST_READ_TOKEN="$READ_TOKEN" \
+  BUNPO_TEST_TTL_MS=10000 \
+    go test -v -count=1 -run '^TestProtocolBlackBox$' ./internal/queueapi
+)
+
+echo "==> Building bunpo binary for end-to-end tests"
+BUNPO_BIN="$TMP_DIR/bunpo"
+(cd "$ROOT_DIR" && go build -o "$BUNPO_BIN" ./cmd/bunpo)
+
+echo "==> E2E 1: 2 runners, one killed mid-run -> build passes and --status writes report-0.json"
+E2E1_DIR="$TMP_DIR/e2e1"
+mkdir -p "$E2E1_DIR/work" "$E2E1_DIR/out"
+cat > "$E2E1_DIR/tests.txt" <<'EOF'
+tests/alpha.py
+tests/beta.py
+tests/gamma.py
+tests/delta.py
+EOF
+
+# Mock test runner script: runner 0 hangs on its first batch (gets SIGKILLed); runner 1 passes everything.
+cat > "$E2E1_DIR/run-test.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+REPORT="$1"
+ROLE="$2"
+if [ "$ROLE" = "victim" ]; then
+  touch "$MARKER_FILE"
+  sleep 15
+  exit 0
+fi
+{
+  echo '<?xml version="1.0" encoding="UTF-8"?>'
+  echo '<testsuites><testsuite name="s">'
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    echo "  <testcase classname=\"c\" name=\"ok\" file=\"${f}\" time=\"0.050\"/>"
+  done < "$BUNPO_TESTS_FILE"
+  echo '</testsuite></testsuites>'
+} > "$REPORT"
+EOF
+chmod +x "$E2E1_DIR/run-test.sh"
+
+BUILD1="e2e-kill-$(date +%s)-$$"
+MARKER="$E2E1_DIR/victim-started"
+
+(
+  cd "$E2E1_DIR/work"
+  BUNPO_QUEUE_TOKEN="$WRITE_TOKEN" MARKER_FILE="$MARKER" \
+    exec "$BUNPO_BIN" --queue "$BASE_URL" --build "$BUILD1" --total 2 --index 0 \
+      --lease-ttl 10s --max-batch 1 --format junit \
+      --report "$E2E1_DIR/r0.xml" -- \
+      "$E2E1_DIR/run-test.sh" "$E2E1_DIR/r0.xml" victim < "$E2E1_DIR/tests.txt"
+) > "$E2E1_DIR/r0.log" 2>&1 &
+VICTIM_PID=$!
+
+# Wait for victim to acquire a lease and start its test command, then SIGKILL it.
+for _ in $(seq 1 40); do
+  if [ -f "$MARKER" ]; then
+    break
+  fi
+  sleep 0.25
+done
+if [ ! -f "$MARKER" ]; then
+  echo "victim runner never started command:" >&2
+  cat "$E2E1_DIR/r0.log" >&2
+  kill -9 "$VICTIM_PID" 2>/dev/null || true
+  exit 1
+fi
+kill -9 "$VICTIM_PID" 2>/dev/null || true
+wait "$VICTIM_PID" 2>/dev/null || true
+
+# Runner 1 completes the remaining tests AND picks up victim's expired lease after 10s TTL.
+(
+  cd "$E2E1_DIR/work"
+  BUNPO_QUEUE_TOKEN="$WRITE_TOKEN" \
+    "$BUNPO_BIN" --queue "$BASE_URL" --build "$BUILD1" --total 2 --index 1 \
+      --lease-ttl 10s --max-batch 1 --format junit \
+      --report "$E2E1_DIR/r1.xml" -- \
+      "$E2E1_DIR/run-test.sh" "$E2E1_DIR/r1.xml" survivor < "$E2E1_DIR/tests.txt"
+)
+
+BUNPO_QUEUE_READ_TOKEN="$READ_TOKEN" \
+  "$BUNPO_BIN" --queue "$BASE_URL" --build "$BUILD1" --status --dir "$E2E1_DIR/out"
+test -f "$E2E1_DIR/out/report-0.json"
+
+echo "==> E2E 2: failing test file -> exit 1"
+E2E2_DIR="$TMP_DIR/e2e2"
+mkdir -p "$E2E2_DIR/work" "$E2E2_DIR/out"
+cat > "$E2E2_DIR/tests.txt" <<'EOF'
+tests/pass.py
+tests/fail.py
+EOF
+
+cat > "$E2E2_DIR/run-fail.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+REPORT="$1"
+FAILED=0
+{
+  echo '<?xml version="1.0" encoding="UTF-8"?>'
+  echo '<testsuites><testsuite name="s">'
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if [ "$f" = "tests/fail.py" ]; then
+      FAILED=1
+      echo "  <testcase classname=\"c\" name=\"bad\" file=\"${f}\" time=\"0.010\"><failure message=\"boom\"/></testcase>"
+    else
+      echo "  <testcase classname=\"c\" name=\"ok\" file=\"${f}\" time=\"0.020\"/>"
+    fi
+  done < "$BUNPO_TESTS_FILE"
+  echo '</testsuite></testsuites>'
+} > "$REPORT"
+exit "$FAILED"
+EOF
+chmod +x "$E2E2_DIR/run-fail.sh"
+
+BUILD2="e2e-fail-$(date +%s)-$$"
+set +e
+(
+  cd "$E2E2_DIR/work"
+  BUNPO_QUEUE_TOKEN="$WRITE_TOKEN" \
+    "$BUNPO_BIN" --queue "$BASE_URL" --build "$BUILD2" --total 1 --index 0 \
+      --lease-ttl 10s --max-batch 2 --format junit \
+      --report "$E2E2_DIR/r.xml" -- \
+      "$E2E2_DIR/run-fail.sh" "$E2E2_DIR/r.xml" < "$E2E2_DIR/tests.txt"
+)
+RC=$?
+set -e
+if [ "$RC" -ne 1 ]; then
+  echo "expected exit 1 on failing test build, got $RC" >&2
+  exit 1
+fi
+
+set +e
+BUNPO_QUEUE_READ_TOKEN="$READ_TOKEN" \
+  "$BUNPO_BIN" --queue "$BASE_URL" --build "$BUILD2" --status --dir "$E2E2_DIR/out"
+STATUS_RC=$?
+set -e
+if [ "$STATUS_RC" -ne 1 ]; then
+  echo "expected --status exit 1 on failed build, got $STATUS_RC" >&2
+  exit 1
+fi
+
+echo "==> All Worker black-box and bunpo --queue E2E checks passed!"
