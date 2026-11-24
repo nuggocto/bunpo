@@ -1,20 +1,33 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "bunpo-queue-proto",
-  "main": "src/proto-do.ts",
+  "name": "bunpo-queue",
+  "main": "src/index.ts",
   "compatibility_date": "2026-11-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    // Local benchmark default under the 10 ms Free-plan CPU assumption;
+    // valid range is 1..20000 and may be raised after testing on a real account.
+    "MAX_TESTS": "5000"
+  },
   "durable_objects": {
     "bindings": [
       {
         "name": "BUILD_DO",
-        "class_name": "BuildDOProto"
+        "class_name": "BuildDO"
+      },
+      {
+        "name": "BUILD_INDEX",
+        "class_name": "BuildIndex"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["BuildDOProto"]
+      "new_sqlite_classes": ["BuildDO", "BuildIndex"]
     }
   ]
 }
