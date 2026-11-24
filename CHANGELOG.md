@@ -12,6 +12,7 @@ start at `v0.0.3` on [GitHub Releases](https://github.com/nuggocto/bunpo/release
 - Pure event-sourced live-queue state machine (`internal/queue`) with shared JSON scenario vectors and event-replay fuzzing (`FuzzEventReplay`).
 - Live-queue HTTP wire format, handler, single-shot client, persistent CRC-32C disk event log (`DiskLog`), black-box protocol test suite (`internal/queueapi`), and standalone server (`cmd/bunpo-server`, in-memory or persistent via `--data DIR`).
 - Sans-I/O live-queue runner and status state machines (`internal/queuerunner`), `bunpo --queue` CLI mode (worker loop, process-group signaling, token stripping from child commands, `--status`, and `report-0.json` output for `bunpo merge`), deterministic simulation harness (`internal/sim` driving the real `Handler`, `DiskLog`, and runner/status machines on a faulted virtual network and filesystem), and multi-process crash/kill end-to-end tests.
+- Cloudflare Worker live-queue backend (`worker/`) with a pure TypeScript port of the state machine (`worker/src/core`), SQLite-backed `BuildDO` (chunked test catalog, append-only event log, throttled active-lease deadline persistence across 10 s DO hibernation, and deadline/+7d cleanup alarms) and `BuildIndex`, constant-time bearer auth, streaming body bounds, differential replay against the Go simulator, seeded DO eviction tests, and local `workerd` black-box and `bunpo --queue` E2E CI job.
 
 ## [v0.0.7] - 2026-11-23
 
