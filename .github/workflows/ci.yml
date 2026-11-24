@@ -53,6 +53,8 @@ jobs:
         run: go tool staticcheck ./...
       - name: govulncheck
         run: go tool govulncheck ./...
+      - name: shellcheck
+        run: shellcheck scripts/*.sh worker/scripts/*.sh
 
   # Linux tests run split across machines in the dogfood job below.
   test:
@@ -112,7 +114,42 @@ jobs:
       - name: run the installed bunpo
         run: |
           bunpo version
+          ! command -v bunpo-server >/dev/null 2>&1
           printf 'tests/a.py\ntests/b.py\n' | bunpo split --dir "$RUNNER_TEMP/smoke" --index 0 --total 2
+      - name: smoke test bunpo-server and dashboard
+        env:
+          RUNNER_OS_NAME: ${{ runner.os }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
+        run: |
+          case "$RUNNER_OS_NAME" in
+            Linux) os=linux ;;
+            macOS) os=darwin ;;
+            Windows) os=windows ;;
+          esac
+          case "$RUNNER_ARCH_NAME" in
+            X64) arch=amd64 ;;
+            ARM64) arch=arm64 ;;
+          esac
+          ext=""
+          [ "$os" = windows ] && ext=.exe
+          srv="dist/bunpo-server-$os-$arch$ext"
+          chmod +x "$srv"
+          BUNPO_QUEUE_TOKEN="ci-smoke-write-token-0123456789ab" \
+          BUNPO_QUEUE_READ_TOKEN="ci-smoke-read-token-fedcba987654" \
+            "$srv" --addr 127.0.0.1:18080 >/dev/null 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/healthz 2>/dev/null | grep -q '{"ok":true}'; then
+              ok=1
+              break
+            fi
+            sleep 0.2
+          done
+          test "$ok" -eq 1
+          curl -fsSI http://127.0.0.1:18080/ | grep -qi "content-security-policy:"
+          curl -fsS http://127.0.0.1:18080/ | grep -q 'Bunpō Queue'
 
   # Bunpō splits its own test packages across two machines. Timings come from
   # the cache that shrek saves.
