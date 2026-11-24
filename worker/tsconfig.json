@@ -14,5 +14,10 @@
     "skipLibCheck": true,
     "isolatedModules": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": [
+    "worker-configuration.d.ts",
+    "node_modules/@cloudflare/vitest-plugin/types/cloudflare-test.d.ts",
+    "src/**/*.ts",
+    "test/**/*.ts"
+  ]
 }

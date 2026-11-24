@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bunpo-queue-proto",
+  "main": "src/proto-do.ts",
+  "compatibility_date": "2026-11-24",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BUILD_DO",
+        "class_name": "BuildDOProto"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BuildDOProto"]
+    }
+  ]
+}

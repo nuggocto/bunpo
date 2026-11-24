@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "types": "WRANGLER_SEND_METRICS=false wrangler types",
+    "typecheck": "WRANGLER_SEND_METRICS=false wrangler types && tsc --noEmit",
     "test:core": "vitest run --config vitest.core.config.ts",
     "test:do": "WRANGLER_SEND_METRICS=false vitest run --config vitest.do.config.ts"
   },

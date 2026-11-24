@@ -39,3 +39,4 @@ go.work.sum
 # Worker dev dependencies and local Miniflare state
 worker/node_modules/
 worker/.wrangler/
+worker/worker-configuration.d.ts
