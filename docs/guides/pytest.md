@@ -182,12 +182,15 @@ pinned too.
 Requires **Bunpō 0.1.0 or later**. If your machines have uneven speeds, start
 at different times, or can be preempted, run Bunpō in live-queue mode against
 `bunpo-server` or the Cloudflare Worker instead of static splitting. Prefer
-static splitting when machines are equal and start together, on fork pull
-requests (GitHub Actions withholds secrets from fork PRs, so the workflow below
-fails on forks with a missing-token error unless you gate the jobs with
-`if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}`
-or use static splitting instead), or when your suite has very slow per-batch
+static splitting when machines are equal and start together, in repositories
+that accept fork pull requests, or when your suite has very slow per-batch
 startup.
+
+GitHub Actions withholds secrets from fork pull requests, so this workflow
+fails on forks with a missing-token error—that is the safe outcome. Use the
+static workflow above if your repository accepts fork pull requests, and never
+add an `if:` condition that can skip the required `bunpo` job, because GitHub
+counts a skipped required check as passed.
 
 If a machine is killed mid-run, its own `test` matrix job stays red in GitHub
 Actions even when the remaining machines finish the build cleanly. Make the
