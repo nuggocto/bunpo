@@ -281,9 +281,16 @@ func (f *simFile) Read(p []byte) (int, error) {
 	if f.closed {
 		return 0, os.ErrClosed
 	}
-	if f.fs.inLoad && f.fs.hit(f.fs.faults.loadReadErrPct) {
-		f.fs.stats["loadReadErr"]++
-		return 0, errors.New("simulated EIO on read")
+	if f.fs.inLoad && f.fs.faults.loadReadErrPct > 0 {
+		// Return small chunks when loadReadErrPct is active so EIO can occur
+		// after the header (inside a record or Peek), not only on the first read.
+		if len(p) > 128 {
+			p = p[:128]
+		}
+		if f.fs.hit(f.fs.faults.loadReadErrPct) {
+			f.fs.stats["loadReadErr"]++
+			return 0, errors.New("simulated EIO on read")
+		}
 	}
 	data := f.fs.pendingFiles[f.name]
 	if f.pos >= len(data) {
