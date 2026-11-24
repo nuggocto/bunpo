@@ -331,14 +331,28 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   verdict, counts, failed/unresolved tests, and any `init` conflicts, and writes
   `report-0.json` (`machines: 1`) when the build finished with zero unresolved
   tests and zero conflicts so `bunpo merge` can update `timings.json`.
-- **`bunpo-server [--addr 127.0.0.1:8080]`** runs the standalone live-queue
-  HTTP server in memory. It requires distinct `BUNPO_QUEUE_TOKEN` and
+- **`bunpo-server [--addr 127.0.0.1:8080] [--data DIR]`** runs the standalone
+  live-queue HTTP server. It requires distinct `BUNPO_QUEUE_TOKEN` and
   `BUNPO_QUEUE_READ_TOKEN` environment variables (each at least 16 bytes), logs
   structured JSON via `log/slog` without tokens, headers, or bodies, and shuts
   down cleanly on `SIGINT`/`SIGTERM`. Terminate TLS at your reverse proxy.
-  Today `bunpo-server` stores builds in memory only: a server restart loses
-  running builds, runners then get `404` and exit `1`, and nothing can pass
-  across a restart.
+  Without `--data`, startup logs that builds live in memory only: a restart
+  loses running builds, runners get `404` and exit `1`, and nothing passes
+  across a restart. With `--data DIR`, `bunpo-server` binds `--addr` first,
+  opens `DIR` (`0700`) through `os.Root`, loads existing build logs, and only
+  then serves HTTP. Run at most one server per `--data` directory. Each build
+  is stored in one `0600` file named by the lowercase hex SHA-256 of its build
+  ID (`bunpo-queue-log 1\n`, then one `<crc32c> <json-array>\n` line per
+  `Append`, bounded at `8 MiB`). Every `Append` checks the expected file size,
+  writes, and `fsync`s before replying (`O_EXCL` plus directory `fsync` on
+  create). On load, files with no complete record are removed; an invalid last
+  record at EOF is logged, truncated, and `fsync`ed as a torn write; any
+  read error, bad header, mid-file corruption, build-ID mismatch, or `Apply`
+  failure leaves the file untouched and answers `500` for that build without
+  affecting other builds; accepted files and the directory are `fsync`ed once
+  before serving; restored running builds reset active lease deadlines to
+  `now + lease_ttl_ms`; and retention or capacity eviction deletes non-broken
+  files before allowing reuse of the build ID.
 - **`version`** (or **`-version`**, **`--version`**) prints the module version
   from the build information.
 
@@ -642,6 +656,7 @@ assignment is verified.
 | `queue.MaxAttemptsLimit` | 10 (default 3) | live-queue attempts per test |
 | `queue.MaxBatchLimit` | 200 (default 200) | live-queue tests per lease |
 | `queue.MaxInitConflicts` / `MaxTestHistory` | 8 each (with `truncated` flag) | bounded live-queue conflict/stale logs |
+| `queueapi.MaxLogRecordBytes` | 8 MiB | one CRC-32C-framed record in `bunpo-server --data` |
 
 200,000 durations at the 30-day cap still sum to less than the `int64` limit,
 so load totals cannot overflow.
@@ -675,31 +690,36 @@ allocations).
 shared JSON scenario vectors in `internal/queue/testdata/vectors/` (also meant
 to be run by the future TypeScript Worker core). `internal/queueapi` includes a
 black-box HTTP protocol test suite (runnable against any server via
-`BUNPO_TEST_SERVER_URL`), lock/concurrency checks, capacity and retention tests,
-and client hardening tests. `internal/queuerunner` tests every row of the
-outcome table, token stripping, Unix process-group cleanup, and goroutine leaks
-on cancellation. `cmd/bunpo` runs real-process end-to-end tests covering
-`SIGKILL` before and after test execution plus a smoke test against the real
-`bunpo-server` binary.
+`BUNPO_TEST_SERVER_URL`), lock/concurrency checks, pure eviction boundary
+tables, disk-log golden/damage/every-byte-cut/read-error tests, and client
+hardening tests. `internal/queuerunner` tests every row of the outcome table,
+token stripping, Unix process-group cleanup, and goroutine leaks on
+cancellation. `cmd/bunpo` runs real-process end-to-end tests covering `SIGKILL`
+before and after test execution, plus a crash-and-restart test that `SIGKILL`s
+a real `bunpo-server --data` process mid-build, restarts it on the same
+directory, verifies the build passes with every file accepted once, and checks
+clean `SIGTERM` exit 0.
 
 `internal/sim` runs deterministic simulation tests in a single goroutine on a
-virtual clock with seeded randomness, driving the real `queueapi.Handler`, wire
-encoders/parsers, `queuerunner.Machine`, and `queuerunner.StatusMachine` through
-a faulted network and durable event log. Each seed combines random swarm fault
-profiles (request/response drops and late duplicates, HTTP 503/429, unwritten
-and uncertain disk errors, server restarts, clock jumps, client skew, runner
-kills and pauses, divergent inits, late conflicts after pass, report outages,
-poison files, extra/missing/corrupt reports, and mixed sibling failures) and
-heals faults to verify liveness. An independent oracle checks every response and
-command outcome against ground truth, replays stored events incrementally and
-again from disk on restart and completion, and fails if any required fault
-counter stays zero. Any failure prints the exact replay command:
+virtual clock with seeded randomness, driving the real `queueapi.Handler`,
+`queueapi.DiskLog`, wire encoders/parsers, `queuerunner.Machine`, and
+`queuerunner.StatusMachine` through a faulted network and simulated filesystem
+(separating page cache from durable disk, with process kills, power-loss
+crashes mid-syscall and mid-`Load`, torn tails, read `EIO`, `ENOSPC`, and
+uncertain `fsync` errors). Named scenarios run as `t.Run` subtests (replayed
+with `go test -v -run '^TestSim/<name>$' ./internal/sim`), and random seeds
+combine swarm fault profiles and heal faults to verify liveness. An independent
+oracle checks every response and command outcome against ground truth, verifies
+everything answered `200` survives crashes without double-acceptance, replays
+stored events incrementally and again from disk on restart and completion, and
+fails if any required fault counter stays zero. Any random-seed failure prints
+the exact replay command:
 
 ```sh
-BUNPO_SIM_SEED=42 go test -v -run TestSim ./internal/sim
+BUNPO_SIM_SEED=42 go test -v -run '^TestSim$' ./internal/sim
 ```
 
-Run larger sweeps with `BUNPO_SIM_COUNT=5000 go test -count=1 -run TestSim$ ./internal/sim`.
+Run larger sweeps with `BUNPO_SIM_COUNT=5000 go test -count=1 -run '^TestSim$' ./internal/sim`.
 [Decision 3](decisions/0003-live-queue.md) and
 [docs/queue-protocol.md](queue-protocol.md) specify the design and wire
 protocol.

@@ -2,7 +2,7 @@
 
 Protocol version: `1`.
 
-Implementation status: the Go state machine (`internal/queue`), HTTP handler and client (`internal/queueapi`), in-memory standalone server (`cmd/bunpo-server`), and `bunpo --queue` worker and `--status` commands are implemented. Persistent disk journaling for `bunpo-server`, the Cloudflare Worker (`BuildDO` and `BuildIndex`), and the dashboard are specified here but not yet built.
+Implementation status: the Go state machine (`internal/queue`), HTTP handler, client, and persistent CRC-32C disk log (`internal/queueapi`), standalone server (`cmd/bunpo-server`, in-memory or persistent via `--data DIR`), and `bunpo --queue` worker and `--status` commands are implemented. The Cloudflare Worker (`BuildDO` and `BuildIndex`) and the dashboard are specified here but not yet built.
 
 This document specifies the HTTP JSON protocol, the pure queue state machine, the event log, and the client rules for Bunpō's live queue. An independent server or client implementation should be able to interoperate from this document alone.
 
@@ -89,7 +89,7 @@ Use static splitting (`bunpo split` / `verify`) when machines are identical and 
 | Request body size | `4 MiB` for `POST .../init`; `1 MiB` for all other `POST` endpoints |
 | Stored `init` conflicts per build | Up to `8` unique `(runner_id, got_digest)` conflicts kept; filling entry 8 sets `conflicts_truncated: true`, and duplicates or further conflicts emit no events |
 | Stored stale/conflict attempt records per test | Up to `8` unique records kept; filling entry 8 sets `history_truncated: true`, and duplicates or further records emit no events |
-| Retained builds (Go server) | Max `200` builds total, max `64` `running` (`503 at_capacity` when full), deleted `7 days` after finishing. Capacity scans and `GET /api/v1/builds` finalize builds past their `deadline_ms` through the event log; under capacity pressure, broken builds, oldest finished builds, and running builds idle for `> 2 * lease_ttl_ms` (longest idle first) are evicted (returning `404` so no runner can pass). Today `bunpo-server` holds builds in memory only: a server restart loses running builds, runners then get `404` and exit `1`, and nothing can pass across a restart. |
+| Retained builds (Go server) | Max `200` builds total, max `64` `running` (`503 at_capacity` when full), deleted `7 days` after finishing. Capacity scans and `GET /api/v1/builds` finalize builds past their `deadline_ms` through the event log; under capacity pressure, broken builds, oldest finished builds, and running builds idle for `> 2 * lease_ttl_ms` (longest idle first) are evicted (returning `404` so no runner can pass). With `--data DIR`, builds persist as per-build CRC-32C-framed event logs (surviving restarts with active lease deadlines reset to `now + lease_ttl_ms`, torn trailing records truncated, damaged logs quarantined untouched returning `500`, and evicted/expired non-broken build files removed before reusing a build ID). Without `--data`, builds stay in memory only and a restart loses them (`404`). |
 | Retained builds (Cloudflare, planned) | `BuildIndex` will list at most `200` recent builds; each `BuildDO` will call `deleteAll()` `7 days` after finishing |
 | `GET /builds/{build}` summary caps | Up to `256` runner summaries, `20` slowest timed tests, `50` problem tests (`failed` then `unresolved`) |
 | `GET /builds/{build}/tests` page size | Default `200`, max `1,000` |

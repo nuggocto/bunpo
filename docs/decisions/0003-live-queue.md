@@ -2,7 +2,7 @@
 
 Date: 2026-11-23. Status: accepted.
 
-Implementation status: the pure state machine (`internal/queue`), HTTP wire protocol and client (`internal/queueapi`), in-memory standalone server (`cmd/bunpo-server`), and `bunpo --queue` worker and `--status` commands are implemented. Persistent disk journaling for `bunpo-server`, the Cloudflare Worker (`BuildDO` and `BuildIndex`), and the dashboard are decided here and specified in `docs/queue-protocol.md`, but not yet built.
+Implementation status: the pure state machine (`internal/queue`), HTTP wire protocol, client, and persistent CRC-32C disk event log (`internal/queueapi`), standalone server (`cmd/bunpo-server`, in-memory or persistent via `--data DIR`), and `bunpo --queue` worker and `--status` commands are implemented. The Cloudflare Worker (`BuildDO` and `BuildIndex`) and the dashboard are decided here and specified in `docs/queue-protocol.md`, but not yet built.
 
 ## Context
 
@@ -10,7 +10,7 @@ Static splitting works well when CI machines are identical, start together, and 
 
 The live queue hands out batches of tests as runners ask for work, reassigns tests when a runner dies or loses a completion report, and enforces strict correctness: every logical test gets at most one accepted terminal result under the current lease, duplicate submissions are idempotent, stale results stay visible in attempt history, and bounded retry exhaustion leaves the build unresolved rather than passing.
 
-Two servers will speak the same HTTP JSON protocol: a standalone Go binary (`bunpo-server`, implemented in memory today) for teams not on Cloudflare, and a planned Cloudflare Worker with one SQLite-backed Durable Object per build (zero-ops, scales to zero between CI runs). Both are designed to serve the same static dashboard bundle.
+Two servers will speak the same HTTP JSON protocol: a standalone Go binary (`bunpo-server`, running in memory or persisted to disk with `--data DIR`) for teams not on Cloudflare, and a planned Cloudflare Worker with one SQLite-backed Durable Object per build (zero-ops, scales to zero between CI runs). Both are designed to serve the same static dashboard bundle.
 
 ## Decision
 
@@ -69,7 +69,17 @@ Each lease takes tests in deal order until the batch holds at least `ceil(remain
 
 On Unix, the client runs the test command in its own process group and signals the group (`SIGTERM`, then `SIGKILL` after 5 s) on `SIGINT`/`SIGTERM` or when a heartbeat reports the lease is lost.
 
-To keep runner and status behavior deterministic and testable under fault injection, `internal/queuerunner` separates pure sans-I/O state machines (`Machine` and `StatusMachine`, advancing via `Step(nowMS, event) -> []Action` with `OpID`/`TimerGen` fencing and an `Entropy` interface) from a thin OS/HTTP driver, and `internal/queueapi.Client` performs single-shot HTTP requests without internal retry loops. `internal/sim` runs the real machines, wire encoders, and `queueapi.Handler` in a single-goroutine seeded simulator with an independent oracle.
+To keep runner and status behavior deterministic and testable under fault injection, `internal/queuerunner` separates pure sans-I/O state machines (`Machine` and `StatusMachine`, advancing via `Step(nowMS, event) -> []Action` with `OpID`/`TimerGen` fencing and an `Entropy` interface) from a thin OS/HTTP driver, and `internal/queueapi.Client` performs single-shot HTTP requests without internal retry loops. `internal/sim` runs the real machines, wire encoders, `queueapi.Handler`, and `queueapi.DiskLog` in a single-goroutine seeded simulator with an independent oracle.
+
+### Standalone server disk journal (`--data DIR`)
+
+`bunpo-server --data DIR` persists one file per build inside `DIR` (`0700` directory, `0600` files, opened through `os.Root`), named by the lowercase hex SHA-256 of the build ID so case-insensitive filesystems and legal punctuation never collide. The server binds `--addr` before touching `--data`, loads existing logs, and only then serves requests. Operators must run at most one server per directory.
+
+Each file starts with `bunpo-queue-log 1\n`, followed by one line per `Append`: `<8-hex-crc32c> <deterministic-json-array-of-events>\n` (bounded at `8 MiB`). One `Append` is one framed record, so multi-event decisions replay all-or-nothing. On decode, re-encoding the parsed events must reproduce the exact payload bytes.
+
+- **Per-decision `fsync`:** Every `Append` opens the file, checks that its size matches the expected offset (catching a stray second server or outside edit by breaking that build instead of mixing two histories), writes, `fsync`s, and closes (`O_EXCL` plus directory `fsync` on create). A write error truncates back to the old size and `fsync`s (returning `503 storage_error` only if both succeed); a failed `fsync` is always uncertain (`500` until restart). The tradeoff is one `fsync` latency per mutating decision (typically a few milliseconds on local SSDs) in exchange for never acknowledging a decision that power loss can erase.
+- **Torn tail vs. damage on load:** A file with zero complete records had its `init` never answered and is removed. An invalid final record at real `EOF` is treated as a torn tail from an uncompleted write: logged, truncated to the last valid offset, and `fsync`ed. Any I/O read error, wrong header version, invalid record followed by more bytes, build-ID mismatch, or `Apply` error is treated as damage: the file is left untouched on disk, the server logs the error, that build answers `500`, and all other builds load normally. Every accepted file and the directory are `fsync`ed once before serving so bytes that survived a process kill in the OS page cache cannot vanish on a later power loss after the server answers from them.
+- **Eviction and deletion:** Retention and capacity eviction delete non-broken files before allowing a build ID to be reused; a failed `Remove` keeps the build entry so two histories cannot collide. Evicted broken builds leave their file untouched on disk and remain quarantined (`500`).
 
 ### Cloudflare Worker topology (not yet built)
 
@@ -80,7 +90,7 @@ The Worker will implement the same pure state machine in TypeScript and run the 
 ## Consequences
 
 - A 20,000-test build will write roughly 1,000–2,000 SQLite rows instead of ~120,000, and healthy heartbeats write zero rows.
-- Once persistent journaling (or Durable Object storage) is in place, restarting `bunpo-server` or evicting a Durable Object cannot change past decisions or accept a stale result, at the cost of delaying expiry of in-flight leases by up to one TTL. Today's in-memory `bunpo-server` loses running builds on restart, causing runners to receive `404` and exit `1` so nothing can pass.
+- With `--data DIR` (and in the planned Durable Object backend), restarting `bunpo-server` cannot change past decisions or accept a stale result, at the cost of one `fsync` per mutating decision and delaying expiry of in-flight leases by up to one TTL. Without `--data`, `bunpo-server` stays in memory only: a restart loses running builds, runners receive `404` and exit `1`, and nothing can pass across a restart.
 - Both Go and TypeScript will maintain a copy of the small state machine; shared deterministic JSON vectors catch behavioral drift before deployment.
 - Runners using `--bail`, `-x`, or `--max-failures` still fail the build safely (the failing file marks the build `failed`), though unrun files in that batch report as `error` (and may be retried) while clean siblings that finished before stopping report `passed` untimed.
 - The standalone Go server caps retained builds (200 total, 64 running) and the client rejects plain `http://` outside loopback unless `--allow-insecure-http` is passed.

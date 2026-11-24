@@ -9,9 +9,9 @@ start at `v0.0.3` on [GitHub Releases](https://github.com/nuggocto/bunpo/release
 
 - Live-queue design record (`docs/decisions/0003-live-queue.md`) and HTTP protocol and state-machine specification (`docs/queue-protocol.md`).
 - Skipped test-case count (`junit.File.Skipped`) in `internal/junit`, keeping `bunpo record` behavior unchanged.
-- Pure event-sourced live-queue state machine (`internal/queue`) with shared JSON scenario vectors, property tests with an independent observation model, and fuzz targets (`FuzzEventReplay`, `FuzzDecide`).
-- Live-queue HTTP wire format, handler, client, black-box protocol test suite (`internal/queueapi`), and standalone in-memory server (`cmd/bunpo-server`).
-- Live-queue runner loop (`internal/queuerunner`) and `bunpo --queue` CLI mode (worker loop, process-group signaling, token stripping from child commands, `--status`, and `report-0.json` output for `bunpo merge`), with multi-process kill and fault-injection end-to-end tests.
+- Pure event-sourced live-queue state machine (`internal/queue`) with shared JSON scenario vectors and event-replay fuzzing (`FuzzEventReplay`).
+- Live-queue HTTP wire format, handler, single-shot client, persistent CRC-32C disk event log (`DiskLog`), black-box protocol test suite (`internal/queueapi`), and standalone server (`cmd/bunpo-server`, in-memory or persistent via `--data DIR`).
+- Sans-I/O live-queue runner and status state machines (`internal/queuerunner`), `bunpo --queue` CLI mode (worker loop, process-group signaling, token stripping from child commands, `--status`, and `report-0.json` output for `bunpo merge`), deterministic simulation harness (`internal/sim` driving the real `Handler`, `DiskLog`, and runner/status machines on a faulted virtual network and filesystem), and multi-process crash/kill end-to-end tests.
 
 ## [v0.0.7] - 2026-11-23
 
