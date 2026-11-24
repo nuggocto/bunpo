@@ -215,7 +215,7 @@ explains the choice. `scripts/install.sh`:
 action.yml               the GitHub Action: installs a release
 benchmark/               the benchmark program behind docs/benchmark.md
 guidecheck/              runs every guide's shell steps against the real runners
-scripts/                 release build, Action installer, dogfooding
+scripts/                 release build, Action installer, server smoke test, dogfooding
 cmd/bunpo/               the CLI: flags, files, messages, exit codes, --queue wrapper
 cmd/bunpo-server/        standalone live-queue HTTP server (in memory or --data DIR) + dashboard
 internal/dashboard/      embedded shared static live-queue dashboard (also served by worker/)
@@ -381,7 +381,9 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   `BUNPO_QUEUE_READ_TOKEN` stored in `sessionStorage`, sets a strict CSP
   (`default-src 'none'`), and polls a running build at most every 10 s while
   the tab is visible (360 requests/hour idle, up to 1,080 requests/hour while
-  tests change on page 1, 0 once finished or hidden).
+  tests change on page 1, 0 once finished or hidden). See
+  [docs/cli.md](cli.md) for every command and flag and
+  [docs/self-hosting.md](self-hosting.md) for deployment.
 - **`version`** (or **`-version`**, **`--version`**) prints the module version
   from the build information.
 

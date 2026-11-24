@@ -14,18 +14,18 @@ Both servers require two distinct tokens, each at least 16 bytes long:
 - `BUNPO_QUEUE_TOKEN`: write token for runners (`bunpo --queue ...`).
 - `BUNPO_QUEUE_READ_TOKEN`: read-only token for `--status` and the web dashboard.
 
-Generate 32-byte random hex tokens:
+Generate two 32-byte random hex tokens and hold them in your current shell:
 
 ```sh
-openssl rand -hex 32   # BUNPO_QUEUE_TOKEN
-openssl rand -hex 32   # BUNPO_QUEUE_READ_TOKEN
+export BUNPO_QUEUE_TOKEN=$(openssl rand -hex 32)
+export BUNPO_QUEUE_READ_TOKEN=$(openssl rand -hex 32)
 ```
 
 Never pass tokens on the command line or commit them to `worker/wrangler.jsonc`. Both servers refuse to start or fail closed if tokens are missing, shorter than 16 bytes, or equal.
 
 ## 2. Cloudflare Worker
 
-Every command below starts from a clean checkout of this repository.
+Every command below starts from a clean checkout of this repository, after exporting `BUNPO_QUEUE_TOKEN` and `BUNPO_QUEUE_READ_TOKEN` from step 1.
 
 ### First-time deploy
 
@@ -42,12 +42,14 @@ Every command below starts from a clean checkout of this repository.
    npx wrangler login
    ```
 
-3. Store both bearer tokens as Worker secrets (each command prompts for the value):
+3. Upload both bearer tokens as Worker secrets:
 
    ```sh
-   npx wrangler secret put BUNPO_QUEUE_TOKEN
-   npx wrangler secret put BUNPO_QUEUE_READ_TOKEN
+   printf '%s' "$BUNPO_QUEUE_TOKEN" | npx wrangler secret put BUNPO_QUEUE_TOKEN
+   printf '%s' "$BUNPO_QUEUE_READ_TOKEN" | npx wrangler secret put BUNPO_QUEUE_READ_TOKEN
    ```
+
+   If `bunpo-queue` does not exist on your account yet, interactive `wrangler secret put` asks `There doesn't seem to be a Worker called "bunpo-queue". Do you want to create a new Worker with that name and add secrets to it?` (default yes). When stdin is piped as above, Wrangler creates a minimal draft Worker automatically and attaches the secret; `wrangler deploy` replaces the draft while keeping the secrets.
 
 4. Deploy the Worker, Durable Object migrations, and dashboard static assets:
 
@@ -55,7 +57,7 @@ Every command below starts from a clean checkout of this repository.
    npx wrangler deploy
    ```
 
-   Wrangler prints the deployed URL (for example `https://bunpo-queue.<subdomain>.workers.dev`).
+   If your account has no `workers.dev` subdomain yet, Wrangler warns and asks `Would you like to register a workers.dev subdomain now?` (default no). Answer yes to register one, or decline and configure a custom route in `worker/wrangler.jsonc`. Once deployed, Wrangler prints the URL (for example `https://bunpo-queue.<subdomain>.workers.dev`).
 
 5. Verify `/healthz` and authentication:
 
@@ -68,7 +70,7 @@ Every command below starts from a clean checkout of this repository.
    # {"version":1,"builds":[]}
    ```
 
-6. Open the URL in a browser and paste `BUNPO_QUEUE_READ_TOKEN` to view the dashboard.
+6. Open the URL in a browser and paste `$BUNPO_QUEUE_READ_TOKEN` to view the dashboard.
 
 ### Wire GitHub Actions
 
@@ -90,33 +92,37 @@ npm ci --ignore-scripts
 npx wrangler deploy
 ```
 
-To remove the Worker and its Durable Objects completely:
+To remove the Worker and all Durable Object data:
 
 ```sh
 cd worker
 npx wrangler delete
+npx wrangler logout
 ```
+
+`wrangler delete` asks `Are you sure you want to delete bunpo-queue? This action cannot be undone.` and deletes the Worker service (`DELETE /accounts/<id>/workers/services/bunpo-queue`), which removes its `BuildDO` and `BuildIndex` Durable Object namespaces and stored SQLite data (prompting for force confirmation if another Worker references them). Remove `BUNPO_QUEUE_URL`, `BUNPO_QUEUE_TOKEN`, and `BUNPO_QUEUE_READ_TOKEN` from GitHub Actions settings if you are decommissioning the server.
 
 ### Cloudflare Free-plan limits and failure modes
 
-Cloudflare Workers Free limits (verify current limits in the Cloudflare dashboard):
+Full local benchmark tables live in [docs/decisions/0003-live-queue.md](decisions/0003-live-queue.md) (10-minute builds, 60 s lease TTL). Key Cloudflare Free limits:
 
-| Resource | Free-plan limit | Bunpō behavior |
+| Resource | Free-plan limit | Local measurements (`0003-live-queue.md`) |
 | --- | --- | --- |
 | Worker requests | 100,000 / day | Static dashboard assets (`/`, `/dashboard/*`) bypass the Worker and cost 0 Worker requests. |
-| Durable Object requests | 100,000 / day | 8 machines / 10-min build: ~417–573 DO reqs; 64 machines: ~2,934–3,656 DO reqs. |
-| Durable Object SQLite rows written | 100,000 / day | 8 machines: ~467–847 lifecycle rows/build; 64 machines: ~1,983–3,937 rows/build. |
+| Durable Object requests | 100,000 / day | 8 machines: `417–573` reqs/build; 64 machines: `2,934–3,656` reqs/build (first limit at 64 machines: `30–34` builds/day). |
+| Durable Object SQLite rows written | 100,000 / day | 8 machines: `467–847` lifecycle rows/build (`170` builds/day at 5k tests); 64 machines: `1,983–3,937` rows/build. |
 | Durable Object SQLite rows read | 5,000,000 / day | Catalog and event log stay compact; builds replay on wake only. |
-| Durable Object duration | 13,000 GB-s / day | 10-min build: ~61–76 GB-s (~170–212 builds/day). |
-| Durable Object storage | 5 GB total | Finished builds delete all SQLite state automatically 7 days after completion. |
-| Worker CPU time | 10 ms / request (Free) | `MAX_TESTS` defaults to `5,000` in `worker/wrangler.jsonc` (configurable `1..20000`). |
+| Durable Object duration | 13,000 GB-s / day | 10-min build: `61.2–66.4 GB-s` (`195–212` builds/day simulated; `76.25 GB-s` / `170` builds/day continuous; 8-machine 1k-test builds hit `202` builds/day simulated, `170` continuous). |
+| Durable Object storage | 5 GB total | Finished builds call `deleteAll()` automatically 7 days after completion. |
+| CPU time | `10 ms` documented for Workers Free; Durable Objects Free CPU limit is not published | Unmeasured on a real Cloudflare account. `MAX_TESTS` defaults to `5,000` in `worker/wrangler.jsonc` as a conservative margin; run [docs/trials/cloudflare-queue.md](trials/cloudflare-queue.md) (`worker/scripts/trial.mjs`) on your account before raising it. |
 
-What happens past a limit:
+What actually happens on failures and limits:
 
-- **Daily request, row-write, or GB-s quota hit:** Cloudflare rejects requests with `429` or `503`. Runners retry with exponential backoff up to 2 minutes and then exit `1`; the build fails safely and never reports a false pass.
-- **CPU limit exceeded:** Cloudflare returns `503` (error `1102` / "exceeded CPU"). Lower `MAX_TESTS` in `worker/wrangler.jsonc` or move to Workers Paid if your suite exceeds what fits under 10 ms.
+- **Durable Object stub error (storage failure, DO overload, or DO quota rejection):** `worker/src/index.ts` catches exceptions thrown by `BuildDO` / `BuildIndex` stubs, logs a structured JSON `do_rpc_error` entry (never tokens or bodies), and returns `503` with `{"version":1,"error":{"code":"storage_error","message":"durable object request failed"}}`.
+- **Edge/Worker rejection (Worker daily quota, rate limit, or CPU limit exceeded):** Cloudflare returns `429` or `5xx` directly outside the Worker's JSON envelope; `queueapi.Client` maps non-JSON error responses to `APIError{HTTPStatus: status, Code: "http_error"}`.
+- **Client retry and fail-safe exit:** `bunpo --queue` treats `429`, all `>= 500` responses (including `503 storage_error`), and network errors as transient (`queueapi.IsTransientError`), retrying with exponential backoff and jitter up to 2 minutes before exiting `1`. A build never reports a false pass when the server hits a limit.
 - **Large matrices (64+ machines):** Heartbeats at `lease_ttl / 3` are roughly half of all requests; increase `--lease-ttl` (up to `10m`) to cut request volume proportionally.
-- **Open dashboard tabs:** One visible tab viewing a running build makes `360` req/hr when idle, up to `1,080` req/hr while state changes every 10 s, and `0` req/hr once the build finishes or the tab is hidden.
+- **Open dashboard tabs:** One visible tab viewing a running build makes `360` req/hr when idle, up to `1,080` req/hr while state changes every 10 s, and `0` req/hr once finished or hidden.
 
 ## 3. Standalone Go server (`bunpo-server`)
 
@@ -134,7 +140,7 @@ queue.example.com {
 
 ### systemd service
 
-Create a dedicated user and a `0600` environment file at `/etc/bunpo/env`:
+Create a dedicated user and a `0640` environment file owned by `root:bunpo` at `/etc/bunpo/env` (readable by `bunpo`, writable only by `root`):
 
 ```sh
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin bunpo

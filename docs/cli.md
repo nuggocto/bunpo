@@ -1,6 +1,6 @@
 # Bunpō CLI reference
 
-Reference for `bunpo` and `bunpo-server`. Every command writes test lists to standard output and status or error messages to standard error. For the live-queue HTTP contract, see [docs/queue-protocol.md](queue-protocol.md). For deploying `bunpo-server` or the Cloudflare Worker, see [docs/self-hosting.md](self-hosting.md).
+Reference for `bunpo` and `bunpo-server`. `bunpo split` writes test file paths to standard output; every command writes status and error messages to standard error. For the live-queue HTTP contract, see [docs/queue-protocol.md](queue-protocol.md). For deploying `bunpo-server` or the Cloudflare Worker, see [docs/self-hosting.md](self-hosting.md).
 
 ## Exit codes
 
