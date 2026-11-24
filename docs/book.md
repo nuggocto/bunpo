@@ -375,12 +375,13 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   Workers Static Assets with `run_worker_first: ["/api/*", "/healthz"]` so
   static assets cost 0 Worker requests and 0 DO wakes). It renders recent
   builds, build verdicts and conflicts, a keyboard-accessible per-machine SVG
-  lease timeline, slowest files, and paged (`/tests?limit=200`) failed,
-  unresolved, and retried attempts. It accepts only `BUNPO_QUEUE_READ_TOKEN`
-  stored in `sessionStorage`, sets a strict CSP (`default-src 'none'`), and
-  polls a running build at most every 10 s while the tab is visible (360
-  requests/hour idle, up to 1,080 requests/hour while tests change on page 1,
-  0 once finished or hidden).
+  lease timeline covering the tests loaded so far (starting with the first 200
+  tests, not the whole build), slowest files, and paged (`/tests?limit=200`)
+  failed, unresolved, and retried attempts. It accepts only
+  `BUNPO_QUEUE_READ_TOKEN` stored in `sessionStorage`, sets a strict CSP
+  (`default-src 'none'`), and polls a running build at most every 10 s while
+  the tab is visible (360 requests/hour idle, up to 1,080 requests/hour while
+  tests change on page 1, 0 once finished or hidden).
 - **`version`** (or **`-version`**, **`--version`**) prints the module version
   from the build information.
 
