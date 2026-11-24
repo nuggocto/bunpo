@@ -2,7 +2,7 @@
 
 Protocol version: `1`.
 
-Implementation status: the Go state machine (`internal/queue`), HTTP handler, client, and persistent CRC-32C disk log (`internal/queueapi`), standalone server (`cmd/bunpo-server`, in-memory or persistent via `--data DIR`), `bunpo --queue` worker and `--status` commands, and the Cloudflare Worker (`worker/`, SQLite `BuildDO` and `BuildIndex`) are implemented. Only the dashboard remains planned.
+Implementation status: the Go state machine (`internal/queue`), HTTP handler, client, and persistent CRC-32C disk log (`internal/queueapi`), standalone server (`cmd/bunpo-server`, in-memory or persistent via `--data DIR`), `bunpo --queue` worker and `--status` commands, the Cloudflare Worker (`worker/`, SQLite `BuildDO` and `BuildIndex`), and the shared static dashboard (`internal/dashboard/static/`) are implemented.
 
 This document specifies the HTTP JSON protocol, the pure queue state machine, the event log, and the client rules for Bunpō's live queue. An independent server or client implementation should be able to interoperate from this document alone.
 
@@ -42,7 +42,7 @@ Two distinct bearer tokens are configured from the environment only, never CLI f
 
 Server requirements:
 
-- Both tokens must be configured, non-empty, at least 16 bytes long, and not equal. The standalone Go server refuses to start if this fails. The planned Cloudflare Worker will fail closed with `503 server_misconfigured` on every `/api/v1/...` request.
+- Both tokens must be configured, non-empty, at least 16 bytes long, and not equal. The standalone Go server refuses to start if this fails. The Cloudflare Worker fails closed with `503 server_misconfigured` on every `/api/v1/...` request.
 - Clients send `Authorization: Bearer <token>`.
 - Servers compare the SHA-256 digest of the presented token against the SHA-256 digest of the configured token(s) in constant time.
 - Missing or malformed `Authorization` header returns `401 unauthorized`. A valid read token presented to a `POST` endpoint returns `403 forbidden`.
@@ -54,7 +54,7 @@ Trust boundary:
 - Pull requests from forks do not have repository secrets and must use static mode (`bunpo split` / `verify`).
 - The client strips `BUNPO_QUEUE_TOKEN` and `BUNPO_QUEUE_READ_TOKEN` from the test command's environment so untrusted test code cannot trivially call the queue API directly. On some operating systems a same-user child process can still inspect another process's environment, so stripping is a reduction in exposure rather than a hard security boundary.
 - The client refuses plain `http://` URLs except loopback (`localhost`, `127.0.0.1`, `[::1]`) unless `--allow-insecure-http` is passed (which prints a warning to stderr). The client never follows HTTP redirects, bounds every response body, and never prints tokens.
-- The planned dashboard will use no cookies; it will store the read token in `sessionStorage`, send it in the `Authorization` header, render all server data with `textContent`, and serve a strict Content-Security-Policy.
+- The dashboard uses no cookies; it stores only `BUNPO_QUEUE_READ_TOKEN` in `sessionStorage`, sends it in the `Authorization` header, clears token and DOM on sign-out, renders all server data with `textContent`, and is served at `/`, `/builds/{build}` (valid build IDs only), and `/dashboard/{app.js,core.js,style.css,favicon.svg}` with `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-cache` (HTML) or `public, max-age=300` (assets). All `/api/v1/*` routes, `/healthz`, and JSON `404` responses on unknown or traversal paths remain unchanged.
 
 ### When to use the live queue vs. static splitting
 

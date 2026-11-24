@@ -217,7 +217,8 @@ benchmark/               the benchmark program behind docs/benchmark.md
 guidecheck/              runs every guide's shell steps against the real runners
 scripts/                 release build, Action installer, dogfooding
 cmd/bunpo/               the CLI: flags, files, messages, exit codes, --queue wrapper
-cmd/bunpo-server/        standalone live-queue HTTP server (in memory; TLS at reverse proxy)
+cmd/bunpo-server/        standalone live-queue HTTP server (in memory or --data DIR) + dashboard
+internal/dashboard/      embedded shared static live-queue dashboard (also served by worker/)
 internal/split/          canonical identifiers, dealing, plan, digest
 internal/timing/         timing file, median, merging, pruning
 internal/junit/          reading JUnit XML and the two-column format
@@ -240,7 +241,8 @@ Imports flow one way:
 
 ```text
 cmd/bunpo        ──▶ junit, manifest, queue, queueapi, queuerunner, split, timing
-cmd/bunpo-server ──▶ queue, queueapi
+cmd/bunpo-server ──▶ dashboard, queue, queueapi
+dashboard        ──▶ queue
 queuerunner      ──▶ junit, manifest, queue, queueapi, timing
 queueapi         ──▶ queue
 manifest         ──▶ split, timing, jsonfile
@@ -367,6 +369,18 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   and can be raised up to `20,000` after testing on a real account. On
   64-machine builds, heartbeats at `lease_ttl_ms / 3` are roughly half of all
   requests; passing a longer `--lease-ttl` reduces them.
+- **Live-queue dashboard (`internal/dashboard/static/`)** is a plain HTML, CSS,
+  and ES-module UI (no framework, build step, or external requests) served
+  identically by `bunpo-server` (`//go:embed`) and `worker/` (Cloudflare
+  Workers Static Assets with `run_worker_first: ["/api/*", "/healthz"]` so
+  static assets cost 0 Worker requests and 0 DO wakes). It renders recent
+  builds, build verdicts and conflicts, a keyboard-accessible per-machine SVG
+  lease timeline, slowest files, and paged (`/tests?limit=200`) failed,
+  unresolved, and retried attempts. It accepts only `BUNPO_QUEUE_READ_TOKEN`
+  stored in `sessionStorage`, sets a strict CSP (`default-src 'none'`), and
+  polls a running build at most every 10 s while the tab is visible (360
+  requests/hour idle, up to 1,080 requests/hour while tests change on page 1,
+  0 once finished or hidden).
 - **`version`** (or **`-version`**, **`--version`**) prints the module version
   from the build information.
 
