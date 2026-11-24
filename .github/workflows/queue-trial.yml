@@ -1,0 +1,154 @@
+name: Queue Trial (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Failure scenario injected on machine 0
+        type: choice
+        required: true
+        default: kill-before-run
+        options:
+          - kill-before-run
+          - kill-after-run
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check queue URL and secrets
+        env:
+          BUNPO_QUEUE_URL: ${{ vars.BUNPO_QUEUE_URL }}
+          BUNPO_QUEUE_TOKEN: ${{ secrets.BUNPO_QUEUE_TOKEN }}
+          BUNPO_QUEUE_READ_TOKEN: ${{ secrets.BUNPO_QUEUE_READ_TOKEN }}
+        run: |
+          missing=()
+          [ -z "$BUNPO_QUEUE_URL" ] && missing+=("vars.BUNPO_QUEUE_URL")
+          [ -z "$BUNPO_QUEUE_TOKEN" ] && missing+=("secrets.BUNPO_QUEUE_TOKEN")
+          [ -z "$BUNPO_QUEUE_READ_TOKEN" ] && missing+=("secrets.BUNPO_QUEUE_READ_TOKEN")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required GitHub Actions configuration: ${missing[*]}"
+            exit 1
+          fi
+          curl -fsS "${BUNPO_QUEUE_URL%/}/healthz" | grep -q '{"ok":true}'
+
+  test:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        machine: [0, 1, 2]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/go
+      - name: Build bunpo from source
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -o "$RUNNER_TEMP/bin/bunpo" ./cmd/bunpo
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+      - name: Install pytest
+        run: python3 -m pip install --quiet pytest==9.0.2
+      - name: Create sample pytest suite and batch runner
+        run: |
+          mkdir -p "$RUNNER_TEMP/suite/tests"
+          for i in $(seq -w 1 9); do
+            cat >"$RUNNER_TEMP/suite/tests/test_case_${i}.py" <<EOF
+          import time
+
+          def test_case_${i}():
+              time.sleep(0.3)
+              assert ${i#0} > 0
+          EOF
+          done
+          cat >"$RUNNER_TEMP/suite/run-batch.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          mine=()
+          while IFS= read -r path; do
+            [ -n "$path" ] && mine+=("$path")
+          done < "$BUNPO_TESTS_FILE"
+
+          if [ "${MACHINE_INDEX}" = "0" ] && [ "${SCENARIO}" = "kill-before-run" ]; then
+            echo "Injecting kill-before-run on machine 0 (killing bunpo PID $PPID)" >&2
+            kill -9 "$PPID"
+            exit 137
+          fi
+
+          pytest --rootdir=. -o junit_family=xunit1 --junitxml=junit.xml -- "${mine[@]}"
+
+          if [ "${MACHINE_INDEX}" = "0" ] && [ "${SCENARIO}" = "kill-after-run" ]; then
+            echo "Injecting kill-after-run on machine 0 (killing bunpo PID $PPID before report)" >&2
+            kill -9 "$PPID"
+            exit 137
+          fi
+          EOF
+          chmod +x "$RUNNER_TEMP/suite/run-batch.sh"
+      - name: Run live-queue worker
+        working-directory: ${{ runner.temp }}/suite
+        env:
+          MACHINE_INDEX: ${{ matrix.machine }}
+          TOTAL: ${{ strategy.job-total }}
+          SCENARIO: ${{ inputs.scenario }}
+          BUNPO_QUEUE_URL: ${{ vars.BUNPO_QUEUE_URL }}
+          BUNPO_QUEUE_TOKEN: ${{ secrets.BUNPO_QUEUE_TOKEN }}
+          BUILD_ID: trial-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.scenario }}
+        run: |
+          set +e
+          find tests -name 'test_*.py' | sort | \
+            bunpo --queue "$BUNPO_QUEUE_URL" --build "$BUILD_ID" \
+              --index "$MACHINE_INDEX" --total "$TOTAL" \
+              --lease-ttl 15s --max-batch 1 --report junit.xml -- \
+              bash ./run-batch.sh
+          rc=$?
+          set -e
+          if [ "$MACHINE_INDEX" = "0" ]; then
+            if [ "$rc" -eq 0 ]; then
+              echo "::error::Machine 0 was expected to be killed, but exited 0"
+              exit 1
+            fi
+            echo "Machine 0 terminated as expected (exit $rc)"
+            exit 0
+          fi
+          exit "$rc"
+
+  verify:
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/go
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.13.1"
+      - name: Build bunpo from source
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -o "$RUNNER_TEMP/bin/bunpo" ./cmd/bunpo
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+      - name: Verify verdict with bunpo --status and /tests API
+        env:
+          BUNPO_QUEUE_URL: ${{ vars.BUNPO_QUEUE_URL }}
+          BUNPO_QUEUE_READ_TOKEN: ${{ secrets.BUNPO_QUEUE_READ_TOKEN }}
+          BUNPO_BUILD_ID: trial-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.scenario }}
+          EXPECTED_TEST_COUNT: "9"
+          KILLED_MACHINE_INDEX: "0"
+        run: |
+          bunpo --queue "$BUNPO_QUEUE_URL" --build "$BUNPO_BUILD_ID" --status --dir "$RUNNER_TEMP/out"
+          test -f "$RUNNER_TEMP/out/report-0.json"
+          node worker/scripts/assert-queue-trial.mjs
