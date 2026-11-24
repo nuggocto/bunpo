@@ -93,9 +93,17 @@ func TestDiskLogFormatGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	const want = "bunpo-queue-log 1\n" +
-		"5358374d [{\"type\":\"initialized\",\"at_ms\":1000,\"initialized\":{\"build_id\":\"golden-1\",\"digest\":\"56e035ea0ec29bf819c491da91d950f55d0f74e42964d013ec32ca0b8cbc0109\",\"config\":{\"machines\":1,\"lease_ttl_ms\":10000,\"build_timeout_ms\":60000,\"max_attempts\":3,\"max_batch\":1},\"deadline_ms\":61000,\"tests\":[\"a.py\"],\"predictions_ms\":[100]}}]\n" +
-		"b5b08950 [{\"type\":\"leased\",\"at_ms\":1100,\"leased\":{\"lease_id\":1,\"runner_id\":\"r1\",\"machine_index\":null,\"request_id\":\"q1\",\"deadline_ms\":11100,\"attempts\":[{\"test_index\":0,\"generation\":1}]}}]\n" +
-		"360a2494 [{\"type\":\"reported\",\"at_ms\":1200,\"reported\":{\"lease_id\":1,\"runner_id\":\"r1\",\"close_lease\":true,\"results\":[{\"test_index\":0,\"generation\":1,\"outcome\":\"passed\",\"timed\":true,\"duration_ms\":50,\"disposition\":\"accepted\"}]}}]\n"
+		`5358374d [{"type":"initialized","at_ms":1000,"initialized":` +
+		`{"build_id":"golden-1","digest":"56e035ea0ec29bf819c491da91d950f55d0f74e42964d013ec32ca0b8cbc0109",` +
+		`"config":{"machines":1,"lease_ttl_ms":10000,"build_timeout_ms":60000,"max_attempts":3,"max_batch":1},` +
+		`"deadline_ms":61000,"tests":["a.py"],"predictions_ms":[100]}}]` + "\n" +
+		`b5b08950 [{"type":"leased","at_ms":1100,"leased":` +
+		`{"lease_id":1,"runner_id":"r1","machine_index":null,"request_id":"q1",` +
+		`"deadline_ms":11100,"attempts":[{"test_index":0,"generation":1}]}}]` + "\n" +
+		`360a2494 [{"type":"reported","at_ms":1200,"reported":` +
+		`{"lease_id":1,"runner_id":"r1","close_lease":true,` +
+		`"results":[{"test_index":0,"generation":1,"outcome":"passed","timed":true,` +
+		`"duration_ms":50,"disposition":"accepted"}]}}]` + "\n"
 	if string(got) != want {
 		t.Fatalf("golden mismatch:\ngot:\n%s\nwant:\n%s", string(got), want)
 	}
@@ -137,10 +145,14 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 		wantTrunc   bool
 	}{
 		{
-			name:        "flip middle byte",
-			fileName:    goodName,
-			checkID:     "dmg-1",
-			mutate:      func(b []byte) []byte { cp := bytes.Clone(b); cp[rec1End+20] ^= 1; return cp },
+			name:     "flip middle byte",
+			fileName: goodName,
+			checkID:  "dmg-1",
+			mutate: func(b []byte) []byte {
+				cp := bytes.Clone(b)
+				cp[rec1End+20] ^= 1
+				return cp
+			},
 			wantDamaged: true,
 		},
 		{
@@ -153,10 +165,14 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 			wantDamaged: true,
 		},
 		{
-			name:      "flip last record truncates tail",
-			fileName:  goodName,
-			checkID:   "dmg-1",
-			mutate:    func(b []byte) []byte { cp := bytes.Clone(b); cp[len(cp)-5] ^= 1; return cp },
+			name:     "flip last record truncates tail",
+			fileName: goodName,
+			checkID:  "dmg-1",
+			mutate: func(b []byte) []byte {
+				cp := bytes.Clone(b)
+				cp[len(cp)-5] ^= 1
+				return cp
+			},
 			wantTrunc: true,
 		},
 		{

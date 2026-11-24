@@ -25,7 +25,6 @@ export const ErrCodeUnsupportedVersion = "unsupported_version";
 export const ErrCodePayloadTooLarge = "payload_too_large";
 export const ErrCodeStorageError = "storage_error";
 export const ErrCodeServerMisconfigured = "server_misconfigured";
-export const ErrCodeInternalError = "internal_error";
 
 export interface WireError {
   httpStatus: number;

@@ -318,19 +318,20 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   was asked to run, not what ran.
 - **`--queue URL --build ID [--index N] --total M --report PATH... [flags] < tests.txt -- command args...`**
   runs in live-queue worker mode. It reads `BUNPO_QUEUE_TOKEN` from the
-  environment (never flags), initializes or joins the build, leases batches
-  longest-first via guided self-scheduling, writes each batch to
-  `.bunpo/queue-<index>.txt` (set in `BUNPO_TESTS_FILE`), deletes old `--report`
-  files, runs the test command in its own Unix process group with queue tokens
-  stripped from its environment while sending heartbeats at `TTL / 3`, and
-  reports outcomes until the build finishes. Exits 0 only on `passed`, 1
-  otherwise, 2 on bad usage. Use `--allow-insecure-http` for plain `http://` on
-  private networks outside loopback.
+  environment (never flags) and initializes or joins the build. It leases
+  batches longest-first via guided self-scheduling and writes each batch to
+  `.bunpo/queue-<index>.txt` (exposed in `BUNPO_TESTS_FILE`). Before each batch
+  it deletes old `--report` files, then runs the test command in its own Unix
+  process group with queue tokens stripped from the environment. While the
+  command runs it sends heartbeats at `TTL / 3` and reports outcomes until the
+  build finishes. It exits 0 only on `passed`, 1 otherwise, and 2 on bad usage.
+  Use `--allow-insecure-http` for plain `http://` on private networks outside
+  loopback.
 - **`--queue URL --build ID --status [--dir DIR]`** reads
-  `BUNPO_QUEUE_READ_TOKEN` (falling back to `BUNPO_QUEUE_TOKEN`), prints the
-  verdict, counts, failed/unresolved tests, and any `init` conflicts, and writes
-  `report-0.json` (`machines: 1`) when the build finished with zero unresolved
-  tests and zero conflicts so `bunpo merge` can update `timings.json`.
+  `BUNPO_QUEUE_READ_TOKEN` (falling back to `BUNPO_QUEUE_TOKEN`). It prints the
+  verdict, counts, failed and unresolved tests, and any `init` conflicts. When
+  the build finished with zero unresolved tests and zero conflicts, it writes
+  `report-0.json` (`machines: 1`) so `bunpo merge` can update `timings.json`.
 - **`bunpo-server [--addr 127.0.0.1:8080] [--data DIR]`** runs the standalone
   live-queue HTTP server. It requires distinct `BUNPO_QUEUE_TOKEN` and
   `BUNPO_QUEUE_READ_TOKEN` environment variables (each at least 16 bytes), logs
@@ -345,27 +346,27 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   ID (`bunpo-queue-log 1\n`, then one `<crc32c> <json-array>\n` line per
   `Append`, bounded at `8 MiB`). Every `Append` checks the expected file size,
   writes, and `fsync`s before replying (`O_EXCL` plus directory `fsync` on
-  create). On load, files with no complete record are removed; an invalid last
-  record at EOF is logged, truncated, and `fsync`ed as a torn write; any
+  create). On load, files with no complete record are removed, and an invalid
+  last record at EOF is logged, truncated, and `fsync`ed as a torn write. Any
   read error, bad header, mid-file corruption, build-ID mismatch, or `Apply`
   failure leaves the file untouched and answers `500` for that build without
-  affecting other builds; accepted files and the directory are `fsync`ed once
-  before serving; restored running builds reset active lease deadlines to
-  `now + lease_ttl_ms`; and retention or capacity eviction deletes non-broken
+  affecting others. Accepted files and the directory are `fsync`ed once before
+  serving. Restored running builds reset active lease deadlines to
+  `now + lease_ttl_ms`, and retention or capacity eviction deletes non-broken
   files before allowing reuse of the build ID.
 - **Cloudflare Worker (`worker/`)** serves the same HTTP JSON protocol on
   SQLite-backed Durable Objects (`BuildDO` per build, `BuildIndex` for the
   200-build list). Secrets (`BUNPO_QUEUE_TOKEN`, `BUNPO_QUEUE_READ_TOKEN`) are
   never stored in `worker/wrangler.jsonc` (use `.dev.vars` locally or
-  `wrangler secret`). Because idle Durable Objects hibernate after ~10 s,
-  `BuildDO` persists active leases' ungraced deadlines into one `meta` row when
-  a heartbeat crosses half a TTL and wakes them with `floor(lease_ttl_ms / 2)`
-  grace, so dead runners still expire promptly across repeated hibernations.
-  `MAX_TESTS` defaults to `5,000` based on local measurements under the 10 ms
-  Free-plan CPU assumption (replaying existing builds always uses the 20,000
-  protocol limit) and can be raised up to `20,000` after testing on a real
-  account. On 64-machine builds, heartbeats at `lease_ttl_ms / 3` are roughly
-  half of all requests; passing a longer `--lease-ttl` reduces them.
+  `wrangler secret`). Idle Durable Objects hibernate after ~10 s. To keep dead
+  runners from staying alive across repeated wakes, `BuildDO` persists active
+  leases' ungraced deadlines into one `meta` row when a heartbeat crosses half
+  a TTL and wakes them with `floor(lease_ttl_ms / 2)` grace. `MAX_TESTS`
+  defaults to `5,000` based on local measurements under the 10 ms Free-plan CPU
+  assumption (replaying existing builds always uses the 20,000 protocol limit)
+  and can be raised up to `20,000` after testing on a real account. On
+  64-machine builds, heartbeats at `lease_ttl_ms / 3` are roughly half of all
+  requests; passing a longer `--lease-ttl` reduces them.
 - **`version`** (or **`-version`**, **`--version`**) prints the module version
   from the build information.
 
@@ -699,34 +700,33 @@ the JUnit reader, and `FuzzEventReplay` fuzzes the live-queue event applier.
 machines well under the one-second budget (~31–80 ms depending on CPU, 403
 allocations).
 
-`internal/queue` has table tests for every limit, boundary, and error path plus
-shared JSON scenario vectors in `internal/queue/testdata/vectors/` (also meant
-to be run by the future TypeScript Worker core). `internal/queueapi` includes a
+`internal/queue` has table tests for every limit, boundary, and error path,
+plus shared JSON scenario vectors in `internal/queue/testdata/vectors/` run by
+both Go and the TypeScript Worker core. `internal/queueapi` includes a
 black-box HTTP protocol test suite (runnable against any server via
-`BUNPO_TEST_SERVER_URL`), lock/concurrency checks, pure eviction boundary
-tables, disk-log golden/damage/every-byte-cut/read-error tests, and client
-hardening tests. `internal/queuerunner` tests every row of the outcome table,
-token stripping, Unix process-group cleanup, and goroutine leaks on
-cancellation. `cmd/bunpo` runs real-process end-to-end tests covering `SIGKILL`
-before and after test execution, plus a crash-and-restart test that `SIGKILL`s
-a real `bunpo-server --data` process mid-build, restarts it on the same
-directory, verifies the build passes with every file accepted once, and checks
-clean `SIGTERM` exit 0.
+`BUNPO_TEST_SERVER_URL`), lock and concurrency checks, pure eviction boundary
+tables, disk-log damage and every-byte-cut tests, and client hardening tests.
+`internal/queuerunner` tests every row of the outcome table, token stripping,
+Unix process-group cleanup, and goroutine leaks on cancellation. `cmd/bunpo`
+runs real-process end-to-end tests covering `SIGKILL` before and after test
+execution. It also kills a real `bunpo-server --data` process mid-build,
+restarts it on the same directory, verifies the build passes with every file
+accepted once, and checks clean `SIGTERM` exit 0.
 
 `internal/sim` runs deterministic simulation tests in a single goroutine on a
-virtual clock with seeded randomness, driving the real `queueapi.Handler`,
-`queueapi.DiskLog`, wire encoders/parsers, `queuerunner.Machine`, and
-`queuerunner.StatusMachine` through a faulted network and simulated filesystem
-(separating page cache from durable disk, with process kills, power-loss
-crashes mid-syscall and mid-`Load`, torn tails, read `EIO`, `ENOSPC`, and
-uncertain `fsync` errors). Named scenarios run as `t.Run` subtests (replayed
-with `go test -v -run '^TestSim/<name>$' ./internal/sim`), and random seeds
-combine swarm fault profiles and heal faults to verify liveness. An independent
-oracle checks every response and command outcome against ground truth, verifies
-everything answered `200` survives crashes without double-acceptance, replays
-stored events incrementally and again from disk on restart and completion, and
-fails if any required fault counter stays zero. Any random-seed failure prints
-the exact replay command:
+virtual clock with seeded randomness. It drives the real `queueapi.Handler`,
+`queueapi.DiskLog`, wire encoders and parsers, `queuerunner.Machine`, and
+`queuerunner.StatusMachine` through a faulted network and simulated filesystem.
+The simulated filesystem separates page cache from durable disk, injecting
+process kills, power-loss crashes mid-syscall and mid-`Load`, torn tails, read
+`EIO`, `ENOSPC`, and uncertain `fsync` errors. Named scenarios run as `t.Run`
+subtests (replayed with `go test -v -run '^TestSim/<name>$' ./internal/sim`).
+Random seeds combine swarm fault profiles and heal faults to verify liveness.
+An independent oracle checks every response and command outcome against ground
+truth. It verifies that every `200` answer survives crashes without
+double-acceptance, replays stored events incrementally and from disk on restart
+and completion, and fails if any required fault counter stays zero. Any
+random-seed failure prints the exact replay command:
 
 ```sh
 BUNPO_SIM_SEED=42 go test -v -run '^TestSim$' ./internal/sim

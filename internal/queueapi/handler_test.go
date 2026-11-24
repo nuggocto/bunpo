@@ -535,7 +535,11 @@ func TestSlowReaderDoesNotHoldBuildLock(t *testing.T) {
 		_ = tc.SetReadBuffer(4096)
 	}
 	defer conn.Close()
-	_, _ = fmt.Fprintf(conn, "GET /api/v1/builds/slow-read/tests?limit=1000 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n", testReadTok)
+	rawReq := "GET /api/v1/builds/slow-read/tests?limit=1000 HTTP/1.1\r\n" +
+		"Host: localhost\r\n" +
+		"Authorization: Bearer %s\r\n" +
+		"Connection: close\r\n\r\n"
+	_, _ = fmt.Fprintf(conn, rawReq, testReadTok)
 	select {
 	case <-writeStarted:
 	case <-time.After(5 * time.Second):
@@ -543,7 +547,8 @@ func TestSlowReaderDoesNotHoldBuildLock(t *testing.T) {
 	}
 
 	start := time.Now()
-	if hb, err := c.Heartbeat(ctx, "slow-read", queue.HeartbeatCommand{RunnerID: "r1", LeaseID: l.LeaseID}); err != nil || !hb.Held || time.Since(start) > time.Second {
+	hb, err := c.Heartbeat(ctx, "slow-read", queue.HeartbeatCommand{RunnerID: "r1", LeaseID: l.LeaseID})
+	if err != nil || !hb.Held || time.Since(start) > time.Second {
 		t.Fatalf("heartbeat during stalled reader = (%+v, %v, %v)", hb, err, time.Since(start))
 	}
 }

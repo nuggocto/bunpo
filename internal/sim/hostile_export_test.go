@@ -196,46 +196,72 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 	}
 
 	// 2. Hostile invalid init inputs at and past every bound.
+	mkInit := func(mutate func(*queue.InitCommand)) queue.InitCommand {
+		c := queue.InitCommand{
+			BuildID:       bid,
+			RunnerID:      "r0",
+			Config:        goodCfg,
+			Tests:         []string{"a.py"},
+			PredictionsMS: []*int64{nil},
+		}
+		mutate(&c)
+		return c
+	}
 	badInits := []struct {
 		at  int64
 		cmd queue.InitCommand
 	}{
-		{-1, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: "", RunnerID: "r0", Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: "-bad", RunnerID: "r0", Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: "a..b", RunnerID: "r0", Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: strings.Repeat("a", 129), RunnerID: "r0", Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "", Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "bad/id", Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: strings.Repeat("r", 65), Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", MachineIndex: intPtr(-1), Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", MachineIndex: intPtr(queue.MaxMachines), Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: queue.Config{Machines: 0, LeaseTTLMS: 1000, BuildTimeoutMS: 2000, MaxAttempts: 1, MaxBatch: 1}, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: queue.Config{Machines: queue.MaxMachines + 1, LeaseTTLMS: 1000, BuildTimeoutMS: 2000, MaxAttempts: 1, MaxBatch: 1}, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: queue.Config{Machines: 1, LeaseTTLMS: lim.MinLeaseTTLMS - 1, BuildTimeoutMS: 2000, MaxAttempts: 1, MaxBatch: 1}, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: queue.Config{Machines: 1, LeaseTTLMS: queue.MaxLeaseTTLMS + 1, BuildTimeoutMS: queue.MaxLeaseTTLMS + 1, MaxAttempts: 1, MaxBatch: 1}, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: queue.Config{Machines: 1, LeaseTTLMS: 2000, BuildTimeoutMS: 1999, MaxAttempts: 1, MaxBatch: 1}, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: queue.Config{Machines: 1, LeaseTTLMS: 2000, BuildTimeoutMS: queue.MaxBuildTimeoutMS + 1, MaxAttempts: 1, MaxBatch: 1}, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: queue.Config{Machines: 1, LeaseTTLMS: 2000, BuildTimeoutMS: 2000, MaxAttempts: 0, MaxBatch: 1}, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: queue.Config{Machines: 1, LeaseTTLMS: 2000, BuildTimeoutMS: 2000, MaxAttempts: queue.MaxAttemptsLimit + 1, MaxBatch: 1}, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: queue.Config{Machines: 1, LeaseTTLMS: 2000, BuildTimeoutMS: 2000, MaxAttempts: 1, MaxBatch: 0}, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: queue.Config{Machines: 1, LeaseTTLMS: 2000, BuildTimeoutMS: 2000, MaxAttempts: 1, MaxBatch: queue.MaxBatchLimit + 1}, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{}, PredictionsMS: []*int64{}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"a.py", "b.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"b.py", "a.py"}, PredictionsMS: []*int64{nil, nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"a.py", "a.py"}, PredictionsMS: []*int64{nil, nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"./a.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"a/../b.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"/abs.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"C:/win.py"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{`a\b.py`}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"a\nb.py"}, PredictionsMS: []*int64{nil}}},
+		{-1, mkInit(func(*queue.InitCommand) {})},
+		{now, mkInit(func(c *queue.InitCommand) { c.BuildID = "" })},
+		{now, mkInit(func(c *queue.InitCommand) { c.BuildID = "-bad" })},
+		{now, mkInit(func(c *queue.InitCommand) { c.BuildID = "a..b" })},
+		{now, mkInit(func(c *queue.InitCommand) { c.BuildID = strings.Repeat("a", 129) })},
+		{now, mkInit(func(c *queue.InitCommand) { c.RunnerID = "" })},
+		{now, mkInit(func(c *queue.InitCommand) { c.RunnerID = "bad/id" })},
+		{now, mkInit(func(c *queue.InitCommand) { c.RunnerID = strings.Repeat("r", 65) })},
+		{now, mkInit(func(c *queue.InitCommand) { c.MachineIndex = intPtr(-1) })},
+		{now, mkInit(func(c *queue.InitCommand) { c.MachineIndex = intPtr(queue.MaxMachines) })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Config.Machines = 0 })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Config.Machines = queue.MaxMachines + 1 })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Config.LeaseTTLMS = lim.MinLeaseTTLMS - 1 })},
+		{now, mkInit(func(c *queue.InitCommand) {
+			c.Config.LeaseTTLMS = queue.MaxLeaseTTLMS + 1
+			c.Config.BuildTimeoutMS = queue.MaxLeaseTTLMS + 1
+		})},
+		{now, mkInit(func(c *queue.InitCommand) { c.Config.BuildTimeoutMS = c.Config.LeaseTTLMS - 1 })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Config.BuildTimeoutMS = queue.MaxBuildTimeoutMS + 1 })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Config.MaxAttempts = 0 })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Config.MaxAttempts = queue.MaxAttemptsLimit + 1 })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Config.MaxBatch = 0 })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Config.MaxBatch = queue.MaxBatchLimit + 1 })},
+		{now, mkInit(func(c *queue.InitCommand) {
+			c.Tests = []string{}
+			c.PredictionsMS = []*int64{}
+		})},
+		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{"a.py", "b.py"} })},
+		{now, mkInit(func(c *queue.InitCommand) {
+			c.Tests = []string{"b.py", "a.py"}
+			c.PredictionsMS = []*int64{nil, nil}
+		})},
+		{now, mkInit(func(c *queue.InitCommand) {
+			c.Tests = []string{"a.py", "a.py"}
+			c.PredictionsMS = []*int64{nil, nil}
+		})},
+		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{"./a.py"} })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{"a/../b.py"} })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{"/abs.py"} })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{"C:/win.py"} })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{`a\b.py`} })},
+		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{"a\nb.py"} })},
 		// Non-ASCII UTF-8 byte length boundary: 1,024 4-byte emoji = 4,096 bytes (ok), +1 byte = 4,097 (rejected).
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{strings.Repeat("😀", 1024) + "a"}, PredictionsMS: []*int64{nil}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{int64Ptr(-1)}}},
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{int64Ptr(timing.MaxDurationMS + 1)}}},
-		// UTF-8 vs UTF-16 ordering trap: U+FF01 (3 UTF-8 bytes 0xEF 0xBC 0x81) MUST sort BEFORE U+1F600 (4 UTF-8 bytes 0xF0 0x9F 0x98 0x80).
-		{now, queue.InitCommand{BuildID: bid, RunnerID: "r0", Config: goodCfg, Tests: []string{"t/\U0001F600.py", "t/\uFF01.py"}, PredictionsMS: []*int64{nil, nil}}},
+		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{strings.Repeat("😀", 1024) + "a"} })},
+		{now, mkInit(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{int64Ptr(-1)} })},
+		{now, mkInit(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{int64Ptr(timing.MaxDurationMS + 1)} })},
+		// UTF-8 vs UTF-16 ordering trap: U+FF01 (0xEF 0xBC 0x81) sorts before U+1F600 (0xF0 0x9F 0x98 0x80).
+		{now, mkInit(func(c *queue.InitCommand) {
+			c.Tests = []string{"t/\U0001F600.py", "t/\uFF01.py"}
+			c.PredictionsMS = []*int64{nil, nil}
+		})},
 	}
 	for _, b := range badInits {
 		h.initCmd(b.at, b.cmd)
@@ -340,7 +366,14 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		makeBase := func() []queue.ReportResult {
 			out := make([]queue.ReportResult, len(l1.Attempts))
 			for i, a := range l1.Attempts {
-				out[i] = queue.ReportResult{AttemptID: a.AttemptID, TestIndex: a.TestIndex, Generation: a.Generation, Outcome: queue.OutcomePassed, Timed: true, DurationMS: 100 + int64(i)}
+				out[i] = queue.ReportResult{
+					AttemptID:  a.AttemptID,
+					TestIndex:  a.TestIndex,
+					Generation: a.Generation,
+					Outcome:    queue.OutcomePassed,
+					Timed:      true,
+					DurationMS: 100 + int64(i),
+				}
 			}
 			return out
 		}
@@ -489,19 +522,36 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		res := make([]queue.ReportResult, len(l.Attempts))
 		for i, a := range l.Attempts {
 			if variant%5 == 1 && (a.TestIndex%3 == 0) {
-				res[i] = queue.ReportResult{AttemptID: a.AttemptID, TestIndex: a.TestIndex, Generation: a.Generation, Outcome: queue.OutcomeSkipped, Timed: false, DurationMS: 0}
+				res[i] = queue.ReportResult{
+					AttemptID:  a.AttemptID,
+					TestIndex:  a.TestIndex,
+					Generation: a.Generation,
+					Outcome:    queue.OutcomeSkipped,
+				}
 			} else if variant%5 == 2 {
-				res[i] = queue.ReportResult{AttemptID: a.AttemptID, TestIndex: a.TestIndex, Generation: a.Generation, Outcome: queue.OutcomeFailed, Timed: false, DurationMS: 0}
+				res[i] = queue.ReportResult{
+					AttemptID:  a.AttemptID,
+					TestIndex:  a.TestIndex,
+					Generation: a.Generation,
+					Outcome:    queue.OutcomeFailed,
+				}
 			} else {
-				// Tied durations on every 5th test to exercise tie-breaking in top-20 slowest,
-				// plus exact MaxDurationMS upper bound on step 0.
+				// Tied durations on every 5th test exercise tie-breaking in top-20 slowest;
+				// step 0 exercises the MaxDurationMS upper bound.
 				dur := int64(500 + (a.TestIndex%5)*100)
 				if step == 0 && i == 0 {
 					dur = timing.MaxDurationMS
 				} else if a.TestIndex%2 == 0 {
 					dur = int64(1000 + rng.IntN(2000))
 				}
-				res[i] = queue.ReportResult{AttemptID: a.AttemptID, TestIndex: a.TestIndex, Generation: a.Generation, Outcome: queue.OutcomePassed, Timed: true, DurationMS: dur}
+				res[i] = queue.ReportResult{
+					AttemptID:  a.AttemptID,
+					TestIndex:  a.TestIndex,
+					Generation: a.Generation,
+					Outcome:    queue.OutcomePassed,
+					Timed:      true,
+					DurationMS: dur,
+				}
 			}
 		}
 		now += 10
@@ -515,7 +565,15 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 	h.listTestsCmd(now, queue.ListTestsCommand{Cursor: 0, Limit: 10, States: []queue.TestStatus{"bogus"}})
 	h.listTestsCmd(now, queue.ListTestsCommand{Cursor: 0, Limit: 0}) // default 200
 	h.listTestsCmd(now, queue.ListTestsCommand{Cursor: 0, Limit: 5})
-	h.listTestsCmd(now, queue.ListTestsCommand{Cursor: 0, Limit: 100, States: []queue.TestStatus{queue.StatusPending, queue.StatusLeased, queue.StatusPassed, queue.StatusFailed, queue.StatusSkipped, queue.StatusUnresolved}})
+	allStates := []queue.TestStatus{
+		queue.StatusPending,
+		queue.StatusLeased,
+		queue.StatusPassed,
+		queue.StatusFailed,
+		queue.StatusSkipped,
+		queue.StatusUnresolved,
+	}
+	h.listTestsCmd(now, queue.ListTestsCommand{Cursor: 0, Limit: 100, States: allStates})
 	h.listTestsCmd(now, queue.ListTestsCommand{Cursor: 0, Limit: 100, States: []queue.TestStatus{queue.StatusSkipped}})
 	h.listTestsCmd(now, queue.ListTestsCommand{Cursor: 0, Limit: 100, Retried: true})
 
@@ -545,7 +603,14 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		for k := 0; k < 9; k++ {
 			modTests := slices.Clone(tests)
 			modTests[len(modTests)-1] = fmt.Sprintf("zzz/conflict_%02d.py", k)
-			h.initCmd(now+103+int64(k), queue.InitCommand{BuildID: bid, RunnerID: fmt.Sprintf("conf-%d", k), MachineIndex: intPtr(k), Config: initCfg, Tests: modTests, PredictionsMS: preds})
+			h.initCmd(now+103+int64(k), queue.InitCommand{
+				BuildID:       bid,
+				RunnerID:      fmt.Sprintf("conf-%d", k),
+				MachineIndex:  intPtr(k),
+				Config:        initCfg,
+				Tests:         modTests,
+				PredictionsMS: preds,
+			})
 		}
 	}
 

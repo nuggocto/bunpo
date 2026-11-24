@@ -90,18 +90,6 @@ export interface QueueEvent {
   finalized?: FinalizedData;
 }
 
-export function encodeEvent(ev: QueueEvent): string {
-  return JSON.stringify(ev);
-}
-
-export function decodeEvent(raw: string): QueueEvent {
-  const parsed: unknown = JSON.parse(raw);
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("decode event: expected object");
-  }
-  return parsed as QueueEvent;
-}
-
 export function hasInitConflict(conflicts: readonly InitConflict[], runnerID: string, gotDigest: string): boolean {
   for (let i = 0; i < conflicts.length; i++) {
     const c = conflicts[i]!;
@@ -686,21 +674,6 @@ export function extendLease(s: State, leaseID: number, deadlineMS: number): void
   }
   if (deadlineMS > lease.deadline_ms) {
     lease.deadline_ms = deadlineMS;
-  }
-}
-
-export function resetActiveLeaseDeadlines(s: State, nowMS: number): void {
-  if (!s.initialized) {
-    return;
-  }
-  const now = Math.max(nowMS, s.lastSeenMS);
-  const newDeadline = now + s.config.lease_ttl_ms;
-  for (let i = 0; i < s.activeLeases.length; i++) {
-    const id = s.activeLeases[i]!;
-    const lease = s.leases[id - 1]!;
-    if (newDeadline > lease.deadline_ms) {
-      lease.deadline_ms = newDeadline;
-    }
   }
 }
 

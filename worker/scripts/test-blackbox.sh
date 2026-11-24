@@ -3,68 +3,71 @@ set -euo pipefail
 
 # Runs the Go black-box protocol suite (BUNPO_TEST_SERVER_URL) and bunpo --queue
 # end-to-end tests against a local workerd instance started by wrangler dev --local.
-# Zero Cloudflare API calls, zero telemetry, always stops wrangler on exit.
+# Zero Cloudflare API calls, zero telemetry, stops all child processes on exit or Ctrl-C.
 
 ROOT_DIR=$(cd "$(dirname "$0")/../.." && pwd)
 WORKER_DIR="$ROOT_DIR/worker"
 TMP_DIR=$(mktemp -d)
-DEV_VARS="$WORKER_DIR/.dev.vars"
-HAD_DEV_VARS=0
-WRANGLER_PID=""
+SERVER_PID=""
+VICTIM_PID=""
+
+stop_tree() {
+  local pid="$1"
+  [ -z "$pid" ] && return
+  local children
+  children=$(pgrep -P "$pid" 2>/dev/null || true)
+  for c in $children; do
+    stop_tree "$c"
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+}
 
 cleanup() {
-  if [ -n "$WRANGLER_PID" ]; then
-    kill "$WRANGLER_PID" 2>/dev/null || true
-    wait "$WRANGLER_PID" 2>/dev/null || true
-  fi
-  if [ "$HAD_DEV_VARS" -eq 0 ]; then
-    rm -f "$DEV_VARS"
-  else
-    mv "$TMP_DIR/dev.vars.bak" "$DEV_VARS"
-  fi
+  stop_tree "$VICTIM_PID"
+  stop_tree "$SERVER_PID"
   rm -rf "$TMP_DIR"
 }
+trap 'exit 130' INT
+trap 'exit 143' TERM
 trap cleanup EXIT
-
-if [ -f "$DEV_VARS" ]; then
-  HAD_DEV_VARS=1
-  cp "$DEV_VARS" "$TMP_DIR/dev.vars.bak"
-fi
 
 WRITE_TOKEN="blackbox-write-token-0123456789abcdef"
 READ_TOKEN="blackbox-read-token-fedcba9876543210"
 PORT="${BUNPO_WORKER_TEST_PORT:-18787}"
 BASE_URL="http://127.0.0.1:${PORT}"
 
-cat > "$DEV_VARS" <<EOF
-BUNPO_QUEUE_TOKEN=${WRITE_TOKEN}
-BUNPO_QUEUE_READ_TOKEN=${READ_TOKEN}
-EOF
-
 export WRANGLER_SEND_METRICS=false
-export WRANGLER_LOG_PATH="$WORKER_DIR/.wrangler/logs"
+export WRANGLER_LOG_PATH="${WRANGLER_LOG_PATH:-$WORKER_DIR/.wrangler/logs}"
 mkdir -p "$WRANGLER_LOG_PATH"
 
-# Starts local workerd via worker/scripts/local-server.mjs (Miniflare + esbuild)
-# with isolated persistence dir inside TMP_DIR and stops it on exit.
 (
   cd "$WORKER_DIR"
-  BUNPO_QUEUE_TOKEN="$WRITE_TOKEN" \
-  BUNPO_QUEUE_READ_TOKEN="$READ_TOKEN" \
-  BUNPO_WORKER_TEST_PORT="$PORT" \
-  BUNPO_WORKER_PERSIST_DIR="$TMP_DIR/do-state" \
-  exec node ./scripts/local-server.mjs
+  exec ./node_modules/.bin/wrangler dev --local \
+    --ip 127.0.0.1 \
+    --port "$PORT" \
+    --inspector-port 0 \
+    --persist-to "$TMP_DIR/do-state" \
+    --show-interactive-dev-session=false \
+    --var "BUNPO_QUEUE_TOKEN:${WRITE_TOKEN}" \
+    --var "BUNPO_QUEUE_READ_TOKEN:${READ_TOKEN}"
 ) > "$TMP_DIR/wrangler.log" 2>&1 &
-WRANGLER_PID=$!
+SERVER_PID=$!
 
-# Wait for /healthz.
 ready=0
 for _ in $(seq 1 60); do
   if curl -fsS "${BASE_URL}/healthz" 2>/dev/null | grep -q '{"ok":true}'; then
     ready=1
     break
   fi
-  if ! kill -0 "$WRANGLER_PID" 2>/dev/null; then
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     echo "wrangler dev exited early:" >&2
     cat "$TMP_DIR/wrangler.log" >&2
     exit 1

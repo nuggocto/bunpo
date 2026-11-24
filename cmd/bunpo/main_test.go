@@ -158,8 +158,24 @@ func TestSplitWarnings(t *testing.T) {
 		want    []string
 	}{
 		{"no timing file", nil, suite, 2, []string{"no timings.json", "every test counts the same"}},
-		{"timing file with no matching tests", map[string]timing.Entry{"tests/other.py": samples(4000)}, suite, 2, []string{"none of the 4 tests have a recorded time yet, so every test counts the same"}},
-		{"one unknown test", map[string]timing.Entry{"tests/a.py": samples(4000), "tests/b.py": samples(4000), "tests/c.py": samples(4000)}, suite, 2, []string{"1 of 4 tests has no recorded time and counts as the median, 4s"}},
+		{
+			name:    "timing file with no matching tests",
+			timings: map[string]timing.Entry{"tests/other.py": samples(4000)},
+			stdin:   suite,
+			total:   2,
+			want:    []string{"none of the 4 tests have a recorded time yet, so every test counts the same"},
+		},
+		{
+			name: "one unknown test",
+			timings: map[string]timing.Entry{
+				"tests/a.py": samples(4000),
+				"tests/b.py": samples(4000),
+				"tests/c.py": samples(4000),
+			},
+			stdin: suite,
+			total: 2,
+			want:  []string{"1 of 4 tests has no recorded time and counts as the median, 4s"},
+		},
 		{"unknown tests", map[string]timing.Entry{"tests/a.py": samples(4000)}, suite, 2, []string{"3 of 4 tests have no recorded time and count as the median, 4s"}},
 		{"balanced suite", map[string]timing.Entry{
 			"tests/a.py": samples(4000), "tests/b.py": samples(4000), "tests/c.py": samples(2000), "tests/d.py": samples(2000),
@@ -783,18 +799,62 @@ func TestExitCodes(t *testing.T) {
 		{"merge in a missing directory", "", []string{"merge", "--dir", filepath.Join(dir, "nope")}, nil, 2},
 		// Live-queue (--queue) usage errors.
 		{"queue help", "", []string{"--queue", "-h"}, nil, 0},
-		{"queue missing build", suite, []string{"--queue", "http://127.0.0.1:8080", "--total", "1", "--report", "r.xml", "--", "true"}, queueEnv, 2},
-		{"queue invalid build", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "../bad", "--total", "1", "--report", "r.xml", "--", "true"}, queueEnv, 2},
-		{"queue missing token", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--", "true"}, noEnv, 2},
+		{
+			"queue missing build", suite,
+			[]string{"--queue", "http://127.0.0.1:8080", "--total", "1", "--report", "r.xml", "--", "true"},
+			queueEnv, 2,
+		},
+		{
+			"queue invalid build", suite,
+			[]string{"--queue", "http://127.0.0.1:8080", "--build", "../bad", "--total", "1", "--report", "r.xml", "--", "true"},
+			queueEnv, 2,
+		},
+		{
+			"queue missing token", suite,
+			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--", "true"},
+			noEnv, 2,
+		},
 		{"queue status missing token", "", []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--status"}, noEnv, 2},
-		{"queue plain http to remote host", suite, []string{"--queue", "http://queue.example.com", "--build", "b1", "--total", "1", "--report", "r.xml", "--", "true"}, queueEnv, 2},
-		{"queue missing report", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--", "true"}, queueEnv, 2},
-		{"queue bad format", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--format", "yaml", "--", "true"}, queueEnv, 2},
-		{"queue total 0", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "0", "--report", "r.xml", "--", "true"}, queueEnv, 2},
-		{"queue index out of range", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "2", "--index", "256", "--report", "r.xml", "--", "true"}, queueEnv, 2},
-		{"queue lease-ttl 0", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--lease-ttl", "0s", "--", "true"}, queueEnv, 2},
-		{"queue no command after --", suite, []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--"}, queueEnv, 2},
-		{"queue extra argument with --status", "", []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--status", "extra"}, queueEnv, 2},
+		{
+			"queue plain http to remote host", suite,
+			[]string{"--queue", "http://queue.example.com", "--build", "b1", "--total", "1", "--report", "r.xml", "--", "true"},
+			queueEnv, 2,
+		},
+		{
+			"queue missing report", suite,
+			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--", "true"},
+			queueEnv, 2,
+		},
+		{
+			"queue bad format", suite,
+			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--format", "yaml", "--", "true"},
+			queueEnv, 2,
+		},
+		{
+			"queue total 0", suite,
+			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "0", "--report", "r.xml", "--", "true"},
+			queueEnv, 2,
+		},
+		{
+			"queue index out of range", suite,
+			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "2", "--index", "256", "--report", "r.xml", "--", "true"},
+			queueEnv, 2,
+		},
+		{
+			"queue lease-ttl 0", suite,
+			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--lease-ttl", "0s", "--", "true"},
+			queueEnv, 2,
+		},
+		{
+			"queue no command after --", suite,
+			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--"},
+			queueEnv, 2,
+		},
+		{
+			"queue extra argument with --status", "",
+			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--status", "extra"},
+			queueEnv, 2,
+		},
 	}
 
 	for _, tc := range tests {

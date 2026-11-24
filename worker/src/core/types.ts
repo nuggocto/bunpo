@@ -11,16 +11,12 @@ export const MaxDurationMS = 30 * 24 * 60 * 60 * 1000;
 
 export const MinLeaseTTLMS = 10_000;
 export const MaxLeaseTTLMS = 600_000;
-export const DefaultLeaseTTLMS = 60_000;
 
 export const MaxBuildTimeoutMS = 24 * 60 * 60 * 1000;
-export const DefaultBuildTimeoutMS = 6 * 60 * 60 * 1000;
 
 export const MaxAttemptsLimit = 10;
-export const DefaultMaxAttempts = 3;
 
 export const MaxBatchLimit = 200;
-export const DefaultMaxBatch = 200;
 
 export const MaxInitConflicts = 8;
 export const MaxTestHistory = 8;

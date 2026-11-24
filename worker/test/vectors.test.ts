@@ -14,7 +14,6 @@ import {
   type TestStatus,
   type Verdict,
   applyEvent,
-  decodeEvent,
   decideHeartbeat,
   decideInit,
   decideLease,
@@ -22,12 +21,11 @@ import {
   decideReport,
   decideStatus,
   defaultLimits,
-  encodeEvent,
   extendLease,
   newState,
-  resetActiveLeaseDeadlines,
   stateVerdict,
 } from "../src/core/index.ts";
+import { resetActiveLeaseDeadlinesForGoRestart } from "./restart-helper.ts";
 
 interface VectorStep {
   now_ms: number;
@@ -174,7 +172,7 @@ describe("shared queue vectors", () => {
       for (let i = 0; i < vec.steps.length; i++) {
         const step = vec.steps[i]!;
         if (step.command.type === "restart") {
-          resetActiveLeaseDeadlines(st, step.now_ms);
+          resetActiveLeaseDeadlinesForGoRestart(st, step.now_ms);
           continue;
         }
 
@@ -193,7 +191,7 @@ describe("shared queue vectors", () => {
         expect(gotTypes, `step ${i} (${step.command.type}) events`).toEqual(step.expect_events ?? []);
 
         for (const ev of out.events) {
-          const decoded = decodeEvent(encodeEvent(ev));
+          const decoded = JSON.parse(JSON.stringify(ev)) as QueueEvent;
           applyEvent(st, decoded);
           log.push(decoded);
         }

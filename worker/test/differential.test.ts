@@ -21,9 +21,9 @@ import {
   defaultLimits,
   extendLease,
   newState,
-  resetActiveLeaseDeadlines,
   stateVerdict,
 } from "../src/core/index.ts";
+import { resetActiveLeaseDeadlinesForGoRestart } from "./restart-helper.ts";
 
 interface ExportedStep {
   kind: "command" | "restart";
@@ -174,7 +174,7 @@ describe("differential replay against Go simulator", () => {
             appliedLog.push(ev);
           }
           if (st.initialized && stateVerdict(st) === "running") {
-            resetActiveLeaseDeadlines(st, step.now_ms);
+            resetActiveLeaseDeadlinesForGoRestart(st, step.now_ms);
             if (step.now_ms >= st.deadlineMS) {
               const fin = decideStatus(st, step.now_ms);
               expect(fin.error, `${seed.name} step ${i}: restart deadline finalize error`).toBeNull();

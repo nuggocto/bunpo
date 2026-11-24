@@ -356,7 +356,10 @@ func (o *simOracle) checkShadowBounds() error {
 	if bound := 10 + len(o.tests)*(3*o.cfg.MaxAttempts+8); o.storedEvents > bound {
 		return fmt.Errorf("oracle: persisted events %d > bound %d", o.storedEvents, bound)
 	}
-	if len(o.shadow.Conflicts) > queue.MaxInitConflicts || slices.ContainsFunc(o.shadow.Tests, func(t queue.TestState) bool { return len(t.History) > queue.MaxTestHistory }) {
+	overHistory := slices.ContainsFunc(o.shadow.Tests, func(t queue.TestState) bool {
+		return len(t.History) > queue.MaxTestHistory
+	})
+	if len(o.shadow.Conflicts) > queue.MaxInitConflicts || overHistory {
 		return errors.New("oracle: conflicts/history bound exceeded")
 	}
 	seenR := make(map[string]int64)
@@ -477,9 +480,14 @@ func (o *simOracle) onRunnerExit(w *simWorld, r *simRunner) error {
 	}
 	var extraErr *queuerunner.ExtraFilesError
 	var apiErr *queueapi.APIError
-	if errors.As(r.exitErr, &extraErr) || w.buildBroken ||
-		(errors.As(r.exitErr, &apiErr) && apiErr.HTTPStatus == http.StatusConflict && (apiErr.Code == queue.ErrCodeInitConflict || (apiErr.Code == queue.ErrCodeLeaseHeld && w.nowMS-r.startedAtMS >= w.cfg.BuildTimeoutMS))) ||
-		(queueapi.IsTransientError(r.exitErr) && r.firstFailMS > 0 && w.nowMS-r.firstFailMS >= 60_000) {
+	isAllowedConflict := errors.As(r.exitErr, &apiErr) &&
+		apiErr.HTTPStatus == http.StatusConflict &&
+		(apiErr.Code == queue.ErrCodeInitConflict ||
+			(apiErr.Code == queue.ErrCodeLeaseHeld && w.nowMS-r.startedAtMS >= w.cfg.BuildTimeoutMS))
+	isTransientTimeout := queueapi.IsTransientError(r.exitErr) &&
+		r.firstFailMS > 0 &&
+		w.nowMS-r.firstFailMS >= 60_000
+	if errors.As(r.exitErr, &extraErr) || w.buildBroken || isAllowedConflict || isTransientTimeout {
 		return nil
 	}
 	return fmt.Errorf("oracle: runner %d exited with disallowed error %v (elapsed=%dms fail=%dms)", r.id, r.exitErr, w.nowMS-r.startedAtMS, w.nowMS-r.firstFailMS)

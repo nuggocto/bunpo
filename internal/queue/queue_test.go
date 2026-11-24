@@ -142,7 +142,11 @@ func TestInitValidationAndExactLimits(t *testing.T) {
 		{"non-canonical test path rejected", 1000, baseCmd(func(c *queue.InitCommand) { c.Tests = []string{"./a.py"} }), false},
 		{"predictions length mismatch rejected", 1000, baseCmd(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{} }), false},
 		{"prediction -1 rejected", 1000, baseCmd(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{int64Ptr(-1)} }), false},
-		{"prediction past MaxDurationMS rejected", 1000, baseCmd(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{int64Ptr(timing.MaxDurationMS + 1)} }), false},
+		{
+			"prediction past MaxDurationMS rejected", 1000,
+			baseCmd(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{int64Ptr(timing.MaxDurationMS + 1)} }),
+			false,
+		},
 	}
 
 	for _, tc := range cases {
@@ -227,7 +231,13 @@ func TestHostileStaleAndConflictHistoryBounded(t *testing.T) {
 	cfg.LeaseTTLMS = 2000
 	cfg.MaxAttempts = 3
 	cfg.MaxBatch = 1
-	evs, _, _ := queue.DecideInit(s, 1000, queue.InitCommand{BuildID: "b-hist", RunnerID: "r0", Config: cfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{int64Ptr(100)}})
+	evs, _, _ := queue.DecideInit(s, 1000, queue.InitCommand{
+		BuildID:       "b-hist",
+		RunnerID:      "r0",
+		Config:        cfg,
+		Tests:         []string{"a.py"},
+		PredictionsMS: []*int64{int64Ptr(100)},
+	})
 	mustApply(t, s, evs)
 	evs, l1, _ := queue.DecideLease(s, 1000, queue.LeaseCommand{RunnerID: "r0", RequestID: "q1"})
 	mustApply(t, s, evs)
@@ -458,13 +468,24 @@ func TestListTestsFiltersAndPaging(t *testing.T) {
 func TestFinalizeOverlayAtDeadline(t *testing.T) {
 	s, leaseID := makeListTestsFixture(t)
 
-	if hbEvs, hbResp, err := queue.DecideHeartbeat(s, s.DeadlineMS, queue.HeartbeatCommand{RunnerID: "r1", LeaseID: leaseID}); err != nil || hbResp.Held || len(hbEvs) == 0 {
+	hbEvs, hbResp, err := queue.DecideHeartbeat(s, s.DeadlineMS, queue.HeartbeatCommand{
+		RunnerID: "r1",
+		LeaseID:  leaseID,
+	})
+	if err != nil || hbResp.Held || len(hbEvs) == 0 {
 		t.Fatalf("heartbeat at exact deadline: evs=%v resp=%+v err=%v", hbEvs, hbResp, err)
 	}
-	if stEvs, stResp, err := queue.DecideStatus(s, s.DeadlineMS); err != nil || len(stEvs) != 1 || stResp.Verdict != queue.VerdictFailed || len(stResp.Slowest) != 1 || stResp.Slowest[0].Test != "a.py" || stResp.Runners[0].ActiveLeaseID != 0 {
+
+	stEvs, stResp, err := queue.DecideStatus(s, s.DeadlineMS)
+	if err != nil || len(stEvs) != 1 || stResp.Verdict != queue.VerdictFailed ||
+		len(stResp.Slowest) != 1 || stResp.Slowest[0].Test != "a.py" || stResp.Runners[0].ActiveLeaseID != 0 {
 		t.Fatalf("finalizing status: evs=%v resp=%+v err=%v", stEvs, stResp, err)
 	}
-	if ltEvs, all, err := queue.DecideListTests(s, s.DeadlineMS, queue.ListTestsCommand{Limit: queue.MaxTestsPageLimit}); err != nil || len(ltEvs) != 1 || len(all.Tests) != 3 || all.Tests[2].Attempts[0].Status != queue.AttemptExpired || all.Tests[2].Attempts[0].FinishedAtMS != s.DeadlineMS {
+
+	ltEvs, all, err := queue.DecideListTests(s, s.DeadlineMS, queue.ListTestsCommand{Limit: queue.MaxTestsPageLimit})
+	if err != nil || len(ltEvs) != 1 || len(all.Tests) != 3 ||
+		all.Tests[2].Attempts[0].Status != queue.AttemptExpired ||
+		all.Tests[2].Attempts[0].FinishedAtMS != s.DeadlineMS {
 		t.Fatalf("finalizing list overlay: evs=%v resp=%+v err=%v", ltEvs, all, err)
 	}
 }
