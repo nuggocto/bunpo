@@ -2,7 +2,7 @@
 
 Bunpō's live queue runs on either of two servers speaking the same HTTP JSON protocol ([docs/queue-protocol.md](queue-protocol.md)) and serving the same read-only web dashboard:
 
-- **Cloudflare Worker (`worker/`):** zero-ops scale-to-zero on SQLite-backed Durable Objects and free Workers Static Assets.
+- **Cloudflare Worker (`worker/`):** SQLite-backed Durable Objects (scales to zero between runs) and free Workers Static Assets.
 - **Standalone Go server (`bunpo-server`):** one static binary on a VPS, VM, or container, in memory or persisted to disk with `--data DIR`.
 
 If your CI machines are identical and start together, static splitting (`bunpo split` / `verify`) needs no server and avoids extra runner startups.
@@ -121,7 +121,7 @@ What happens on failures and limits:
 - **Edge or Worker rejection (Worker daily quota Error 1027, rate limit, or Worker CPU limit):** Cloudflare returns 429 or 5xx outside the Worker's JSON envelope; the Go client maps non-JSON errors to `http_error`.
 - **Client retry and fail-safe exit:** `bunpo --queue` treats 429, all 5xx responses (including 503 `storage_error`), and network errors as transient, retrying with exponential backoff and jitter up to 2 minutes before exiting 1. A build never reports a false pass when the server hits a limit.
 - **Large matrices (64+ machines):** Heartbeats at `lease_ttl / 3` are roughly half of all requests; increase `--lease-ttl` (up to 10m) to cut request volume proportionally.
-- **Open dashboard tabs:** One visible tab viewing a running build makes 360 req/hr when idle, up to 1,080 req/hr while state changes every 10 s, and 0 req/hr once finished or hidden.
+- **Open dashboard tabs:** One visible tab viewing a running build makes 360 req/hr when idle, up to 1,080 req/hr while state changes every 10 s (refresh resets to page 1), and 0 req/hr once finished or hidden.
 
 ## 3. Standalone Go server (`bunpo-server`)
 

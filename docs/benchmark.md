@@ -90,3 +90,16 @@ One 6000 ms file and twelve 500 ms files on four machines. No file-level split c
 | 1 | none yet | 4.993 | 4.586 | 7681 ms |
 | 2 | 2.995 | 2.995 | 2.840 | 6168 ms |
 | 3 | 2.995 | 2.995 | 2.839 | 6174 ms |
+
+## Large suite CLI timing (50,000 tests, 256 machines)
+
+Measured end-to-end by generating 50,000 canonical test file paths with a
+matching `.bunpo/timings.json`, piping the full list into
+`bunpo split --index 0 --total 256 --dir <tmp> >/dev/null`, and timing the
+whole process (startup, JSON decode, canonicalization, LPT split, SHA-256
+digest, stdout write, and atomic manifest write):
+
+- **`v0.1.0` full CLI:** 0.16 to 0.26 s (0.185 to 0.264 s on Intel Core Ultra 9 288V, 8 cores; an independent run measured 0.20 to 0.25 s).
+- **`v0.0.7` full CLI (same machine):** 0.213 to 0.285 s.
+
+All runs are well under the 1-second budget in `PROJECT.md`.

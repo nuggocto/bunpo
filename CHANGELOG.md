@@ -3,6 +3,15 @@
 All notable changes to Bunpō are recorded here. Release binaries and checksums
 start at `v0.0.3` on [GitHub Releases](https://github.com/nuggocto/bunpo/releases).
 
+## [v0.1.1] - 2026-11-26
+
+### Fixed
+
+- Reset the live-queue dashboard to fresh page 1 on refresh so multi-page views do not keep stale test states or miss tests that newly match a filter.
+- Retry failed `BuildIndex` updates in the Cloudflare Worker (`BuildDO`) by alarm with exponential backoff (60 s up to 1 h, capped at 8 retries, never past the 7-day deletion alarm) so finished builds converge in the build list without a client request.
+- Name `bunpo --queue` batch files by runner ID (`queue-<runner-id>.txt`) instead of `--index` so two runners sharing `--index` and `--dir` do not overwrite each other's test list.
+- Fail the `bunpo-server` release smoke check explicitly when its checksum is missing from `SHA256SUMS` or does not match.
+
 ## [v0.1.0] - 2026-11-26
 
 ### Added
@@ -130,6 +139,7 @@ First release with cross-compiled binaries, checksums, GitHub Action, runner gui
 - Table-driven tests, 2,000-seed property tests, a brute-force optimal solver oracle verifying the 4/3 makespan bound, fuzzing for timing decoding, and a 50,000-test benchmark.
 - Go 1.27 module with pinned `staticcheck` and `govulncheck` tools, GitHub Actions CI, specification (`PROJECT.md`), and developer guide (`docs/book.md`).
 
+[v0.1.1]: https://github.com/nuggocto/bunpo/compare/v0.1.0...v0.1.1
 [v0.1.0]: https://github.com/nuggocto/bunpo/compare/v0.0.7...v0.1.0
 [v0.0.7]: https://github.com/nuggocto/bunpo/compare/v0.0.6...v0.0.7
 [v0.0.6]: https://github.com/nuggocto/bunpo/compare/v0.0.5...v0.0.6

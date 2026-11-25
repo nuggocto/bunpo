@@ -80,7 +80,7 @@ If your CI machines are identical and start together (or on fork pull requests
 without repository secrets), stick with `bunpo split` and `bunpo verify`.
 Dynamic batching starts the test runner once per batch instead of once per
 machine. Use `--queue` when runners differ in speed (such as x64 alongside
-ARM64), start minutes apart behind CI queues, or can be preempted mid-run.
+ARM64), start minutes apart behind CI queues, or can be killed mid-run.
 
 See [docs/cli.md](docs/cli.md), [docs/self-hosting.md](docs/self-hosting.md),
 and [docs/queue-protocol.md](docs/queue-protocol.md) for setup and limits.
@@ -94,7 +94,7 @@ and [docs/queue-protocol.md](docs/queue-protocol.md) for setup and limits.
 - [docs/guides/](docs/guides/): setup for each test runner (static and live queue).
 - [docs/book.md](docs/book.md): how the code works, every command, file and
   rule.
-- [docs/benchmark.md](docs/benchmark.md): synthetic benchmark results.
+- [docs/benchmark.md](docs/benchmark.md): synthetic benchmark results and 50,000-test CLI timing.
 - [docs/trials/](docs/trials/): local and GitHub Actions trials on real suites.
 - [CHANGELOG.md](CHANGELOG.md): release history.
 - [PROJECT.md](PROJECT.md): the specification and the roadmap.
@@ -111,6 +111,7 @@ go tool staticcheck ./...
 go test -race ./...
 go tool govulncheck ./...
 go build -o bin/bunpo ./cmd/bunpo
+go build -o bin/bunpo-server ./cmd/bunpo-server
 ```
 
 Licensed under Apache-2.0.
