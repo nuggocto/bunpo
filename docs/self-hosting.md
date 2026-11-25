@@ -57,8 +57,6 @@ Every command below starts from a clean checkout of this repository, after expor
    printf '%s' "$BUNPO_QUEUE_READ_TOKEN" | npx wrangler secret put BUNPO_QUEUE_READ_TOKEN
    ```
 
-   On a later `npx wrangler deploy`, Wrangler may warn `You are about to upload a Worker that was last updated via the script API. Edits that have been made via the script API will be overridden by your local code and config. Would you like to continue?` — answer `y`; secrets uploaded with `wrangler secret put` stay intact.
-
 5. Verify `/healthz` and authentication:
 
    ```sh
@@ -76,7 +74,7 @@ Every command below starts from a clean checkout of this repository, after expor
 
 In your repository's **Settings -> Secrets and variables -> Actions**:
 
-- **Variables:** set `BUNPO_QUEUE_URL` to the deployed `https://...` URL (no trailing slash).
+- **Variables:** set `BUNPO_QUEUE_URL` to the deployed `https://...` URL (no trailing slash). In a public repository, repository variables appear in public workflow logs; the URL is not a secret because every `/api/v1/*` request requires a bearer token.
 - **Secrets:** set `BUNPO_QUEUE_TOKEN` (write) and `BUNPO_QUEUE_READ_TOKEN` (read).
 
 Fork pull requests do not receive repository secrets; keep static splitting for fork PRs.
@@ -100,29 +98,29 @@ npx wrangler delete
 npx wrangler logout
 ```
 
-`wrangler delete` asks `Are you sure you want to delete bunpo-queue? This action cannot be undone.` and deletes the Worker service (`DELETE /accounts/<id>/workers/services/bunpo-queue`). Afterward, open **Workers & Pages -> Durable Objects** in the Cloudflare dashboard and check that `BuildDO` and `BuildIndex` are gone; if either remains, delete it there (or deploy a `deleted_classes` migration before deleting the Worker). Remove `BUNPO_QUEUE_URL`, `BUNPO_QUEUE_TOKEN`, and `BUNPO_QUEUE_READ_TOKEN` from GitHub Actions settings if you are decommissioning the server.
+`wrangler delete` asks for confirmation and removes the Worker together with both Durable Object namespaces (`BuildDO` and `BuildIndex`). It prints a warning about Container applications that does not apply. Remove `BUNPO_QUEUE_URL`, `BUNPO_QUEUE_TOKEN`, and `BUNPO_QUEUE_READ_TOKEN` from GitHub Actions settings if you are decommissioning the server.
 
 ### Cloudflare Free-plan limits and failure modes
 
-Full local benchmark tables live in [docs/decisions/0003-live-queue.md](decisions/0003-live-queue.md) (10-minute builds, 60 s lease TTL). Key Cloudflare Free limits:
+Cloudflare Free-plan limits and how Bunpō behaves under them (see [docs/decisions/0003-live-queue.md](decisions/0003-live-queue.md) for the full local `workerd` row, request, and duration table, and [docs/trials/2026-11-25-cloudflare-free-trial.md](trials/2026-11-25-cloudflare-free-trial.md) for real Free-plan CPU measurements and how to run `worker/scripts/trial.mjs`):
 
-| Resource | Free-plan limit | Local measurements (`0003-live-queue.md`) |
+| Resource | Cloudflare Free limit | Bunpō behavior |
 | --- | --- | --- |
 | Worker requests | 100,000 / day | Static dashboard assets (`/`, `/dashboard/*`) bypass the Worker and cost 0 Worker requests. |
-| Durable Object requests | 100,000 / day | 8 machines: `417–573` reqs/build; 64 machines: `2,934–3,656` reqs/build (first limit at 64 machines: `30–34` builds/day). |
-| Durable Object SQLite rows written | 100,000 / day | 8 machines: `467–847` lifecycle rows/build (`170` builds/day at 5k tests); 64 machines: `1,983–3,937` rows/build. |
+| Durable Object requests | 100,000 / day | First limit reached on large matrices (64 machines); increase `--lease-ttl` up to 10m to cut heartbeats. |
+| Durable Object SQLite rows written | 100,000 / day | Event-sourced log plus throttled `lease_deadlines` meta row keeps writes in the hundreds to low thousands per build. |
 | Durable Object SQLite rows read | 5,000,000 / day | Catalog and event log stay compact; builds replay on wake only. |
-| Durable Object duration | 13,000 GB-s / day | 10-min build: `61.2–66.4 GB-s` (`195–212` builds/day simulated; `76.25 GB-s` / `170` builds/day continuous; 8-machine 1k-test builds hit `202` builds/day simulated, `170` continuous). |
+| Durable Object duration | 13,000 GB-s / day | Billing stops once a DO hibernates after 10 s idle; continuous 10-minute build is 76.25 GB-s. |
 | Durable Object storage | 5 GB total | Finished builds call `deleteAll()` automatically 7 days after completion. |
-| CPU time | `10 ms` documented for Workers Free; Durable Objects Free CPU limit is not published | Unmeasured on a real Cloudflare account. `MAX_TESTS` defaults to `5,000` in `worker/wrangler.jsonc` as a conservative margin; run [docs/trials/cloudflare-queue.md](trials/cloudflare-queue.md) (`worker/scripts/trial.mjs`) on your account before raising it. |
+| CPU time | 10 ms on Workers Free; Durable Objects Free limit unpublished | `MAX_TESTS` defaults to 5,000 in `worker/wrangler.jsonc` and goes up to 20,000. On a real Free account, 5,000 tests took up to 28 ms DO CPU and 20,000 passed once at 35 ms; run `worker/scripts/trial.mjs` on your own deployment before raising it. |
 
-What actually happens on failures and limits:
+What happens on failures and limits:
 
-- **Durable Object stub error (storage failure, DO overload, or DO quota rejection):** `worker/src/index.ts` catches exceptions thrown by `BuildDO` / `BuildIndex` stubs, logs a structured JSON `do_rpc_error` entry (never tokens or bodies), and returns `503` with `{"version":1,"error":{"code":"storage_error","message":"durable object request failed"}}`.
-- **Edge/Worker rejection (Worker daily quota, rate limit, or CPU limit exceeded):** Cloudflare returns `429` or `5xx` directly outside the Worker's JSON envelope; `queueapi.Client` maps non-JSON error responses to `APIError{HTTPStatus: status, Code: "http_error"}`.
-- **Client retry and fail-safe exit:** `bunpo --queue` treats `429`, all `>= 500` responses (including `503 storage_error`), and network errors as transient (`queueapi.IsTransientError`), retrying with exponential backoff and jitter up to 2 minutes before exiting `1`. A build never reports a false pass when the server hits a limit.
-- **Large matrices (64+ machines):** Heartbeats at `lease_ttl / 3` are roughly half of all requests; increase `--lease-ttl` (up to `10m`) to cut request volume proportionally.
-- **Open dashboard tabs:** One visible tab viewing a running build makes `360` req/hr when idle, up to `1,080` req/hr while state changes every 10 s, and `0` req/hr once finished or hidden.
+- **Durable Object stub error (storage failure, DO overload, or DO quota rejection):** `worker/src/index.ts` catches exceptions from `BuildDO` and `BuildIndex` stubs, logs a structured JSON `do_rpc_error` entry (never tokens or bodies), and returns 503 with `{"version":1,"error":{"code":"storage_error","message":"durable object request failed"}}`.
+- **Edge or Worker rejection (daily quota, rate limit, or CPU limit):** Cloudflare returns 429 or 5xx outside the Worker's JSON envelope; the Go client maps non-JSON errors to `http_error`.
+- **Client retry and fail-safe exit:** `bunpo --queue` treats 429, all 5xx responses (including 503 `storage_error`), and network errors as transient, retrying with exponential backoff and jitter up to 2 minutes before exiting 1. A build never reports a false pass when the server hits a limit.
+- **Large matrices (64+ machines):** Heartbeats at `lease_ttl / 3` are roughly half of all requests; increase `--lease-ttl` (up to 10m) to cut request volume proportionally.
+- **Open dashboard tabs:** One visible tab viewing a running build makes 360 req/hr when idle, up to 1,080 req/hr while state changes every 10 s, and 0 req/hr once finished or hidden.
 
 ## 3. Standalone Go server (`bunpo-server`)
 
@@ -193,20 +191,20 @@ curl -fsS http://127.0.0.1:8080/healthz
 ### Persistence (`--data`), backups, and limits
 
 - **One server per directory:** Never point two `bunpo-server` processes at the same `--data` directory (including over shared NFS). Each process opens `--data` through `os.Root`, checks expected file sizes before appending, and `fsync`s every decision.
-- **In-memory mode:** Omitting `--data` keeps builds in memory only. A restart loses active builds (`404`); runners exit `1` and nothing can pass across a restart.
-- **Capacity and retention:** `bunpo-server` retains up to `200` builds total and `64` running builds (`503 at_capacity` when full), removing finished builds 7 days after completion.
-- **Backups:** Stop `bunpo-server` (or take an atomic filesystem snapshot) before copying `/var/lib/bunpo`. Each build is one `0600` CRC-32C-framed event log named by the SHA-256 of its build ID. On startup, a torn final record at EOF is truncated and logged; any mid-file corruption is quarantined untouched (`500` for that build only) without blocking other builds.
+- **In-memory mode:** Omitting `--data` keeps builds in memory only. A restart loses active builds (404); runners exit 1 and nothing can pass across a restart.
+- **Capacity and retention:** `bunpo-server` retains up to 200 builds total and 64 running builds (`503 at_capacity` when full), removing finished builds 7 days after completion.
+- **Backups:** Stop `bunpo-server` (or take an atomic filesystem snapshot) before copying `/var/lib/bunpo`. Each build is one `0600` CRC-32C-framed event log named by the SHA-256 of its build ID. On startup, a torn final record at EOF is truncated and logged; any mid-file corruption is quarantined untouched (500 for that build only) without blocking other builds.
 
 ### Token rotation
 
 1. Pick a quiet window between CI builds (or pause queued workflows).
 2. Generate new tokens with `openssl rand -hex 32`.
 3. Update `/etc/bunpo/env` and restart: `sudo systemctl restart bunpo-server`.
-4. Update `BUNPO_QUEUE_TOKEN` and `BUNPO_QUEUE_READ_TOKEN` in your CI secrets. Any in-flight runner with the old token receives `401` and exits `1` (re-run the workflow after updating secrets).
+4. Update `BUNPO_QUEUE_TOKEN` and `BUNPO_QUEUE_READ_TOKEN` in your CI secrets. Any in-flight runner with the old token receives 401 and exits 1 (re-run the workflow after updating secrets).
 
 ### Container image (optional)
 
-Build the minimal `scratch` container image locally from the repository root (non-root UID `65532`, static binary, `/data` volume):
+Build the minimal `scratch` container image locally from the repository root (non-root UID 65532, static binary, `/data` volume):
 
 ```sh
 docker build -t bunpo-server:local .

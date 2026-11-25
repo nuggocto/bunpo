@@ -15,8 +15,8 @@
     }
   },
   "vars": {
-    // Local benchmark default under the 10 ms Free-plan CPU assumption;
-    // valid range is 1..20000 and may be raised after testing on a real account.
+    // Default build size cap (valid range 1..20000). 20000 passed once on a real
+    // Cloudflare Free-plan account; see docs/trials/2026-11-25-cloudflare-free-trial.md.
     "MAX_TESTS": "5000"
   },
   "assets": {
