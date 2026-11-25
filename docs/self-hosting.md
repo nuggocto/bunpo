@@ -102,22 +102,23 @@ npx wrangler logout
 
 ### Cloudflare Free-plan limits and failure modes
 
-Cloudflare Free-plan limits and how Bunpō behaves under them (see [docs/decisions/0003-live-queue.md](decisions/0003-live-queue.md) for the full local `workerd` row, request, and duration table, and [docs/trials/2026-11-25-cloudflare-free-trial.md](trials/2026-11-25-cloudflare-free-trial.md) for real Free-plan CPU measurements and how to run `worker/scripts/trial.mjs`):
+Free-plan limits are per account (shared with all other Workers on the account) and reset at 00:00 UTC. See [docs/decisions/0003-live-queue.md](decisions/0003-live-queue.md) for the local `workerd` row, request, and duration table, and [docs/trials/2026-11-25-cloudflare-free-trial.md](trials/2026-11-25-cloudflare-free-trial.md) for real Free-plan CPU measurements and how to run `worker/scripts/trial.mjs`.
 
 | Resource | Cloudflare Free limit | Bunpō behavior |
 | --- | --- | --- |
-| Worker requests | 100,000 / day | Static dashboard assets (`/`, `/dashboard/*`) bypass the Worker and cost 0 Worker requests. |
+| Worker requests | 100,000 / day (Error 1027 past limit) | Static dashboard assets (`/`, `/dashboard/*`) bypass the Worker and cost 0 Worker requests. |
 | Durable Object requests | 100,000 / day | First limit reached on large matrices (64 machines); increase `--lease-ttl` up to 10m to cut heartbeats. |
 | Durable Object SQLite rows written | 100,000 / day | Event-sourced log plus throttled `lease_deadlines` meta row keeps writes in the hundreds to low thousands per build. |
 | Durable Object SQLite rows read | 5,000,000 / day | Catalog and event log stay compact; builds replay on wake only. |
-| Durable Object duration | 13,000 GB-s / day | Billing stops once a DO hibernates after 10 s idle; continuous 10-minute build is 76.25 GB-s. |
-| Durable Object storage | 5 GB total | Finished builds call `deleteAll()` automatically 7 days after completion. |
-| CPU time | 10 ms on Workers Free; Durable Objects Free limit unpublished | `MAX_TESTS` defaults to 5,000 in `worker/wrangler.jsonc` and goes up to 20,000. On a real Free account, 5,000 tests took up to 28 ms DO CPU and 20,000 passed once at 35 ms; run `worker/scripts/trial.mjs` on your own deployment before raising it. |
+| Durable Object duration | 13,000 GB-s / day | Per [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), idle hibernation-eligible DOs are not billed for duration even before hibernating (the 76.25 GB-s continuous 10-minute figure in ADR 0003 is a conservative upper bound; the trial recorded 7.9 s total DO wall time). |
+| Durable Object storage | 5 GB per account; per object, the FAQ states 1 GB on Free while the limits table lists 10 GB | Finished builds call `deleteAll()` automatically 7 days after completion. |
+| Observability (logs and traces) | 200,000 events / day (replaced by 0.5 GB / day shared by logs and traces from 1 December 2026); stops ingesting until 00:00 UTC | At 100% logs and traces, the trial used about 10 events/request (~20,000 requests, or 35 to 48 8-machine builds/day). `worker/wrangler.jsonc` sets `observability.traces.head_sampling_rate` to `0.05` and keeps logs at 100% so `do_rpc_error` is not sampled away. Adjust `head_sampling_rate` or set `observability.traces.enabled` to `false` in `worker/wrangler.jsonc` and redeploy. Cloudflare's docs do not say reaching the observability limit affects serving requests. |
+| CPU time | Conflicting docs: [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/) table lists 30 s default with no Free value, its FAQ says DOs share Worker CPU limits, and [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) gives 10 ms on Free | `MAX_TESTS` defaults to 5,000 in `worker/wrangler.jsonc` and goes up to 20,000. On a real Free account under light use, 12 DO calls passed above 10 ms (up to 28 ms at 5,000 and 35 ms once at 20,000). A strictly enforced 10 ms limit would hit 1,000 files too (`init` used 12 to 14 ms); run `worker/scripts/trial.mjs` on your own deployment before raising `MAX_TESTS`. |
 
 What happens on failures and limits:
 
-- **Durable Object stub error (storage failure, DO overload, or DO quota rejection):** `worker/src/index.ts` catches exceptions from `BuildDO` and `BuildIndex` stubs, logs a structured JSON `do_rpc_error` entry (never tokens or bodies), and returns 503 with `{"version":1,"error":{"code":"storage_error","message":"durable object request failed"}}`.
-- **Edge or Worker rejection (daily quota, rate limit, or CPU limit):** Cloudflare returns 429 or 5xx outside the Worker's JSON envelope; the Go client maps non-JSON errors to `http_error`.
+- **Durable Object limit or stub error (storage failure, CPU limit, DO overload, or DO daily quota):** Per [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), past any Durable Object Free limit "further operations of that type will fail with an error." `worker/src/index.ts` catches exceptions from `BuildDO` and `BuildIndex` stubs, logs a structured JSON `do_rpc_error` entry (never tokens or bodies), and returns 503 with `{"version":1,"error":{"code":"storage_error","message":"durable object request failed"}}`.
+- **Edge or Worker rejection (Worker daily quota Error 1027, rate limit, or Worker CPU limit):** Cloudflare returns 429 or 5xx outside the Worker's JSON envelope; the Go client maps non-JSON errors to `http_error`.
 - **Client retry and fail-safe exit:** `bunpo --queue` treats 429, all 5xx responses (including 503 `storage_error`), and network errors as transient, retrying with exponential backoff and jitter up to 2 minutes before exiting 1. A build never reports a false pass when the server hits a limit.
 - **Large matrices (64+ machines):** Heartbeats at `lease_ttl / 3` are roughly half of all requests; increase `--lease-ttl` (up to 10m) to cut request volume proportionally.
 - **Open dashboard tabs:** One visible tab viewing a running build makes 360 req/hr when idle, up to 1,080 req/hr while state changes every 10 s, and 0 req/hr once finished or hidden.
