@@ -4,19 +4,19 @@ import { isCanonicalPOSIXTestID, compareUTF8, median } from "./canonical.ts";
 export const ProtocolVersion = 1;
 
 export const MaxTests = 20_000;
-export const MaxTestIDBytes = 4_096;
-export const MaxMachines = 256;
-export const MaxRunners = 1_024;
+const MaxTestIDBytes = 4_096;
+const MaxMachines = 256;
+const MaxRunners = 1_024;
 export const MaxDurationMS = 30 * 24 * 60 * 60 * 1000;
 
-export const MinLeaseTTLMS = 10_000;
-export const MaxLeaseTTLMS = 600_000;
+const MinLeaseTTLMS = 10_000;
+const MaxLeaseTTLMS = 600_000;
 
-export const MaxBuildTimeoutMS = 24 * 60 * 60 * 1000;
+const MaxBuildTimeoutMS = 24 * 60 * 60 * 1000;
 
-export const MaxAttemptsLimit = 10;
+const MaxAttemptsLimit = 10;
 
-export const MaxBatchLimit = 200;
+const MaxBatchLimit = 200;
 
 export const MaxInitConflicts = 8;
 export const MaxTestHistory = 8;
@@ -334,10 +334,6 @@ export function validRequestID(id: string): boolean {
   return validToken(id, 128);
 }
 
-export function validTestID(id: string): boolean {
-  return isCanonicalPOSIXTestID(id, MaxTestIDBytes);
-}
-
 export function validateMachineIndex(idx: number | null): QueueError | null {
   if (idx === null) {
     return null;
@@ -364,7 +360,7 @@ export function validateTestList(
   }
   for (let i = 0; i < tests.length; i++) {
     const id = tests[i]!;
-    if (!validTestID(id)) {
+    if (!isCanonicalPOSIXTestID(id, MaxTestIDBytes)) {
       return errInvalid(`test ${i} (${JSON.stringify(id)}) is not a canonical test identifier`);
     }
     if (i > 0 && compareUTF8(tests[i - 1]!, id) >= 0) {

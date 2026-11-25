@@ -17,7 +17,7 @@ import (
 	"github.com/nuggocto/bunpo/internal/queue"
 )
 
-const DefaultHTTPTimeout = 30 * time.Second
+const defaultHTTPTimeout = 30 * time.Second
 
 // ClientConfig configures a single-shot live-queue HTTP client.
 type ClientConfig struct {
@@ -66,7 +66,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: DefaultHTTPTimeout}
+		hc = &http.Client{Timeout: defaultHTTPTimeout}
 	} else {
 		cp := *hc
 		hc = &cp

@@ -27,23 +27,23 @@ const (
 	MinHeartbeatTickMS    int64 = 20
 )
 
-// Entropy supplies IDs and retry jitter. Production uses CryptoEntropy;
+// Entropy supplies IDs and retry jitter. Production uses cryptoEntropy;
 // simulation tests pass a seeded deterministic PRNG.
 type Entropy interface {
 	Hex16() string
 	Int64N(n int64) int64
 }
 
-// CryptoEntropy draws IDs from crypto/rand and jitter from math/rand/v2.
-type CryptoEntropy struct{}
+// cryptoEntropy draws IDs from crypto/rand and jitter from math/rand/v2.
+type cryptoEntropy struct{}
 
-func (CryptoEntropy) Hex16() string {
+func (cryptoEntropy) Hex16() string {
 	var buf [16]byte
 	_, _ = crand.Read(buf[:])
 	return hex.EncodeToString(buf[:])
 }
 
-func (CryptoEntropy) Int64N(n int64) int64 {
+func (cryptoEntropy) Int64N(n int64) int64 {
 	return rand.Int64N(n)
 }
 
@@ -285,7 +285,7 @@ func NewMachine(cfg WorkerConfig) (*Machine, error) {
 	}
 	ent := cfg.Entropy
 	if ent == nil {
-		ent = CryptoEntropy{}
+		ent = cryptoEntropy{}
 	}
 	hbInterval := max(cfg.Config.LeaseTTLMS/3, MinHeartbeatTickMS)
 	hbRetry := max(min(hbInterval/2, 1000), 15)
@@ -374,7 +374,7 @@ func (m *Machine) Step(nowMS int64, ev Event) []Action {
 				Message: fmt.Sprintf("lease %d report unreadable (%v); reporting batch as error", m.curLease.LeaseID, ev.ReadErr),
 			})
 		}
-		results, extraErr := MapOutcomes(m.curLease.Attempts, m.cmdExitCode, m.cmdSignaled, m.cfg.Format, ev.Files, ev.ReadErr)
+		results, extraErr := mapOutcomes(m.curLease.Attempts, m.cmdExitCode, m.cmdSignaled, m.cfg.Format, ev.Files, ev.ReadErr)
 		m.curResults = results
 		m.curExtraErr = extraErr
 		m.fgRetry.reset()
@@ -739,7 +739,7 @@ type StatusMachine struct {
 func NewStatusMachine(cfg StatusMachineConfig) *StatusMachine {
 	ent := cfg.Entropy
 	if ent == nil {
-		ent = CryptoEntropy{}
+		ent = cryptoEntropy{}
 	}
 	return &StatusMachine{
 		buildID:  cfg.BuildID,
@@ -874,9 +874,9 @@ func (s *StatusMachine) sendListTests() Action {
 	}
 }
 
-// MapOutcomes maps a batch execution's exit status and parsed reports onto
+// mapOutcomes maps a batch execution's exit status and parsed reports onto
 // per-attempt queue outcomes following section 7.1 of docs/queue-protocol.md.
-func MapOutcomes(
+func mapOutcomes(
 	attempts []queue.LeasedAttemptView,
 	exitCode int,
 	signaled bool,

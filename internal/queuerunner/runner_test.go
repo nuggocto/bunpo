@@ -186,7 +186,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, extra := MapOutcomes(tc.attempts, tc.exitCode, tc.signaled, tc.format, tc.files, tc.readErr)
+			got, extra := mapOutcomes(tc.attempts, tc.exitCode, tc.signaled, tc.format, tc.files, tc.readErr)
 			if len(tc.wantExtra) == 0 {
 				if extra != nil {
 					t.Fatalf("unexpected ExtraFilesError: %v", extra)

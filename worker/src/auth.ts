@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
-export const MIN_TOKEN_BYTES = 16;
+const MIN_TOKEN_BYTES = 16;
 
 export type AuthRole = "none" | "read" | "write";
 

@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { parseMaxTests } from "./config.ts";
+import { DEFAULT_WORKER_MAX_TESTS, parseMaxTests } from "./config.ts";
 import {
   type ActiveLeaseSeed,
   type ListTestsCommand,
@@ -33,7 +33,7 @@ import {
   wireErr,
 } from "./wire.ts";
 
-export const CATALOG_CHUNK_SIZE = 1_000;
+const CATALOG_CHUNK_SIZE = 1_000;
 export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const INDEX_RETRY_INTERVAL_MS = 60_000;
 const INDEX_NAME = "global";
@@ -51,13 +51,6 @@ interface CatalogChunkPayload {
 interface IndexSyncState {
   verdict: Verdict;
   has_conflicts: boolean;
-}
-
-function okReply(payload: object): DoHttpReply {
-  return {
-    status: 200,
-    body: JSON.stringify({ version: ProtocolVersion, ...payload }),
-  };
 }
 
 function errReply(err: WireError): DoHttpReply {
@@ -83,7 +76,7 @@ export class BuildDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const parsedMax = parseMaxTests(env.MAX_TESTS);
-    this.maxTests = parsedMax.ok ? parsedMax.maxTests : 5_000;
+    this.maxTests = parsedMax.ok ? parsedMax.maxTests : DEFAULT_WORKER_MAX_TESTS;
     this.state = this.freshState();
 
     this.ctx.blockConcurrencyWhile(async () => {
@@ -421,14 +414,10 @@ export class BuildDO extends DurableObject<Env> {
     const becameTerminal = wasInitialized && prevVerdict === "running" && newVerdict !== "running";
     const conflictChanged = this.state.initialized && !hadConflict && this.state.conflicts.length > 0;
 
-    let alarmPromise: Promise<void> | null = null;
     if (created) {
-      alarmPromise = this.ctx.storage.setAlarm(this.state.deadlineMS);
+      await this.ctx.storage.setAlarm(this.state.deadlineMS);
     } else if (becameTerminal) {
-      alarmPromise = this.ctx.storage.setAlarm((this.state.finishedAtMS || nowMS) + RETENTION_MS);
-    }
-    if (alarmPromise !== null) {
-      await alarmPromise;
+      await this.ctx.storage.setAlarm((this.state.finishedAtMS || nowMS) + RETENTION_MS);
     }
 
     if (created || becameTerminal || conflictChanged) {
@@ -440,7 +429,10 @@ export class BuildDO extends DurableObject<Env> {
     if (out.error) {
       return errReply(wireErr(out.error.httpStatus, out.error.code, out.error.message));
     }
-    return okReply(out.response!);
+    return {
+      status: 200,
+      body: JSON.stringify({ version: ProtocolVersion, ...out.response! }),
+    };
   }
 
   async init(buildID: string, rawBody: string, nowOverride?: number): Promise<DoHttpReply> {

@@ -17,15 +17,6 @@ export interface IndexEntry extends BuildSummary {
   expires_at_ms: number;
 }
 
-export function sortIndexEntries(entries: IndexEntry[]): IndexEntry[] {
-  return entries.slice().sort((a, b) => {
-    if (a.created_at_ms !== b.created_at_ms) {
-      return b.created_at_ms - a.created_at_ms;
-    }
-    return compareUTF8(a.build_id, b.build_id);
-  });
-}
-
 export function pruneAndCapIndex(entries: Iterable<IndexEntry>, nowMS: number): IndexEntry[] {
   const live: IndexEntry[] = [];
   for (const e of entries) {
@@ -33,11 +24,16 @@ export function pruneAndCapIndex(entries: Iterable<IndexEntry>, nowMS: number): 
       live.push(e);
     }
   }
-  const sorted = sortIndexEntries(live);
-  if (sorted.length > MAX_INDEX_BUILDS) {
-    sorted.length = MAX_INDEX_BUILDS;
+  live.sort((a, b) => {
+    if (a.created_at_ms !== b.created_at_ms) {
+      return b.created_at_ms - a.created_at_ms;
+    }
+    return compareUTF8(a.build_id, b.build_id);
+  });
+  if (live.length > MAX_INDEX_BUILDS) {
+    live.length = MAX_INDEX_BUILDS;
   }
-  return sorted;
+  return live;
 }
 
 export function toBuildSummary(e: IndexEntry): BuildSummary {

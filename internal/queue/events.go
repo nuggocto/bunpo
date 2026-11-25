@@ -148,7 +148,7 @@ func (s *State) applyInitialized(atMS int64, d *InitializedData) error {
 	if err := validateTestList(d.Tests, d.PredictionsMS, s.Limits.effective().MaxTests); err != nil {
 		return err
 	}
-	wantDigest := ConfigDigest(d.Config, d.Tests)
+	wantDigest := configDigest(d.Config, d.Tests)
 	if d.Digest != wantDigest {
 		return fmt.Errorf("initialized digest %q does not match computed %q", d.Digest, wantDigest)
 	}

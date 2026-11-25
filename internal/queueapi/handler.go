@@ -356,7 +356,11 @@ func (h *Handler) handleInit(w http.ResponseWriter, r *http.Request, buildID str
 		if created && !entry.state.Initialized && !entry.broken {
 			entry.failedCreate = true
 			entry.mu.Unlock()
-			h.removeFailedCreate(buildID, entry)
+			h.mu.Lock()
+			if h.builds[buildID] == entry {
+				delete(h.builds, buildID)
+			}
+			h.mu.Unlock()
 		} else {
 			entry.mu.Unlock()
 		}
@@ -1068,14 +1072,6 @@ func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*
 		h.mu.Unlock()
 		return entry, true, nil
 	}
-}
-
-func (h *Handler) removeFailedCreate(buildID string, entry *buildEntry) {
-	h.mu.Lock()
-	if h.builds[buildID] == entry {
-		delete(h.builds, buildID)
-	}
-	h.mu.Unlock()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

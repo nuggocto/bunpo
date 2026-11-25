@@ -183,7 +183,7 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 		d.logWarn = func(string, ...any) {}
 	}
 	if d.ent == nil {
-		d.ent = CryptoEntropy{}
+		d.ent = cryptoEntropy{}
 	}
 
 	// Monotonic clock anchored at startTime so NTP steps never skew retry budgets or timers.

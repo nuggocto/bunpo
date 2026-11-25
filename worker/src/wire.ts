@@ -15,14 +15,14 @@ import {
 
 export const MAX_INIT_BODY_BYTES = 4 * 1024 * 1024;
 export const MAX_OTHER_BODY_BYTES = 1 * 1024 * 1024;
-export const CONTENT_TYPE_JSON = "application/json; charset=utf-8";
+const CONTENT_TYPE_JSON = "application/json; charset=utf-8";
 
 export const ErrCodeUnauthorized = "unauthorized";
 export const ErrCodeForbidden = "forbidden";
 export const ErrCodeNotFound = "not_found";
 export const ErrCodeMethodNotAllowed = "method_not_allowed";
-export const ErrCodeUnsupportedVersion = "unsupported_version";
-export const ErrCodePayloadTooLarge = "payload_too_large";
+const ErrCodeUnsupportedVersion = "unsupported_version";
+const ErrCodePayloadTooLarge = "payload_too_large";
 export const ErrCodeStorageError = "storage_error";
 export const ErrCodeServerMisconfigured = "server_misconfigured";
 

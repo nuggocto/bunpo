@@ -293,7 +293,7 @@ func DecideInit(s *State, nowMS int64, cmd InitCommand) ([]Event, InitResponse, 
 		return nil, InitResponse{}, err
 	}
 
-	digest := ConfigDigest(cmd.Config, cmd.Tests)
+	digest := configDigest(cmd.Config, cmd.Tests)
 
 	if !s.Initialized {
 		preds := make([]*int64, len(cmd.PredictionsMS))

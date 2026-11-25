@@ -27,16 +27,6 @@ const INDEX_NAME = "global";
 const DASHBOARD_CSP =
   "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-function dashboardHTMLHeaders(): HeadersInit {
-  return {
-    "Content-Type": "text/html; charset=utf-8",
-    "Content-Security-Policy": DASHBOARD_CSP,
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
-    "Cache-Control": "no-cache",
-  };
-}
-
 function isDashboardBuildRoute(pathname: string): boolean {
   if (!pathname.startsWith("/builds/")) return false;
   const raw = pathname.slice("/builds/".length);
@@ -63,14 +53,13 @@ async function serveDashboardIndex(request: Request, env: Env): Promise<Response
   }
   return new Response(request.method === "HEAD" ? null : assetResp.body, {
     status: 200,
-    headers: dashboardHTMLHeaders(),
-  });
-}
-
-function doReplyToResponse(reply: { status: number; body: string }): Response {
-  return new Response(reply.body, {
-    status: reply.status,
-    headers: apiHeaders(),
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy": DASHBOARD_CSP,
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "Cache-Control": "no-cache",
+    },
   });
 }
 
@@ -224,7 +213,7 @@ async function callDO(
   try {
     const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(buildID));
     const reply = await fn(stub);
-    return doReplyToResponse(reply);
+    return new Response(reply.body, { status: reply.status, headers: apiHeaders() });
   } catch (err) {
     logDOError(buildID, method, err);
     return errorResponse(wireErr(503, ErrCodeStorageError, "durable object request failed"));

@@ -458,9 +458,9 @@ func validateTestList(tests []string, predictions []*int64, maxTests int) error 
 	return nil
 }
 
-// ConfigDigest computes the lowercase hex SHA-256 build digest over config and
+// configDigest computes the lowercase hex SHA-256 build digest over config and
 // sorted canonical tests, excluding predictions.
-func ConfigDigest(cfg Config, tests []string) string {
+func configDigest(cfg Config, tests []string) string {
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h,
 		"bunpo queue %d\nmachines %d\nlease_ttl_ms %d\nbuild_timeout_ms %d\nmax_attempts %d\nmax_batch %d\n",
