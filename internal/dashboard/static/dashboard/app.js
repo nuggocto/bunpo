@@ -1,7 +1,7 @@
 import {
   BASE_POLL_MS, PAGE_LIMIT, buildPath, buildTimeline, createGuardedLoader, createPollState,
   fetchBuildInitial, formatAttemptDuration, formatDuration, formatTimeLeft, formatTimestamp,
-  mergeRefreshedPage, parseRoute, pollStep, sortBuilds, statusMeta,
+  parseRoute, pollStep, replaceWithRefreshedPage, sortBuilds, statusMeta,
 } from "./core.js";
 
 const TOKEN_KEY = "bunpo_queue_read_token";
@@ -16,11 +16,9 @@ const ui = {
   filter: "problems",
   tests: [],
   nextCursor: null,
-  testsPages: 0,
   filterSeq: 0,
   tlTests: [],
   tlCursor: null,
-  tlPages: 0,
   leaseID: null,
   announced: "",
 };
@@ -29,10 +27,8 @@ function resetBuildState() {
   ui.status = null;
   ui.tests = [];
   ui.nextCursor = null;
-  ui.testsPages = 0;
   ui.tlTests = [];
   ui.tlCursor = null;
-  ui.tlPages = 0;
   ui.leaseID = null;
 }
 
@@ -225,10 +221,8 @@ async function loadBuild(buildID, gen) {
   const { status: st, timeline, tests } = res.value;
   ui.tlTests = timeline.tests || [];
   ui.tlCursor = timeline.next_cursor ?? null;
-  ui.tlPages = 1;
   ui.tests = tests.tests || [];
   ui.nextCursor = tests.next_cursor ?? null;
-  ui.testsPages = 1;
   renderTimeline();
   renderTests();
   dispatchPoll({ type: "watch", verdict: st.verdict });
@@ -261,17 +255,15 @@ async function refreshActiveBuild(manual) {
     if (!tlRes.ok) return handleFetchError(tlRes.error, !manual);
     if (!testsRes.ok) return handleFetchError(testsRes.error, !manual);
 
-    const tl = mergeRefreshedPage(ui.tlTests, ui.tlCursor, ui.tlPages, tlRes.value);
+    const tl = replaceWithRefreshedPage(tlRes.value);
     ui.tlTests = tl.tests;
     ui.tlCursor = tl.nextCursor;
-    ui.tlPages = tl.pagesLoaded;
     renderTimeline();
 
     if (seq === ui.filterSeq) {
-      const ts = mergeRefreshedPage(ui.tests, ui.nextCursor, ui.testsPages, testsRes.value);
+      const ts = replaceWithRefreshedPage(testsRes.value);
       ui.tests = ts.tests;
       ui.nextCursor = ts.nextCursor;
-      ui.testsPages = ts.pagesLoaded;
       renderTests();
     }
   }
@@ -326,7 +318,6 @@ async function loadNextTimelinePage() {
   if (!res.ok) return handleFetchError(res.error, false);
   ui.tlTests = ui.tlTests.concat(res.value.tests || []);
   ui.tlCursor = res.value.next_cursor ?? null;
-  ui.tlPages++;
   renderTimeline();
 }
 
@@ -452,7 +443,6 @@ async function loadTestsPage(reset) {
   if (!res.ok) return handleFetchError(res.error, false);
   ui.tests = reset ? res.value.tests || [] : ui.tests.concat(res.value.tests || []);
   ui.nextCursor = res.value.next_cursor ?? null;
-  ui.testsPages = reset ? 1 : ui.testsPages + 1;
   renderTests();
 }
 

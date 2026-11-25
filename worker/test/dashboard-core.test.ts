@@ -11,9 +11,9 @@ import {
   formatAttemptDuration,
   formatDuration,
   formatTimeLeft,
-  mergeRefreshedPage,
   parseRoute,
   pollStep,
+  replaceWithRefreshedPage,
   sortBuilds,
 } from "../../internal/dashboard/static/dashboard/core.js";
 
@@ -119,32 +119,27 @@ describe("dashboard pure core", () => {
     expect(await buildB).toEqual({ stale: true });
   });
 
-  it("merges refreshed page 1 without collapsing extra pages the user loaded", () => {
-    const page1Old = [
-      { test_index: 0, state: "leased" },
-      { test_index: 1, state: "pending" },
-    ];
-    const page2 = [
-      { test_index: 2, state: "passed" },
-      { test_index: 3, state: "failed" },
-    ];
-    const merged = mergeRefreshedPage(page1Old.concat(page2), 4, 2, {
+  it("resets to fresh page 1 on refresh so multi-page views never keep stale pages or miss newly matching tests", () => {
+    const refreshed = replaceWithRefreshedPage({
       tests: [
-        { test_index: 0, state: "passed" },
-        { test_index: 1, state: "passed" },
+        { test_index: 0, state: "failed" },
+        { test_index: 5, state: "failed" },
       ],
-      next_cursor: 2,
+      next_cursor: 6,
     });
-    expect(merged.pagesLoaded).toBe(2);
-    expect(merged.nextCursor).toBe(4);
-    expect(merged.tests.map((t) => `${t.test_index}:${t.state}`)).toEqual(["0:passed", "1:passed", "2:passed", "3:failed"]);
+    expect(refreshed).toEqual({
+      tests: [
+        { test_index: 0, state: "failed" },
+        { test_index: 5, state: "failed" },
+      ],
+      nextCursor: 6,
+    });
 
-    // When only 1 page was loaded, refresh replaces cleanly and tracks new next_cursor.
-    const single = mergeRefreshedPage(page1Old, 2, 1, {
+    const single = replaceWithRefreshedPage({
       tests: [{ test_index: 0, state: "passed" }],
       next_cursor: null,
     });
-    expect(single).toEqual({ tests: [{ test_index: 0, state: "passed" }], nextCursor: null, pagesLoaded: 1 });
+    expect(single).toEqual({ tests: [{ test_index: 0, state: "passed" }], nextCursor: null });
   });
 
   it("lays out per-machine timeline bars with non-color status symbols, wall-time durations, and active lease clamping", () => {

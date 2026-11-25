@@ -115,17 +115,11 @@ export async function fetchBuildInitial(loader, gen, buildID, testsQS, onStatus)
   return { stale: false, ok: true, value: { status: st.value, timeline: tl.value, tests: tests.value } };
 }
 
-// Updates page 1 on refresh without collapsing later pages the user explicitly loaded.
-export function mergeRefreshedPage(existing, existingNextCursor, pagesLoaded, freshPage) {
-  const freshTests = freshPage?.tests || [];
-  const freshNext = freshPage?.next_cursor ?? null;
-  if (pagesLoaded <= 1 || freshNext === null) {
-    return { tests: freshTests, nextCursor: freshNext, pagesLoaded: 1 };
-  }
+// Resets the test list to fresh page 1 on refresh so later pages never go stale or miss newly matching tests.
+export function replaceWithRefreshedPage(freshPage) {
   return {
-    tests: freshTests.concat(existing.filter((t) => t.test_index >= freshNext)),
-    nextCursor: existingNextCursor,
-    pagesLoaded,
+    tests: freshPage?.tests || [],
+    nextCursor: freshPage?.next_cursor ?? null,
   };
 }
 

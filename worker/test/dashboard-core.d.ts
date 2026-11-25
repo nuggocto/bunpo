@@ -46,12 +46,9 @@ declare module "*dashboard/core.js" {
     onStatus?: (status: T) => void,
   ): Promise<GuardedResult<{ status: T; timeline: T; tests: T }>>;
 
-  export function mergeRefreshedPage<T extends { test_index: number }>(
-    existing: readonly T[],
-    existingNextCursor: number | null,
-    pagesLoaded: number,
+  export function replaceWithRefreshedPage<T extends { test_index: number }>(
     freshPage: { tests?: T[]; next_cursor?: number | null },
-  ): { tests: T[]; nextCursor: number | null; pagesLoaded: number };
+  ): { tests: T[]; nextCursor: number | null };
 
   export interface TimelineBar {
     leaseID: number;
