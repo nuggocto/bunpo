@@ -269,7 +269,6 @@ type Machine struct {
 	hbIntervalMS int64
 	hbRetryMS    int64
 	buildStartMS int64
-	startedAtSet bool
 
 	curReqID    string
 	curLease    queueapi.LeaseResponse
@@ -320,7 +319,6 @@ func (m *Machine) Step(nowMS int64, ev Event) []Action {
 			return nil
 		}
 		m.buildStartMS = nowMS
-		m.startedAtSet = true
 		m.phase = phaseInit
 		return []Action{m.sendInit()}
 
@@ -504,7 +502,7 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 					// server after this runner moved on; wait one heartbeat interval for
 					// it to expire and try again with a fresh request_id, bounded by the
 					// build deadline.
-					if m.startedAtSet && m.cfg.Config.BuildTimeoutMS > 0 && nowMS >= m.buildStartMS+m.cfg.Config.BuildTimeoutMS {
+					if m.cfg.Config.BuildTimeoutMS > 0 && nowMS >= m.buildStartMS+m.cfg.Config.BuildTimeoutMS {
 						return m.fail(resp.Err)
 					}
 					m.fgRetry.reset()

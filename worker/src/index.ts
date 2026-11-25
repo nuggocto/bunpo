@@ -44,9 +44,17 @@ function isDashboardBuildRoute(pathname: string): boolean {
   return validBuildID(raw);
 }
 
+function methodNotAllowed(allow: string): Response {
+  return errorResponse(wireErr(405, ErrCodeMethodNotAllowed, "method not allowed"), { Allow: allow });
+}
+
+function invalidBuildIDResponse(): Response {
+  return errorResponse(wireErr(400, ErrCodeInvalidRequest, "invalid build ID"));
+}
+
 async function serveDashboardIndex(request: Request, env: Env): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") {
-    return errorResponse(wireErr(405, ErrCodeMethodNotAllowed, "method not allowed"), { Allow: "GET, HEAD" });
+    return methodNotAllowed("GET, HEAD");
   }
   const indexReq = new Request(new URL("/index.html", request.url), { method: request.method });
   const assetResp = await env.ASSETS.fetch(indexReq);
@@ -91,7 +99,7 @@ export default {
 
     if (path === "/healthz") {
       if (request.method !== "GET") {
-        return errorResponse(wireErr(405, ErrCodeMethodNotAllowed, "method not allowed"), { Allow: "GET" });
+        return methodNotAllowed("GET");
       }
       return jsonResponse(200, { ok: true });
     }
@@ -119,7 +127,7 @@ export default {
 
     if (rest === "builds") {
       if (request.method !== "GET") {
-        return errorResponse(wireErr(405, ErrCodeMethodNotAllowed, "method not allowed"), { Allow: "GET" });
+        return methodNotAllowed("GET");
       }
       try {
         const indexStub = env.BUILD_INDEX.get(env.BUILD_INDEX.idFromName(INDEX_NAME));
@@ -147,20 +155,20 @@ export default {
 
     if (!hasSlash) {
       if (request.method !== "GET") {
-        return errorResponse(wireErr(405, ErrCodeMethodNotAllowed, "method not allowed"), { Allow: "GET" });
+        return methodNotAllowed("GET");
       }
       if (!validBuildID(buildID)) {
-        return errorResponse(wireErr(400, ErrCodeInvalidRequest, "invalid build ID"));
+        return invalidBuildIDResponse();
       }
       return callDO(env, buildID, "status", (stub) => stub.status());
     }
 
     if (action === "tests") {
       if (request.method !== "GET") {
-        return errorResponse(wireErr(405, ErrCodeMethodNotAllowed, "method not allowed"), { Allow: "GET" });
+        return methodNotAllowed("GET");
       }
       if (!validBuildID(buildID)) {
-        return errorResponse(wireErr(400, ErrCodeInvalidRequest, "invalid build ID"));
+        return invalidBuildIDResponse();
       }
       const parsedQuery = parseListTestsQuery(url);
       if (!parsedQuery.ok) {
@@ -171,7 +179,7 @@ export default {
 
     if (action === "init" || action === "lease" || action === "heartbeat" || action === "report") {
       if (request.method !== "POST") {
-        return errorResponse(wireErr(405, ErrCodeMethodNotAllowed, "method not allowed"), { Allow: "POST" });
+        return methodNotAllowed("POST");
       }
       if (role !== "write") {
         return errorResponse(wireErr(403, ErrCodeForbidden, "write token required"));
@@ -181,7 +189,7 @@ export default {
         return errorResponse(ctErr);
       }
       if (!validBuildID(buildID)) {
-        return errorResponse(wireErr(400, ErrCodeInvalidRequest, "invalid build ID"));
+        return invalidBuildIDResponse();
       }
 
       const maxBytes = action === "init" ? MAX_INIT_BODY_BYTES : MAX_OTHER_BODY_BYTES;

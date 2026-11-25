@@ -533,8 +533,7 @@ export class BuildDO extends DurableObject<Env> {
         this.persistAndApply(out.events);
         const deleteAt = (this.state.finishedAtMS || nowMS) + RETENTION_MS;
         // Same synchronous turn as persistAndApply so alarm + finalization commit atomically.
-        const alarmPromise = this.ctx.storage.setAlarm(deleteAt);
-        await alarmPromise;
+        await this.ctx.storage.setAlarm(deleteAt);
         await this.trySyncIndex(nowMS);
       } else {
         await this.ctx.storage.setAlarm(this.state.deadlineMS);

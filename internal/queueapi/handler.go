@@ -144,11 +144,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" {
 		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			writeJSON(w, http.StatusMethodNotAllowed, errorEnvelope{
-				Version: queue.ProtocolVersion,
-				Error:   errorBody{Code: ErrCodeMethodNotAllowed, Message: "method not allowed"},
-			})
+			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		writeJSON(w, http.StatusOK, HealthResponse{OK: true})
@@ -171,8 +167,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if rest == "builds" {
 		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			writeAPIError(w, &APIError{HTTPStatus: http.StatusMethodNotAllowed, Code: ErrCodeMethodNotAllowed, Message: "method not allowed"})
+			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		h.handleListBuilds(w, r)
@@ -193,12 +188,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if !hasSlash {
 		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			writeAPIError(w, &APIError{HTTPStatus: http.StatusMethodNotAllowed, Code: ErrCodeMethodNotAllowed, Message: "method not allowed"})
+			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
-		if !queue.ValidBuildID(buildID) {
-			writeAPIError(w, &APIError{HTTPStatus: http.StatusBadRequest, Code: queue.ErrCodeInvalidRequest, Message: "invalid build ID"})
+		if !requireBuildID(w, buildID) {
 			return
 		}
 		h.handleStatus(w, r, buildID)
@@ -208,12 +201,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "tests":
 		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			writeAPIError(w, &APIError{HTTPStatus: http.StatusMethodNotAllowed, Code: ErrCodeMethodNotAllowed, Message: "method not allowed"})
+			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
-		if !queue.ValidBuildID(buildID) {
-			writeAPIError(w, &APIError{HTTPStatus: http.StatusBadRequest, Code: queue.ErrCodeInvalidRequest, Message: "invalid build ID"})
+		if !requireBuildID(w, buildID) {
 			return
 		}
 		h.handleListTests(w, r, buildID)
@@ -221,8 +212,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case "init", "lease", "heartbeat", "report":
 		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			writeAPIError(w, &APIError{HTTPStatus: http.StatusMethodNotAllowed, Code: ErrCodeMethodNotAllowed, Message: "method not allowed"})
+			writeMethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		if role != roleWrite {
@@ -233,8 +223,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, err)
 			return
 		}
-		if !queue.ValidBuildID(buildID) {
-			writeAPIError(w, &APIError{HTTPStatus: http.StatusBadRequest, Code: queue.ErrCodeInvalidRequest, Message: "invalid build ID"})
+		if !requireBuildID(w, buildID) {
 			return
 		}
 		switch action {
@@ -252,6 +241,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusNotFound, Code: ErrCodeNotFound, Message: "not found"})
 	}
+}
+
+func writeMethodNotAllowed(w http.ResponseWriter, allow string) {
+	w.Header().Set("Allow", allow)
+	writeAPIError(w, &APIError{HTTPStatus: http.StatusMethodNotAllowed, Code: ErrCodeMethodNotAllowed, Message: "method not allowed"})
+}
+
+func requireBuildID(w http.ResponseWriter, buildID string) bool {
+	if !queue.ValidBuildID(buildID) {
+		writeAPIError(w, &APIError{HTTPStatus: http.StatusBadRequest, Code: queue.ErrCodeInvalidRequest, Message: "invalid build ID"})
+		return false
+	}
+	return true
 }
 
 func (h *Handler) authenticate(r *http.Request) authRole {
