@@ -18,7 +18,7 @@ idle. Bunpō remembers how long each file took, deals them out longest first in
 whole milliseconds, and fails the build if two machines ever saw different lists
 or timings.
 
-**Current release:** `v0.1.0` (static CLI, self-hosted live queue with
+**Current release:** `v0.1.1` (static CLI, self-hosted live queue with
 Cloudflare Worker, `bunpo-server`, and dashboard, GitHub Action, five runner
 guides, CLI reference, real-repo trials, and `bunpo.org`).
 
