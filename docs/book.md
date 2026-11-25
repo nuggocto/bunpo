@@ -363,9 +363,9 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   runners from staying alive across repeated wakes, `BuildDO` persists active
   leases' ungraced deadlines into one `meta` row when a heartbeat crosses half
   a TTL and wakes them with `floor(lease_ttl_ms / 2)` grace. `MAX_TESTS`
-  defaults to 5,000 and goes up to 20,000, which passed once on a real
-  Cloudflare Free-plan account (replaying existing builds always uses the
-  20,000 protocol limit; see
+  defaults to 5,000 and goes up to 20,000, which passed on a real Cloudflare
+  Free-plan account (replaying existing builds always uses the 20,000 protocol
+  limit; see
   [docs/trials/2026-11-25-cloudflare-free-trial.md](trials/2026-11-25-cloudflare-free-trial.md)).
   On 64-machine builds, heartbeats at `lease_ttl_ms / 3` are roughly half of
   all requests; passing a longer `--lease-ttl` reduces them.
