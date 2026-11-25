@@ -7,8 +7,8 @@ Split test files by name and one machine gets the slow ones while the others
 sit idle. Bunpō remembers each file's time and deals them out longest first,
 so every machine finishes at about the same moment. Static mode is one binary
 with no dependencies and no server; timings live in your own CI cache. An
-optional self-hosted live queue handles mixed-speed, late-starting, or killable
-runners.
+optional self-hosted live queue handles runners that differ in speed, start
+late, or get killed.
 
 ![Terminal recording of bunpo split, record, merge, and verify catching a stale timing cache](docs/demo.gif)
 
