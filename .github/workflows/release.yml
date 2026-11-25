@@ -99,7 +99,10 @@ jobs:
           else
             got=$(shasum -a 256 <"$dir/$asset" | cut -d' ' -f1)
           fi
-          test -n "$want" && test "$want" = "$got"
+          if [ -z "$want" ] || [ "$want" != "$got" ]; then
+            echo "::error title=bunpo::$asset from $GITHUB_REF_NAME does not match SHA256SUMS" >&2
+            exit 1
+          fi
           scripts/smoke-server.sh "$dir/$asset"
 
   # Promotes a checked stable tag out of prerelease and moves the major tag
