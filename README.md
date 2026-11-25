@@ -5,8 +5,10 @@ file took last time, and checks that every file was assigned exactly once.
 
 Split test files by name and one machine gets the slow ones while the others
 sit idle. Bunpō remembers each file's time and deals them out longest first,
-so every machine finishes at about the same moment. It is one small binary
-with no dependencies and no server. Timings live in your own CI cache.
+so every machine finishes at about the same moment. Static mode is one binary
+with no dependencies and no server; timings live in your own CI cache. An
+optional self-hosted live queue handles mixed-speed, late-starting, or killable
+runners.
 
 ![Terminal recording of bunpo split, record, merge, and verify catching a stale timing cache](docs/demo.gif)
 
@@ -65,14 +67,14 @@ pytest suite, four machines finished in 2m 08s instead of 4m 15s with a count
 split (2m 13s on a second run). That was the best of seven suites; some gained
 nothing. [docs/trials/](docs/trials/) has the measured runs.
 
-## Live queue (0.1.0)
+## Live queue
 
-Upcoming in `0.1.0`, `bunpo --queue` pulls batches of test files from a
-self-hosted queue server as each machine finishes, and reassigns tests when a
-machine is killed or loses a report. Two servers speak the same HTTP protocol
-and serve the same read-only web dashboard: a Cloudflare Worker (`worker/`,
-SQLite-backed Durable Objects) and a standalone Go binary (`bunpo-server`, in
-memory or persisted with `--data`).
+`bunpo --queue` pulls batches of test files from a self-hosted queue server as
+each machine finishes, and reassigns tests when a machine is killed or loses a
+report. Two servers speak the same HTTP protocol and serve the same read-only
+web dashboard: a Cloudflare Worker (`worker/`, SQLite-backed Durable Objects)
+and a standalone Go binary (`bunpo-server`, in memory or persisted with
+`--data`).
 
 If your CI machines are identical and start together (or on fork pull requests
 without repository secrets), stick with `bunpo split` and `bunpo verify`.
@@ -85,7 +87,7 @@ and [docs/queue-protocol.md](docs/queue-protocol.md) for setup and limits.
 
 ## Documentation
 
-- [bunpo.org](https://bunpo.org): guides, interactive benchmarks, install instructions, and changelog.
+- [bunpo.org](https://bunpo.org): guides, live-queue replay, benchmarks, install instructions, and changelog.
 - [docs/cli.md](docs/cli.md): CLI reference for `bunpo` and `bunpo-server`, exit codes, env vars, and `.bunpo/` files.
 - [docs/self-hosting.md](docs/self-hosting.md): deploying the Cloudflare Worker or `bunpo-server` behind TLS.
 - [docs/queue-protocol.md](docs/queue-protocol.md): live-queue HTTP protocol and state-machine specification.

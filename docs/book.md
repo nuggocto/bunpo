@@ -6,11 +6,13 @@ behavior, architecture, setup or operation.
 
 ## Status
 
-The command-line tool works: `split`, `plan`, `record`, `merge` and `verify`.
-A tag builds release binaries, `action.yml` installs them in GitHub Actions,
-and [guides](guides/) cover pytest, Jest, Vitest, RSpec and Playwright.
-Bunpō's own CI splits its tests through all of it, and an external GitHub
-Actions trial ran from the Playwright guide alone
+Both static mode (`split`, `plan`, `record`, `merge`, `verify`) and the
+self-hosted live queue (`--queue`, `--status`, `bunpo-server`, the Cloudflare
+Worker in `worker/`, and the shared dashboard) are implemented. A tag builds
+release binaries for `bunpo` and `bunpo-server`, `action.yml` installs `bunpo`
+in GitHub Actions, and [guides](guides/) cover pytest, Jest, Vitest, RSpec and
+Playwright. Bunpō's own CI splits its tests through all of it, and an external
+GitHub Actions trial ran from the Playwright guide alone
 ([docs/trials/2026-11-22-souhib-github-actions-trial.md](trials/2026-11-22-souhib-github-actions-trial.md)).
 The website is live at [bunpo.org](https://bunpo.org).
 
@@ -170,13 +172,14 @@ Pushing a tag such as `v0.0.3` runs `.github/workflows/release.yml`:
 
 1. It runs the tests, then `scripts/build-release.sh` with `GOTOOLCHAIN` set to
    the exact toolchain in `go.mod`.
-2. The script cross-compiles Linux, macOS and Windows for x86-64 and ARM64
-   with cgo off and `-trimpath`, and writes `SHA256SUMS`. Two builds of one
-   commit give the same bytes. Go stamps the version from the tag, and the
-   script fails if any binary reports a different one, which catches a dirty
-   or wrong checkout. It builds in a temporary directory first, because a new
-   file in the checkout would mark every later binary dirty, and it refuses
-   an output directory that is not empty rather than delete anything.
+2. The script cross-compiles both `bunpo` and `bunpo-server` for Linux, macOS
+   and Windows on x86-64 and ARM64 (12 binaries total) with cgo off and
+   `-trimpath`, and writes `SHA256SUMS`. Two builds of one commit give the same
+   bytes. Go stamps the version from the tag, and the script fails if any
+   binary reports a different one, which catches a dirty or wrong checkout. It
+   builds in a temporary directory first, because a new file in the checkout
+   would mark every later binary dirty, and it refuses an output directory that
+   is not empty rather than delete anything.
 3. It publishes the binaries and `SHA256SUMS` as a prerelease first, so `@v0`
    and `releases/latest` never serve an unchecked binary.
 4. It installs the published release through `action.yml` on Linux, macOS
@@ -212,9 +215,11 @@ explains the choice. `scripts/install.sh`:
 
 ```text
 action.yml               the GitHub Action: installs a release
+Dockerfile               scratch container image for bunpo-server
 benchmark/               the benchmark program behind docs/benchmark.md
 guidecheck/              runs every guide's shell steps against the real runners
 scripts/                 release build, Action installer, server smoke test, dogfooding
+worker/                  Cloudflare Worker + SQLite Durable Objects queue server
 cmd/bunpo/               the CLI: flags, files, messages, exit codes, --queue wrapper
 cmd/bunpo-server/        standalone live-queue HTTP server (in memory or --data DIR) + dashboard
 internal/dashboard/      embedded shared static live-queue dashboard (also served by worker/)
@@ -259,10 +264,11 @@ Commands open it as an `os.Root`, so no name inside it can escape through
 
 | File | Written by | Read by |
 | --- | --- | --- |
-| `timings.json` | `merge` | `split`, `plan`, `merge` |
+| `timings.json` | `merge` | `split`, `plan`, `merge`, `--queue` |
 | `manifest-<index>.json` | `split` | `record`, `verify` |
-| `report-<index>.json` | `record` | `merge` |
+| `report-<index>.json` | `record`, `--queue --status` (`report-0.json`) | `merge` |
 | `plan.json` | `plan` | `split --plan` |
+| `queue-<index>.txt` | `--queue` | child test command (`BUNPO_TESTS_FILE`) |
 
 Standard output carries only test lists. Messages go to standard error. Exit
 status is 0 on success, 1 when a check fails, and 2 for bad usage or input.

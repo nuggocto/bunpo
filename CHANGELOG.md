@@ -3,15 +3,20 @@
 All notable changes to Bunpō are recorded here. Release binaries and checksums
 start at `v0.0.3` on [GitHub Releases](https://github.com/nuggocto/bunpo/releases).
 
-## [Unreleased]
+## [v0.1.0] - 2026-11-26
 
 ### Added
 
-- Live-queue mode (`bunpo --queue` and `--status`) for pulling dynamic test batches, reassigning work from killed or slow runners, and writing `report-0.json` for `bunpo merge`.
+- Live-queue mode (`bunpo --queue` and `--status`) for pulling test batches as machines finish, reassigning work from killed or slow runners, and writing `report-0.json` for `bunpo merge`.
 - Cloudflare Worker queue server (`worker/`) backed by SQLite Durable Objects with 7-day automatic cleanup.
 - Standalone Go queue server (`bunpo-server`) with optional `--data DIR` persistence, cross-compiled release binaries, and a `scratch` `Dockerfile`.
 - Read-only web dashboard served by both `bunpo-server` and the Cloudflare Worker, showing recent builds, a per-machine lease timeline, slowest files, and failed, unresolved, or retried tests.
 - CLI reference (`docs/cli.md`), self-hosting guide (`docs/self-hosting.md`), live-queue protocol specification (`docs/queue-protocol.md`), live-queue workflows in all five runner guides, and Cloudflare Free-plan trial record (`docs/trials/2026-11-25-cloudflare-free-trial.md`).
+
+### Changed
+
+- **For existing `@v0` static-mode users:** static commands (`split`, `plan`, `record`, `merge`, `verify`, `version`), `.bunpo/` file formats, and exit codes are unchanged.
+- The `bunpo` CLI binary grew from 3.2 MiB (3,338,400 bytes on `linux/amd64` in `v0.0.7`) to 7.0 MiB (7,336,096 bytes on `linux/amd64`; 6.4 to 7.2 MiB across targets) because it now includes Go's standard library HTTP/TLS client for `--queue`. `bunpo-server` binaries are 6.4 to 7.1 MiB across targets.
 
 ## [v0.0.7] - 2026-11-23
 
@@ -125,6 +130,7 @@ First release with cross-compiled binaries, checksums, GitHub Action, runner gui
 - Table-driven tests, 2,000-seed property tests, a brute-force optimal solver oracle verifying the 4/3 makespan bound, fuzzing for timing decoding, and a 50,000-test benchmark.
 - Go 1.27 module with pinned `staticcheck` and `govulncheck` tools, GitHub Actions CI, specification (`PROJECT.md`), and developer guide (`docs/book.md`).
 
+[v0.1.0]: https://github.com/nuggocto/bunpo/compare/v0.0.7...v0.1.0
 [v0.0.7]: https://github.com/nuggocto/bunpo/compare/v0.0.6...v0.0.7
 [v0.0.6]: https://github.com/nuggocto/bunpo/compare/v0.0.5...v0.0.6
 [v0.0.5]: https://github.com/nuggocto/bunpo/compare/v0.0.4...v0.0.5
