@@ -1,7 +1,7 @@
 ---
 tags: [go, project, product, bunpo, ci, testing, test-splitting, cli, developer-tools]
 created: 2026-11-11
-updated: 2026-11-23
+updated: 2026-11-26
 status: active
 license: Apache-2.0
 domain: bunpo.org
@@ -18,11 +18,12 @@ idle. Bunpō remembers how long each file took, deals them out longest first in
 whole milliseconds, and fails the build if two machines ever saw different lists
 or timings.
 
-**Current release:** `v0.0.7` (static CLI, GitHub Action, five runner guides,
-real-repo local and GitHub Actions trials, and `bunpo.org`).
+**Current release:** `v0.1.0` (static CLI, self-hosted live queue with
+Cloudflare Worker, `bunpo-server`, and dashboard, GitHub Action, five runner
+guides, CLI reference, real-repo trials, and `bunpo.org`).
 
 **License and model:** Apache-2.0, free and open source forever. No paid SaaS, no
-accounts, no telemetry. Both the static splitter and the upcoming live queue are
+accounts, no telemetry. Both the static splitter and the live queue are
 meant to run on a team's own infrastructure.
 
 ## Why
@@ -48,8 +49,7 @@ meant to run on a team's own infrastructure.
 
 | Stage | Scope |
 | --- | --- |
-| Shipped (`v0.0.1`–`v0.0.7`) | `split`, `plan`, `record`, `merge`, `verify`, `version`. Static file-level splitting from JUnit XML or two-column timings, assignment verification, cross-compiled binaries, GitHub Action (`nuggocto/bunpo@v0`), five runner guides, benchmarks, real-repo trials, and `bunpo.org`. |
-| Live queue (`0.1.0`) | Free, open-source, self-hosted dynamic queue (`bunpo --queue`) that hands out tests as runners finish. Primary server on Cloudflare Workers + Durable Objects, plus a documented HTTP protocol and a lightweight Go server for teams not on Cloudflare. |
+| Shipped (`v0.0.1`–`v0.1.0`) | `split`, `plan`, `record`, `merge`, `verify`, `version`, `--queue`, `--status`. Static file-level splitting from JUnit XML or two-column timings, assignment verification, free self-hosted live queue (`bunpo --queue`, Cloudflare Workers + Durable Objects server, standalone `bunpo-server`, shared dashboard, HTTP protocol spec), cross-compiled binaries, GitHub Action (`nuggocto/bunpo@v0`), five runner guides, CLI reference, benchmarks, real-repo trials, and `bunpo.org`. |
 | Extensions (`0.2.0`) | CI env-var auto-detection, `$GITHUB_STEP_SUMMARY` and flaky-test summaries from timing history, Go package splitting, sub-file splitting for dominant files, and more runner guides (`bun test`, Cypress, Minitest, PHPUnit). |
 
 Bunpō decides which tests run where. In static mode it does not run tests, retry
@@ -375,7 +375,7 @@ tradeoffs:
 
 ## Roadmap
 
-### `0.1.0` — Self-hosted live queue
+### `0.1.0` — Self-hosted live queue (shipped)
 
 Build the open-source live queue and add `--queue` mode to `bunpo` so mixed-speed
 runners (such as x64 + ARM64), delayed runner starts, and killed runners stay
@@ -402,9 +402,9 @@ balanced automatically.
 - **CLI and agent-ready docs:** add a concise CLI reference (`docs/cli.md` and
   `/cli` on `bunpo.org`) covering every command, flag, exit code, `.bunpo/` file,
   static vs. `--queue` mode, and the queue HTTP protocol, plus build-generated
-  `/llms.txt` and `/llms-full.txt` (and an optional installable agent skill) so
-  humans and coding agents can wire up Bunpō without guessing runner-specific
-  rules.
+  `/llms.txt` and `/llms-full.txt` (an optional installable agent skill was not
+  built) so humans and coding agents can wire up Bunpō without guessing
+  runner-specific rules.
 - **Done when:** a real build survives a runner being killed both before
   execution and after execution before reporting. Every logical test has one
   accepted terminal result or an explicit unresolved outcome; duplicate and stale
