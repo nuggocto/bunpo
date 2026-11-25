@@ -959,4 +959,126 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
       })
       .toBe("passed");
   });
+
+  it("retries failed deadline BuildIndex sync by alarm with backoff, converges without requests, deletes on time, and stops if index stays down", async () => {
+    // Part 1: deadline alarm fails BuildIndex sync twice, then index recovers -> converges without any HTTP request.
+    const bid = "alarm-index-retry-converge";
+    const stub = env.BUILD_DO.get(env.BUILD_DO.idFromName(bid));
+    const start = Date.now();
+    const timeoutMS = 60_000;
+    const deadlineMS = start + timeoutMS;
+
+    const initR = await stub.init(
+      bid,
+      makeInitBody({
+        tests: ["a.py"],
+        predictions_ms: [100],
+        config: { machines: 1, lease_ttl_ms: 10_000, build_timeout_ms: timeoutMS, max_attempts: 3, max_batch: 1 },
+      }),
+      start,
+    );
+    expect(initR.status).toBe(200);
+
+    // Fail BuildIndex during deadline finalization and first retry alarm.
+    await runInDurableObject(stub, async (inst: BuildDO) => {
+      const target = inst as unknown as { env: { BUILD_INDEX: unknown }; __realIndex?: unknown; __calls?: number };
+      target.__realIndex = target.env.BUILD_INDEX;
+      target.__calls = 0;
+      target.env = {
+        ...target.env,
+        BUILD_INDEX: {
+          idFromName: () => "broken",
+          get: () => ({
+            upsert: async () => {
+              target.__calls = (target.__calls ?? 0) + 1;
+              throw new Error("simulated index outage at deadline");
+            },
+          }),
+        },
+      };
+    });
+
+    await stub.runAlarmAt(deadlineMS);
+    const deleteAt = deadlineMS + RETENTION_MS;
+
+    // Next alarm MUST be scheduled for an index retry well before the 7-day deletion time.
+    const retry1At = await runInDurableObject(stub, async (_inst, state) => state.storage.getAlarm());
+    expect(retry1At).not.toBeNull();
+    expect(retry1At!).toBeGreaterThanOrEqual(deadlineMS + INDEX_RETRY_INTERVAL_MS);
+    expect(retry1At!).toBeLessThan(deleteAt);
+
+    // First retry also fails -> backoff strictly increases the delay.
+    await stub.runAlarmAt(retry1At!);
+    const retry2At = await runInDurableObject(stub, async (_inst, state) => state.storage.getAlarm());
+    expect(retry2At).not.toBeNull();
+    expect(retry2At! - retry1At!).toBeGreaterThan(retry1At! - deadlineMS);
+    expect(retry2At!).toBeLessThan(deleteAt);
+
+    // Restore real BuildIndex; second retry alarm converges BuildIndex with ZERO client requests to this build.
+    await runInDurableObject(stub, async (inst: BuildDO) => {
+      const target = inst as unknown as { env: { BUILD_INDEX: unknown }; __realIndex?: unknown };
+      target.env = { ...target.env, BUILD_INDEX: target.__realIndex };
+    });
+    await stub.runAlarmAt(retry2At!);
+
+    const list = await req("GET", "/api/v1/builds", READ_TOKEN);
+    const entry = (list.json["builds"] as { build_id: string; verdict: string }[]).find((b) => b.build_id === bid);
+    expect(entry?.verdict).toBe("unresolved");
+
+    // Once synced, alarm returns to retention deletion time, and firing at deleteAt deletes storage on time.
+    const postSyncAlarm = await runInDurableObject(stub, async (_inst, state) => state.storage.getAlarm());
+    expect(postSyncAlarm).toBe(deleteAt);
+    await stub.runAlarmAt(deleteAt);
+    const alarmAfterDelete = await runInDurableObject(stub, async (_inst, state) => state.storage.getAlarm());
+    expect(alarmAfterDelete).toBeNull();
+
+    // Part 2: if BuildIndex stays permanently down, alarm retries stop after a bounded cap and never loop past deleteAt.
+    const bidDown = "alarm-index-permanently-down";
+    const stubDown = env.BUILD_DO.get(env.BUILD_DO.idFromName(bidDown));
+    await stubDown.init(
+      bidDown,
+      makeInitBody({
+        tests: ["b.py"],
+        predictions_ms: [100],
+        config: { machines: 1, lease_ttl_ms: 10_000, build_timeout_ms: timeoutMS, max_attempts: 3, max_batch: 1 },
+      }),
+      start,
+    );
+    await runInDurableObject(stubDown, async (inst: BuildDO) => {
+      const target = inst as unknown as { env: { BUILD_INDEX: unknown } };
+      target.env = {
+        ...target.env,
+        BUILD_INDEX: {
+          idFromName: () => "broken",
+          get: () => ({
+            upsert: async () => {
+              throw new Error("permanent index outage");
+            },
+          }),
+        },
+      };
+    });
+
+    await stubDown.runAlarmAt(deadlineMS);
+    let alarmT = await runInDurableObject(stubDown, async (_inst, state) => state.storage.getAlarm());
+    let retries = 0;
+    while (alarmT !== null && alarmT < deleteAt && retries < 20) {
+      retries++;
+      const prevT = alarmT;
+      await stubDown.runAlarmAt(alarmT);
+      alarmT = await runInDurableObject(stubDown, async (_inst, state) => state.storage.getAlarm());
+      if (alarmT !== null) {
+        expect(alarmT).toBeGreaterThan(prevT);
+        expect(alarmT).toBeLessThanOrEqual(deleteAt);
+      }
+    }
+    expect(retries).toBeGreaterThan(0);
+    expect(retries).toBeLessThan(20);
+    expect(alarmT).toBe(deleteAt);
+
+    // Deletion still happens cleanly at deleteAt even while index stays down.
+    await stubDown.runAlarmAt(deleteAt);
+    const finalAlarm = await runInDurableObject(stubDown, async (_inst, state) => state.storage.getAlarm());
+    expect(finalAlarm).toBeNull();
+  });
 });
