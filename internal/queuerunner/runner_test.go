@@ -324,16 +324,16 @@ func TestRunSameMachineIndexUsesDistinctBatchFiles(t *testing.T) {
 		t.Setenv("BUNPO_DRIVER_RECORD_BATCH_PATH", recordPath)
 		t.Setenv("BUNPO_DRIVER_REPORT_PATH", reportPath)
 		v, err := Run(context.Background(), RunConfig{
-			Client:       client,
-			BuildID:      "same-index-build-" + string(rune('a'+i)),
-			MachineIndex: &idx,
-			Config:       queue.Config{Machines: 1, LeaseTTLMS: 1000, BuildTimeoutMS: 30_000, MaxAttempts: 2, MaxBatch: 1},
-			Tests:        []string{"tests/a.py"},
+			Client:        client,
+			BuildID:       "same-index-build-" + string(rune('a'+i)),
+			MachineIndex:  &idx,
+			Config:        queue.Config{Machines: 1, LeaseTTLMS: 1000, BuildTimeoutMS: 30_000, MaxAttempts: 2, MaxBatch: 1},
+			Tests:         []string{"tests/a.py"},
 			PredictionsMS: []*int64{nil},
-			Dir:          sharedDir,
-			Command:      []string{os.Args[0], "-test.run=^TestDriverChildHelper$"},
-			ReportPaths:  []string{reportPath},
-			Format:       "lines",
+			Dir:           sharedDir,
+			Command:       []string{os.Args[0], "-test.run=^TestDriverChildHelper$"},
+			ReportPaths:   []string{reportPath},
+			Format:        "lines",
 			ReadReports: func(paths []string) (map[string]junit.File, error) {
 				f, err := os.Open(paths[0])
 				if err != nil {
