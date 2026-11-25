@@ -98,10 +98,7 @@ func Run(ctx context.Context, cfg RunConfig) (queue.Verdict, error) {
 	if err != nil {
 		return "", err
 	}
-	batchFileName := fmt.Sprintf("queue-%s.txt", m.RunnerID()[:8])
-	if cfg.MachineIndex != nil {
-		batchFileName = fmt.Sprintf("queue-%d.txt", *cfg.MachineIndex)
-	}
+	batchFileName := fmt.Sprintf("queue-%s.txt", m.RunnerID())
 	batchFileAbs := filepath.Join(absDir, batchFileName)
 
 	done, err := driveMachine(ctx, m.Step, driverDeps{

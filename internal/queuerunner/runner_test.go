@@ -265,6 +265,29 @@ func TestDriverCancelsCleanlyWithoutGoroutineLeaks(t *testing.T) {
 }
 
 func TestDriverChildHelper(t *testing.T) {
+	if outPath := os.Getenv("BUNPO_DRIVER_RECORD_BATCH_PATH"); outPath != "" {
+		testsFile := os.Getenv("BUNPO_TESTS_FILE")
+		if err := os.WriteFile(outPath, []byte(testsFile), 0o600); err != nil {
+			os.Exit(2)
+		}
+		// Write a valid lines report for every file in the batch so Run finishes cleanly.
+		raw, err := os.ReadFile(testsFile)
+		if err != nil {
+			os.Exit(3)
+		}
+		var rep strings.Builder
+		for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			if line != "" {
+				rep.WriteString(line + " 10\n")
+			}
+		}
+		if repPath := os.Getenv("BUNPO_DRIVER_REPORT_PATH"); repPath != "" {
+			if err := os.WriteFile(repPath, []byte(rep.String()), 0o600); err != nil {
+				os.Exit(4)
+			}
+		}
+		os.Exit(0)
+	}
 	waitFile := os.Getenv("BUNPO_DRIVER_TEST_WAIT")
 	if waitFile == "" {
 		return
@@ -273,5 +296,68 @@ func TestDriverChildHelper(t *testing.T) {
 		if _, err := os.Stat(waitFile); err == nil {
 			os.Exit(0)
 		}
+	}
+}
+
+func TestRunSameMachineIndexUsesDistinctBatchFiles(t *testing.T) {
+	lim := queue.DefaultLimits()
+	lim.MinLeaseTTLMS = 1000
+	h, err := queueapi.NewHandler(queueapi.HandlerConfig{
+		WriteToken: "write-secret-token-0123456789abcdef", ReadToken: "read-secret-token-fedcba9876543210", Limits: lim,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	client, err := queueapi.NewClient(queueapi.ClientConfig{BaseURL: srv.URL, Token: "write-secret-token-0123456789abcdef", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sharedDir := t.TempDir()
+	idx := 0
+	var batchPaths [2]string
+	for i := range 2 {
+		recordPath := filepath.Join(sharedDir, "seen-"+string(rune('0'+i))+".txt")
+		reportPath := filepath.Join(sharedDir, "rep-"+string(rune('0'+i))+".lines")
+		t.Setenv("BUNPO_DRIVER_RECORD_BATCH_PATH", recordPath)
+		t.Setenv("BUNPO_DRIVER_REPORT_PATH", reportPath)
+		v, err := Run(context.Background(), RunConfig{
+			Client:       client,
+			BuildID:      "same-index-build-" + string(rune('a'+i)),
+			MachineIndex: &idx,
+			Config:       queue.Config{Machines: 1, LeaseTTLMS: 1000, BuildTimeoutMS: 30_000, MaxAttempts: 2, MaxBatch: 1},
+			Tests:        []string{"tests/a.py"},
+			PredictionsMS: []*int64{nil},
+			Dir:          sharedDir,
+			Command:      []string{os.Args[0], "-test.run=^TestDriverChildHelper$"},
+			ReportPaths:  []string{reportPath},
+			Format:       "lines",
+			ReadReports: func(paths []string) (map[string]junit.File, error) {
+				f, err := os.Open(paths[0])
+				if err != nil {
+					return nil, err
+				}
+				defer f.Close()
+				rep, err := junit.ReadLines(f)
+				return rep.Files, err
+			},
+		})
+		if err != nil || v != queue.VerdictPassed {
+			t.Fatalf("runner %d: verdict=%q err=%v", i, v, err)
+		}
+		got, err := os.ReadFile(recordPath)
+		if err != nil {
+			t.Fatalf("read recorded batch path %d: %v", i, err)
+		}
+		batchPaths[i] = string(got)
+	}
+
+	if batchPaths[0] == "" || batchPaths[1] == "" {
+		t.Fatalf("expected non-empty batch paths, got %q and %q", batchPaths[0], batchPaths[1])
+	}
+	if batchPaths[0] == batchPaths[1] {
+		t.Fatalf("two runners with same --index and --dir shared batch file %q", batchPaths[0])
 	}
 }

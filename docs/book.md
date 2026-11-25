@@ -268,7 +268,7 @@ Commands open it as an `os.Root`, so no name inside it can escape through
 | `manifest-<index>.json` | `split` | `record`, `verify` |
 | `report-<index>.json` | `record`, `--queue --status` (`report-0.json`) | `merge` |
 | `plan.json` | `plan` | `split --plan` |
-| `queue-<index>.txt` | `--queue` | child test command (`BUNPO_TESTS_FILE`) |
+| `queue-<runner-id>.txt` | `--queue` | child test command (`BUNPO_TESTS_FILE`) |
 
 Standard output carries only test lists. Messages go to standard error. Exit
 status is 0 on success, 1 when a check fails, and 2 for bad usage or input.
@@ -327,7 +327,7 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   runs in live-queue worker mode. It reads `BUNPO_QUEUE_TOKEN` from the
   environment (never flags) and initializes or joins the build. It leases
   batches longest-first via guided self-scheduling and writes each batch to
-  `.bunpo/queue-<index>.txt` (exposed in `BUNPO_TESTS_FILE`). Before each batch
+  `.bunpo/queue-<runner-id>.txt` (exposed in `BUNPO_TESTS_FILE`). Before each batch
   it deletes old `--report` files, then runs the test command in its own Unix
   process group with queue tokens stripped from the environment. While the
   command runs it sends heartbeats at `TTL / 3` and reports outcomes until the
