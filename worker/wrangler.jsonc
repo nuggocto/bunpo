@@ -16,10 +16,10 @@
     }
   },
   "vars": {
-    // Default build size cap (valid range 1..20000). 20000 passed on a real
-    // Cloudflare Free-plan account (21 builds); 5000 stays the default for
-    // Worker fetch CPU margin on large bodies and daily row writes.
-    // See docs/trials/2026-11-25-cloudflare-free-trial.md.
+    // Default build size cap (valid range 1..20000). 21 builds of 20,000 files
+    // were created and answered every request on a real Cloudflare Free-plan
+    // account; 5000 stays the default for Worker fetch CPU margin on large
+    // bodies and daily row writes. See docs/trials/2026-11-25-cloudflare-free-trial.md.
     "MAX_TESTS": "5000"
   },
   "assets": {

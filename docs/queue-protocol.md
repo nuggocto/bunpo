@@ -66,7 +66,7 @@ Dynamic batching starts the test runner once per leased batch instead of once pe
 | --- | --- |
 | Protocol `version` | `1` |
 | `build` ID | `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` and must not contain `..` |
-| `tests` per build | 1 to 20,000 distinct canonical POSIX paths, strictly sorted by UTF-8 bytes (Go server keeps 20,000; Cloudflare Worker `MAX_TESTS` var defaults to 5,000 and goes up to 20,000, which passed on a real Free-plan account; invalid values refuse every request with 500) |
+| `tests` per build | 1 to 20,000 distinct canonical POSIX paths, strictly sorted by UTF-8 bytes (Go server keeps 20,000; Cloudflare Worker `MAX_TESTS` var defaults to 5,000 and goes up to 20,000, which worked on a real Free-plan account; invalid values refuse every request with 500) |
 | Canonical test ID | Non-empty, valid UTF-8, max `4,096` bytes, `/` separator, no `\`, no leading `/`, no empty/`.`/`..` components, no leading Windows drive (`C:`), no NUL/CR/LF |
 | `predictions_ms` | Length equal to `len(tests)`; each element is `null` or `0..2,592,000,000` |
 | `machines` (`--total`) | `1` to `256` |
