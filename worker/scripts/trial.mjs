@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Manual trial runner for verifying a deployed Cloudflare Worker (or local
-// bunpo-server) before relying on it in CI. Plain Node, zero dependencies.
+// Deployment check for a Bunpō queue server (Cloudflare Worker or bunpo-server).
+// Plain Node, zero dependencies.
 //
 // Required environment variables:
 //   BUNPO_QUEUE_URL         https://... (plain http:// allowed only on loopback)
@@ -16,6 +16,9 @@ const FETCH_TIMEOUT_MS = 60_000;
 const SIZES = [1000, 5000, 10000, 20000];
 const IDLE_WAKE_MS = 15_000;
 const DEAD_TTL_MS = 10_000;
+const DEAD_WAKE_GRACE_MS = Math.floor(DEAD_TTL_MS / 2);
+const DEAD_POLL_INTERVAL_MS = 1_000;
+const DEAD_RTT_MARGIN_MS = 500;
 const EXPECTED_CSP =
   "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
@@ -61,7 +64,7 @@ const baseURL = validateBaseURL(rawURL);
 
 console.log(`Target: ${baseURL}`);
 console.log(`Planned requests: up to ${plannedMaxRequests} (hard client cap: ${MAX_REQUESTS})`);
-console.log("Checks: /healthz, auth (401/403), sizes 1k/5k/10k/20k + 15s idle wake, retry, dead-runner expiry (<=1.5 TTL), dashboard headers.");
+console.log("Checks: /healthz, auth (401/403), sizes 1k/5k/10k/20k + 15s idle wake, retry, dead-runner reassignment, dashboard headers.");
 
 if (!confirmed) {
   console.error("Dry run only. Re-run with --yes to send requests.");
@@ -373,7 +376,8 @@ for (const n of SIZES) {
   record("retry-behavior", ok, detail);
 }
 
-// 5. Dead runner lease moves within 1.5 * TTL (even across 10s DO hibernation)
+// 5. Dead runner reassignment across DO hibernation:
+//    grant + TTL + floor(TTL/2) wake grace, plus one poll interval and request time.
 {
   const bid = `trial-dead-${runTag}`;
   const initR = await req("POST", `/api/v1/builds/${bid}/init`, {
@@ -399,8 +403,9 @@ for (const n of SIZES) {
     if (!ok) detail = `dead lease: ${formatFailure(deadLease)}`;
     if (ok) {
       // Wait 11s so a Cloudflare DO hibernates (>10s) and the 10s lease TTL elapses;
-      // with floor(ttl/2)=5s wake grace, reassignment must happen within 1.5*TTL (15s).
-      await sleep(DEAD_TTL_MS + 1000);
+      // on wake the server adds floor(TTL/2) grace, so the survivor can take over
+      // once grant + TTL + floor(TTL/2) passes.
+      await sleep(DEAD_TTL_MS + DEAD_POLL_INTERVAL_MS);
       let reassigned = null;
       let elapsedMS = 0;
       for (let i = 0; i < 8; i++) {
@@ -413,7 +418,7 @@ for (const n of SIZES) {
           reassigned = pollR.json;
           break;
         }
-        await sleep(1000);
+        await sleep(DEAD_POLL_INTERVAL_MS);
       }
       if (!reassigned) {
         ok = false;
@@ -433,13 +438,14 @@ for (const n of SIZES) {
         const attempts = testsR.json?.tests?.[0]?.attempts || [];
         const serverDeltaMS =
           attempts.length >= 2 ? attempts[1].leased_at_ms - attempts[0].leased_at_ms : elapsedMS;
-        const withinBudget = serverDeltaMS <= DEAD_TTL_MS * 1.5 + 1500 && rep.status === 200 && rep.json?.verdict === "passed";
+        const budgetMS = DEAD_TTL_MS + DEAD_WAKE_GRACE_MS + DEAD_POLL_INTERVAL_MS + DEAD_RTT_MARGIN_MS;
+        const withinBudget = serverDeltaMS <= budgetMS && rep.status === 200 && rep.json?.verdict === "passed";
         ok = withinBudget;
-        detail = `reassigned in ${serverDeltaMS} ms server time (${elapsedMS} ms wall, budget <= ${DEAD_TTL_MS * 1.5} ms + poll margin)`;
+        detail = `reassigned in ${serverDeltaMS} ms server time (${elapsedMS} ms wall, budget <= ${budgetMS} ms = ${DEAD_TTL_MS} TTL + ${DEAD_WAKE_GRACE_MS} grace + ${DEAD_POLL_INTERVAL_MS} poll + ${DEAD_RTT_MARGIN_MS} RTT)`;
       }
     }
   }
-  record("dead-runner-1.5-ttl", ok, detail);
+  record("dead-runner-reassignment", ok, detail);
 }
 
 // 6. Dashboard headers and 404 envelope
@@ -478,9 +484,6 @@ for (const r of sizeRows) {
 }
 
 console.log(`\nTotal requests sent: ${requestCount} / ${MAX_REQUESTS}`);
-console.log("\nWhat to check in the Cloudflare dashboard (Workers & Pages -> bunpo-queue):");
-console.log("  1. Metrics -> CPU time (p50 and p99) and your wrangler tail jq CPU summary.");
-console.log("  2. Metrics / Logs -> Errors: confirm zero 'exceeded CPU' (error 1102), do_error, or quota errors.");
-console.log("  3. Durable Objects -> BuildDO / BuildIndex: check requests and SQLite rows written.");
+console.log("If checking a Cloudflare Worker, confirm zero CPU or quota errors in Workers Logs or wrangler tail.");
 
 process.exit(overallFailed ? 1 : 0);
