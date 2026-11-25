@@ -314,7 +314,7 @@ Starting guesses. Revise them from the first real users.
 | Resource | Starting value | Why |
 | --- | --- | --- |
 | Tests in one split | 200,000 | Far above a large monorepo's file count. |
-| Test files in one queue build | 20,000 on the Go server; 5,000 by default on the Worker | Protocol and Go server keep 20,000; Worker `MAX_TESTS` defaults to 5,000 and goes up to 20,000, which passed on a real Free-plan account. Static splitting keeps 200,000. |
+| Test files in one queue build | 20,000 on the Go server; 5,000 by default on the Worker | Protocol and Go server keep 20,000; Worker `MAX_TESTS` defaults to 5,000 and goes up to 20,000, which worked on a real Free-plan account. Static splitting keeps 200,000. |
 | Machines | 256 | More than any matrix I expect; bounds the manifest set. |
 | One JUnit report / all reports | 64 MiB / 1 GiB | Real reports are a few megabytes. |
 | JUnit nesting / test cases per report | 32 levels / 2,000,000 | Real reports nest four levels. |
