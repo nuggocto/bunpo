@@ -67,20 +67,18 @@ nothing. [docs/trials/](docs/trials/) has the measured runs.
 
 ## Live queue (0.1.0)
 
-Upcoming in `0.1.0`, `bunpo --queue` pulls batches of test files dynamically
-from a self-hosted queue server as each machine finishes, and reassigns tests
-when a machine is killed or loses a report. Two servers speak the same HTTP
-protocol and serve the same read-only web dashboard: a Cloudflare Worker
-(`worker/`, SQLite-backed Durable Objects) and a standalone Go binary
-(`bunpo-server`, in memory or persisted with `--data`).
+Upcoming in `0.1.0`, `bunpo --queue` pulls batches of test files from a
+self-hosted queue server as each machine finishes, and reassigns tests when a
+machine is killed or loses a report. Two servers speak the same HTTP protocol
+and serve the same read-only web dashboard: a Cloudflare Worker (`worker/`,
+SQLite-backed Durable Objects) and a standalone Go binary (`bunpo-server`, in
+memory or persisted with `--data`).
 
-**When static splitting is still better:** if your CI machines are identical
-and start at the same time (or on fork pull requests without repository
-secrets), stick with `bunpo split` / `verify`. Dynamic batching adds extra
-test-runner startups per machine, so in 4-machine simulations with 5 s runner
-startup overhead, static splitting beat the live queue when equal machines
-started together (827 s vs. 902 s). Use `--queue` when runners differ in speed
-(x64 + ARM64), start minutes apart behind CI queues, or can be preempted mid-run.
+If your CI machines are identical and start together (or on fork pull requests
+without repository secrets), stick with `bunpo split` and `bunpo verify`.
+Dynamic batching starts the test runner once per batch instead of once per
+machine. Use `--queue` when runners differ in speed (such as x64 alongside
+ARM64), start minutes apart behind CI queues, or can be preempted mid-run.
 
 See [docs/cli.md](docs/cli.md), [docs/self-hosting.md](docs/self-hosting.md),
 and [docs/queue-protocol.md](docs/queue-protocol.md) for setup and limits.

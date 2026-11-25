@@ -80,7 +80,6 @@ Fuzzing and the benchmark run only when you ask for them:
 go test -run '^$' -fuzz FuzzDecode -fuzztime 30s ./internal/timing
 go test -run '^$' -fuzz FuzzRead -fuzztime 30s ./internal/junit
 go test -run '^$' -fuzz FuzzEventReplay -fuzztime 30s ./internal/queue
-go test -run '^$' -fuzz FuzzDecide -fuzztime 30s ./internal/queue
 go test -run '^$' -bench BenchmarkSplit ./internal/split
 ```
 
@@ -364,11 +363,12 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   runners from staying alive across repeated wakes, `BuildDO` persists active
   leases' ungraced deadlines into one `meta` row when a heartbeat crosses half
   a TTL and wakes them with `floor(lease_ttl_ms / 2)` grace. `MAX_TESTS`
-  defaults to `5,000` based on local measurements under the 10 ms Free-plan CPU
-  assumption (replaying existing builds always uses the 20,000 protocol limit)
-  and can be raised up to `20,000` after testing on a real account. On
-  64-machine builds, heartbeats at `lease_ttl_ms / 3` are roughly half of all
-  requests; passing a longer `--lease-ttl` reduces them.
+  defaults to 5,000 and goes up to 20,000, which passed once on a real
+  Cloudflare Free-plan account (replaying existing builds always uses the
+  20,000 protocol limit; see
+  [docs/trials/2026-11-25-cloudflare-free-trial.md](trials/2026-11-25-cloudflare-free-trial.md)).
+  On 64-machine builds, heartbeats at `lease_ttl_ms / 3` are roughly half of
+  all requests; passing a longer `--lease-ttl` reduces them.
 - **Live-queue dashboard (`internal/dashboard/static/`)** is a plain HTML, CSS,
   and ES-module UI (no framework, build step, or external requests) served
   identically by `bunpo-server` (`//go:embed`) and `worker/` (Cloudflare
@@ -387,14 +387,10 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
 - **`version`** (or **`-version`**, **`--version`**) prints the module version
   from the build information.
 
-Batching adds test-runner startup overhead compared to static splitting. In
-4-machine simulations with 5 s startup per batch, static splitting finished in
-827 s vs 902 s for the live queue on equal machines starting together, while the
-live queue won on mixed speeds (1.8x/1x: 850 s vs 1,077 s) and when one machine
-started 5 minutes late (976 s vs 1,127 s). Use static splitting for identical
-machines starting together and the live queue for unequal, delayed, or
-preemptible runners. State-machine `Decide` calls stay under 2.5 ms at 20,000
-tests.
+Dynamic batching starts the test runner once per leased batch instead of once
+per machine. Use static splitting for identical machines starting together (or
+fork pull requests without secrets) and the live queue for unequal, delayed, or
+preemptible runners.
 
 ## Reading test reports
 

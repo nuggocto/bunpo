@@ -58,15 +58,7 @@ Trust boundary:
 
 ### When to use the live queue vs. static splitting
 
-Batching costs extra test-runner startups compared to one static invocation per machine. In simulations with a 5 s runner startup overhead across 4 machines:
-
-| Scenario | Static split | Live queue |
-| --- | --- | --- |
-| 4 equal machines starting together | 827 s | 902 s |
-| Mixed speeds (1.8x and 1x) | 1,077 s | 850 s |
-| One machine 5 minutes late | 1,127 s | 976 s |
-
-Use static splitting (`bunpo split` / `verify`) when machines are identical and start together. Use the live queue when runners differ in speed, start at different times behind CI queues, or can be preempted or killed mid-run. State-machine `Decide` calls stay under 2.5 ms at 20,000 tests.
+Dynamic batching starts the test runner once per leased batch instead of once per machine. Use static splitting (`bunpo split` / `verify`) when machines are identical and start together, or on fork pull requests that do not receive secrets. Use the live queue when runners differ in speed, start at different times behind CI queues, or can be preempted or killed mid-run.
 
 ## 3. Identifiers and limits
 
@@ -74,7 +66,7 @@ Use static splitting (`bunpo split` / `verify`) when machines are identical and 
 | --- | --- |
 | Protocol `version` | `1` |
 | `build` ID | `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` and must not contain `..` |
-| `tests` per build | `1` to `20,000` distinct canonical POSIX paths, strictly sorted by UTF-8 bytes (Go server keeps `20,000`; Cloudflare Worker `MAX_TESTS` var defaults to `5,000`, configurable `1..20,000`, invalid values refuse every request with `500`) |
+| `tests` per build | 1 to 20,000 distinct canonical POSIX paths, strictly sorted by UTF-8 bytes (Go server keeps 20,000; Cloudflare Worker `MAX_TESTS` var defaults to 5,000 and goes up to 20,000, which passed once on a real Free-plan account; invalid values refuse every request with 500) |
 | Canonical test ID | Non-empty, valid UTF-8, max `4,096` bytes, `/` separator, no `\`, no leading `/`, no empty/`.`/`..` components, no leading Windows drive (`C:`), no NUL/CR/LF |
 | `predictions_ms` | Length equal to `len(tests)`; each element is `null` or `0..2,592,000,000` |
 | `machines` (`--total`) | `1` to `256` |
@@ -212,21 +204,21 @@ min_wait       = min(1_000, max_wait)
 retry_after_ms = clamp(wait, min_wait, max_wait)
 ```
 
-Before active leases reach their predicted end, idle machines sleep until `latest` (capped by `earliest_deadline` and `max_wait`) so builds with predictions finish within roughly 1-2 seconds of the last test instead of sleeping half a lease TTL. Once overdue—or when no predictions exist (`effective_ms == 0`, so `latest == max(leased_at_ms) <= now`)—the wait backs off as `(now - latest) / 4` up to `15_000 ms`, while still capping by `earliest_deadline - now` so idle runners wake promptly if a dead holder's lease expires. With this backoff, 255 idle machines waiting on one test that runs 10 minutes overdue send about 13,000 requests instead of 150,000. (With tiny TTLs in tests where `max_wait < 1_000`, `min_wait` collapses to `max_wait`.)
+Before active leases reach their predicted end, idle machines sleep until `latest` (capped by `earliest_deadline` and `max_wait`) so builds with predictions finish within roughly 1 to 2 seconds of the last test instead of sleeping half a lease TTL. Once overdue, or when no predictions exist (`effective_ms == 0`, so `latest == max(leased_at_ms) <= now`), the wait backs off as `(now - latest) / 4` up to 15,000 ms, while still capping by `earliest_deadline - now` so idle runners wake promptly if a dead holder's lease expires. With this backoff, 255 idle machines waiting on one test that runs 10 minutes overdue send about 13,500 requests (before client jitter) instead of 153,000. (With tiny TTLs in tests where `max_wait < 1_000`, `min_wait` collapses to `max_wait`.)
 
 ### 5.6 Result evaluation order (`Report`)
 
 A `Report` names `lease_id`, `runner_id`, and `results[]`.
 
-1. **Lease and shape validation (all-or-nothing, `400`, nothing stored):**
+1. **Lease and shape validation (all-or-nothing, 400, nothing stored):**
    - `lease_id` must exist and `lease.runner_id == runner_id`.
-   - `results` must contain every attempt `(test_index, generation)` of that lease exactly once—no missing attempts, no extra attempts, no duplicates within the same request.
+   - `results` must contain every attempt `(test_index, generation)` of that lease exactly once, with no missing attempts, no extra attempts, and no duplicates within the same request.
    - Each result's `test_index` must be in `0..len(tests)-1` and `generation` in `1..test.generation`.
    - Each `outcome` must be one of `passed`, `failed`, `skipped`, `error`.
    - If `timed == false`, `duration_ms` must be `0`. If `timed == true`, `outcome` must be `passed` and `duration_ms` must be in `0..2,592,000,000`.
 2. **Run lazy expiry at `now`** (see 5.4).
 3. **Evaluate each result in the lease's attempt order (ascending `test_index`):**
-   1. If attempt `(test_index, generation)` already has a recorded outcome (`passed`, `failed`, `skipped`, or `error`—not `leased` or `expired`):
+   1. If attempt `(test_index, generation)` already has a recorded outcome (`passed`, `failed`, `skipped`, or `error`, not `leased` or `expired`):
       - If `(outcome, timed, duration_ms)` matches the recorded attempt -> `duplicate` (no change, never persisted in a `reported` event).
       - Else -> `conflict` (persisted only if `len(history) < 8` and no identical `(generation, lease_id, runner_id, outcome, timed, duration_ms, disposition)` record is already stored; filling the 8th slot sets `history_truncated: true`; no change to test state or accepted outcome).
    2. Else if `generation == test.generation` and `test.state == leased` and `test.active_lease_id == lease_id` (and lease is still active after lazy expiry):
@@ -236,7 +228,7 @@ A `Report` names `lease_id`, `runner_id`, and `results[]`.
    3. Else (older generation, or this attempt already expired):
       - `stale` (persisted only if `len(history) < 8` and no identical record is already stored; filling the 8th slot sets `history_truncated: true`; never terminal, no change to test state).
 4. If the lease was active and all its attempts were `accepted`, mark the lease `reported`.
-5. Emit one `reported` event containing **only** the results that actually change state or append a new `stale`/`conflict` history entry (`duplicate`, deduplicated, and post-truncation records are omitted from the event, though every lease attempt still appears in the HTTP response). If no results qualify, emit zero events.
+5. Emit one `reported` event containing only the results that change state or append a new `stale`/`conflict` history entry (`duplicate`, deduplicated, and post-truncation records are omitted from the event, though every lease attempt still appears in the HTTP response). If no results qualify, emit zero events.
 
 ### 5.7 Persisted event schema
 
@@ -247,7 +239,7 @@ Every event has `seq` (1-based monotonic per build, assigned by storage/log), `t
 | `initialized` | `build_id`, `digest`, `config` (`machines`, `lease_ttl_ms`, `build_timeout_ms`, `max_attempts`, `max_batch`), `deadline_ms`, `tests[]`, `predictions_ms[]` (each `int64 \| null`) |
 | `conflicted` | `runner_id`, `machine_index`, `got_digest`, `reason` |
 | `leased` | `lease_id`, `runner_id`, `machine_index`, `request_id`, `deadline_ms`, `attempts[]` (`{test_index, generation}`) |
-| `reported` | `lease_id`, `runner_id`, `close_lease` (`bool`), `results[]` (`{test_index, generation, outcome, timed, duration_ms, disposition}` — `duplicate` results are never stored) |
+| `reported` | `lease_id`, `runner_id`, `close_lease` (`bool`), `results[]` (`{test_index, generation, outcome, timed, duration_ms, disposition}`; `duplicate` results are never stored) |
 | `expired` | `lease_id` |
 | `finalized` | `reason` (`"deadline"`) |
 
