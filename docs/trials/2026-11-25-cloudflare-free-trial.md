@@ -61,14 +61,14 @@ Deployed from commit `6e4e00b` with `MAX_TESTS=20000` via `--var` and `observabi
   - `BuildDO` `init` at 5,000 files: 14 to 46 ms, median 24 ms (18 recorded).
   - `BuildDO` `init` at 20,000 files: 31 to 73 ms, median 49 ms (16 recorded).
   - `BuildDO` `status`: up to 54 ms; deadline `alarm`: 7 to 43 ms (39 recorded); `lease`: up to 11 ms; `report`: up to 7 ms.
-  - Worker `fetch`: up to 8 ms on 20,000-file `init` requests (about 1.3 MB body). The 10 ms Workers Free CPU limit applies to `fetch`, so a body near the 4 MiB limit could exceed it (not tested).
+  - Worker `fetch`: up to 8 ms while the 20,000-file builds were created (1.04 MB `init` bodies) and up to 6 ms for the 5,000-file builds (0.26 MB). One small request earlier in Run 2 also took 7 ms, so body size does not explain every peak. The 10 ms Workers Free CPU limit applies to `fetch`, and a body near the 4 MiB limit could exceed it (not tested).
 - **Recording totals and tail loss:** The whole Run 2 `wrangler tail` recording captured 927 invocations, all `outcome: "ok"`, 118 above 10 ms CPU (73 ms largest), none stopped. Under this load `wrangler tail` dropped events (216 of the 360 `BuildDO` calls in the sustained part were recorded); the client received every response.
 - **Full-day analytics:** Cloudflare analytics showed 929 Worker requests and 0 errors for the whole day across both runs. Durable Object analytics figures were incomplete and changed between queries, so none are quoted.
 
 ## Limits of this evidence
 
 - Cloudflare's Durable Objects CPU documentation conflicts on Free: the [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/) table lists 30 seconds default with no Free value, while its FAQ says "Durable Objects are Worker scripts, and have the same per invocation CPU limits as any Workers do," and [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) gives 10 ms on Free. Across both runs, 21 builds of 20,000 files passed and 130 Durable Object calls exceeded 10 ms (up to 73 ms) with none stopped. A strictly enforced 10 ms DO limit would hit 1,000 files too (`init` used 12 to 14 ms); if enforced, the Durable Object throws, the Worker returns 503 `storage_error`, and runners retry for 2 minutes before exiting 1 (never a false pass).
-- `MAX_TESTS` stays at 5,000 by default for Worker `fetch` CPU margin on larger request bodies (up to 8 ms at ~1.3 MB against the 10 ms Workers Free limit) and daily SQLite row writes, rather than a Durable Object limit observed in these runs.
+- `MAX_TESTS` stays at 5,000 by default for Worker `fetch` CPU margin on larger request bodies (up to 8 ms with 1.04 MB bodies against the 10 ms Workers Free limit) and daily SQLite row writes, rather than a Durable Object limit observed in these runs.
 - Still untested on the real account: daily quota exhaustion, the 7-day `deleteAll()` deletion, more than 8 machines, builds longer than 3 minutes of work, and request bodies near 4 MiB.
 
 ## Repeating the deployment check
