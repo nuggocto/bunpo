@@ -18,7 +18,7 @@ idle. Bunpō remembers how long each file took, deals them out longest first in
 whole milliseconds, and fails the build if two machines ever saw different lists
 or timings.
 
-**Current release:** `v0.1.1` (static CLI, self-hosted live queue with
+**Current release:** `v0.1.2` (static CLI, self-hosted live queue with
 Cloudflare Worker, `bunpo-server`, and dashboard, GitHub Action, five runner
 guides, CLI reference, real-repo trials, and `bunpo.org`).
 
@@ -49,7 +49,7 @@ meant to run on a team's own infrastructure.
 
 | Stage | Scope |
 | --- | --- |
-| Shipped (`v0.0.1`–`v0.1.1`) | `split`, `plan`, `record`, `merge`, `verify`, `version`, `--queue`, `--status`. Static file-level splitting from JUnit XML or two-column timings, assignment verification, free self-hosted live queue (`bunpo --queue`, Cloudflare Workers + Durable Objects server, standalone `bunpo-server`, shared dashboard, HTTP protocol spec), cross-compiled binaries, GitHub Action (`nuggocto/bunpo@v0`), five runner guides, CLI reference, benchmarks, real-repo trials, and `bunpo.org`. |
+| Shipped (`v0.0.1`–`v0.1.2`) | `split`, `plan`, `record`, `merge`, `verify`, `version`, `--queue`, `--status`. Static file-level splitting from JUnit XML or two-column timings, assignment verification, free self-hosted live queue (`bunpo --queue`, Cloudflare Workers + Durable Objects server, standalone `bunpo-server`, shared dashboard, HTTP protocol spec), cross-compiled binaries, GitHub Action (`nuggocto/bunpo@v0`), five runner guides, CLI reference, benchmarks, real-repo trials, and `bunpo.org`. |
 | Extensions (`0.2.0`) | CI env-var auto-detection, `$GITHUB_STEP_SUMMARY` and flaky-test summaries from timing history, Go package splitting, sub-file splitting for dominant files, and more runner guides (`bun test`, Cypress, Minitest, PHPUnit). |
 
 Bunpō decides which tests run where. In static mode it does not run tests, retry
