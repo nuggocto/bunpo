@@ -33,10 +33,16 @@ In GitHub Actions, one step installs Bunpō:
 - uses: nuggocto/bunpo@v0
 ```
 
-Elsewhere, download the binary for your platform from the
-[releases](https://github.com/nuggocto/bunpo/releases) and check it against
-`SHA256SUMS`. Releases start at `v0.0.3` and cover Linux, macOS and Windows on
-x86-64 and ARM64.
+On Linux and macOS, install with one line:
+
+```sh
+curl -fsSL https://bunpo.org/install.sh | sh
+```
+
+See [bunpo.org/install](https://bunpo.org/install) for Windows, pinned versions,
+and manual download from [releases](https://github.com/nuggocto/bunpo/releases)
+with `SHA256SUMS`. Releases start at `v0.0.3` and cover Linux, macOS and Windows
+on x86-64 and ARM64.
 
 The CLI has no GitHub Actions dependency and works on GitLab CI, Woodpecker CI,
 Forgejo/Gitea Actions, Buildkite, or any CI that runs a static binary: pass

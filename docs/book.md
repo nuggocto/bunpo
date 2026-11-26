@@ -207,6 +207,9 @@ Pushing a tag such as `v0.0.3` runs `.github/workflows/release.yml`:
    tag, `v0`, to the release, so `uses: nuggocto/bunpo@v0` follows the newest
    `v0.x.y` that installs everywhere. A prerelease such as `v0.0.3-rc.1` stays
    a prerelease and leaves `v0` where it is.
+6. After publishing, update `bunpo-site`'s `src/data/releases.ts` with the new
+   version and its six CLI hashes from `SHA256SUMS`, because
+   `bunpo.org/install.sh` and `bunpo.org/install.ps1` pin them.
 
 ## The GitHub Action
 
