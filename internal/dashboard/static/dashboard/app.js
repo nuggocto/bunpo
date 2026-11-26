@@ -1,7 +1,7 @@
 import {
   BASE_POLL_MS, PAGE_LIMIT, buildPath, buildTimeline, createGuardedLoader, createPollState,
-  fetchBuildInitial, fetchRefreshedPages, formatAttemptDuration, formatDuration, formatTimeLeft, formatTimestamp,
-  parseRoute, pollStep, sortBuilds, statusMeta,
+  fetchBuildInitial, formatAttemptDuration, formatDuration, formatTimeLeft, formatTimestamp,
+  parseRoute, pollStep, refreshBuild, sortBuilds, statusMeta,
 } from "./core.js";
 
 const TOKEN_KEY = "bunpo_queue_read_token";
@@ -13,6 +13,7 @@ const ui = {
   timer: null,
   buildID: null,
   status: null,
+  detailsLastSeenMS: null,
   filter: "problems",
   tests: [],
   nextCursor: null,
@@ -27,6 +28,7 @@ const ui = {
 
 function resetBuildState() {
   ui.status = null;
+  ui.detailsLastSeenMS = null;
   ui.tests = [];
   ui.nextCursor = null;
   ui.testsPages = 0;
@@ -223,6 +225,7 @@ async function loadBuild(buildID, gen) {
   if (res.stale) return;
   if (!res.ok) return handleFetchError(res.error, false);
   const { status: st, timeline, tests } = res.value;
+  ui.detailsLastSeenMS = st.last_seen_ms;
   ui.tlTests = timeline.tests || [];
   ui.tlCursor = timeline.next_cursor ?? null;
   ui.tlPages = 1;
@@ -239,46 +242,57 @@ async function refreshActiveBuild(manual) {
   if (!ui.buildID) return;
   const gen = loader.current();
   const buildID = ui.buildID;
-  const prevLastSeen = ui.status?.last_seen_ms ?? 0;
   const prevVerdict = ui.status?.verdict ?? null;
-  const enc = encodeURIComponent(buildID);
+  const seq = ui.filterSeq;
+  const tlPagesBefore = ui.tlPages;
+  const testsPagesBefore = ui.testsPages;
 
-  const stRes = await loader.fetch(`/api/v1/builds/${enc}`, gen);
-  if (stRes.stale) return;
-  if (!stRes.ok) return handleFetchError(stRes.error, !manual);
-  const st = stRes.value;
-  showError("");
-  ui.status = st;
-  renderBuildSummary(st);
+  const res = await refreshBuild(loader, gen, {
+    buildID,
+    detailsLastSeenMS: ui.detailsLastSeenMS,
+    manual,
+    tlPages: tlPagesBefore,
+    testsPages: testsPagesBefore,
+    testsQuery,
+    onStatus: (st) => {
+      showError("");
+      ui.status = st;
+      renderBuildSummary(st);
+      if (st.verdict !== prevVerdict) announce(`Build ${buildID} verdict changed to ${st.verdict}.`);
+    },
+  });
+  if (res.stale) return;
+  if (!res.ok) return handleFetchError(res.error, !manual);
 
-  if (st.last_seen_ms !== prevLastSeen || manual) {
-    const seq = ui.filterSeq;
-    const tlPagesBefore = ui.tlPages;
-    const testsPagesBefore = ui.testsPages;
-    const [tlRes, testsRes] = await Promise.all([
-      fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/${enc}/tests?cursor=${c}&limit=${PAGE_LIMIT}`, Math.max(1, tlPagesBefore)),
-      fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/${enc}/tests?${testsQuery(c)}`, Math.max(1, testsPagesBefore)),
-    ]);
-    if (tlRes.stale || testsRes.stale || !loader.isCurrent(gen)) return;
-    if (!tlRes.ok) return handleFetchError(tlRes.error, !manual);
-    if (!testsRes.ok) return handleFetchError(testsRes.error, !manual);
-
+  const { status: st, detailsLoaded, detailsLastSeenMS, timeline, tests } = res.value;
+  let detailsApplied = !detailsLoaded;
+  if (detailsLoaded) {
+    let tlApplied = false;
+    let testsApplied = false;
     if (ui.tlPages === tlPagesBefore) {
-      ui.tlTests = tlRes.value.tests;
-      ui.tlCursor = tlRes.value.nextCursor;
-      ui.tlPages = tlRes.value.pagesLoaded;
+      ui.tlTests = timeline.tests;
+      ui.tlCursor = timeline.nextCursor;
+      ui.tlPages = timeline.pagesLoaded;
       renderTimeline();
+      tlApplied = true;
     }
-
     if (seq === ui.filterSeq && ui.testsPages === testsPagesBefore) {
-      ui.tests = testsRes.value.tests;
-      ui.nextCursor = testsRes.value.nextCursor;
-      ui.testsPages = testsRes.value.pagesLoaded;
+      ui.tests = tests.tests;
+      ui.nextCursor = tests.nextCursor;
+      ui.testsPages = tests.pagesLoaded;
       renderTests();
+      testsApplied = true;
+    }
+    if (tlApplied && testsApplied) {
+      ui.detailsLastSeenMS = detailsLastSeenMS;
+      detailsApplied = true;
     }
   }
+  if (!detailsApplied && st.verdict !== "running") {
+    dispatchPoll({ type: "response_ok", verdict: "running", manual });
+    return;
+  }
   dispatchPoll({ type: "response_ok", verdict: st.verdict, manual });
-  if (st.verdict !== prevVerdict) announce(`Build ${buildID} verdict changed to ${st.verdict}.`);
 }
 
 function handleFetchError(err, fromPoll) {
@@ -345,75 +359,82 @@ function renderTimeline() {
       ? `Leases from first ${ui.tlTests.length} of ${total} tests`
       : `${tl.lanes.length} runner${tl.lanes.length === 1 ? "" : "s"}, span ${formatDuration(tl.spanMS)}`;
   if (tl.lanes.length === 0) {
-    wrap.append(el("p", "muted", "No lease attempts recorded yet."));
-    return;
-  }
-
-  const labelW = 130;
-  const chartW = 670;
-  const laneH = 28;
-  const padTop = 20;
-  const svg = svgEl("svg", {
-    class: "timeline-svg",
-    viewBox: `0 0 ${labelW + chartW + 10} ${padTop + tl.lanes.length * laneH + 10}`,
-    role: "group",
-    "aria-label": `Per-machine lease timeline across ${tl.lanes.length} runners`,
-  });
-  for (const [frac, anchor] of [[0, "start"], [0.5, "middle"], [1, "end"]]) {
-    const t = svgEl("text", { x: (labelW + frac * chartW).toFixed(1), y: 13, class: "axis-label", "text-anchor": anchor });
-    t.textContent = formatDuration(tl.spanMS * frac);
-    svg.append(t);
-  }
-
-  let focusTarget = null;
-  let updatedDetailBar = null;
-
-  tl.lanes.forEach((lane, idx) => {
-    const y = padTop + idx * laneH;
-    svg.append(svgEl("rect", { x: labelW, y, width: chartW, height: laneH - 4, rx: 3, class: "lane-bg" }));
-    const lbl = svgEl("text", { x: 4, y: y + 16, class: "lane-label" });
-    const shortID = lane.runnerID.length > 12 ? lane.runnerID.slice(0, 12) + "…" : lane.runnerID;
-    lbl.textContent = lane.machineIndex !== null ? `m${lane.machineIndex} ${shortID}` : shortID;
-    svg.append(lbl);
-
-    for (const bar of lane.bars) {
-      const bx = labelW + (bar.xPct / 100) * chartW;
-      const bw = Math.max(8, (bar.wPct / 100) * chartW);
-      const leaseAttr = String(bar.leaseID);
-      const rect = svgEl("rect", {
-        x: bx.toFixed(1),
-        y: y + 2,
-        width: bw.toFixed(1),
-        height: laneH - 8,
-        rx: 3,
-        class: `bar bar-${bar.kind}`,
-        tabindex: "0",
-        role: "button",
-        "data-lease-id": leaseAttr,
-        "aria-label": `Lease ${bar.leaseID} (${bar.meta.label}), ${bar.tests.length} files, ${formatDuration(bar.endMS - bar.startMS)}`,
-      });
-      const open = () => renderLeaseDetail(bar);
-      rect.addEventListener("click", open);
-      rect.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          open();
-        }
-      });
-      if (focusedLeaseID === leaseAttr) focusTarget = rect;
-      if (ui.leaseID === bar.leaseID) updatedDetailBar = bar;
-      svg.append(rect);
-      if (bw >= 16) {
-        const sym = svgEl("text", { x: (bx + 4).toFixed(1), y: y + 15, class: "bar-text" });
-        sym.textContent = bw >= 44 ? `${bar.meta.symbol} ${bar.tests.length}` : bar.meta.symbol;
-        svg.append(sym);
-      }
+    wrap.append(
+      el(
+        "p",
+        "muted",
+        ui.tlCursor !== null
+          ? `No lease attempts in the first ${ui.tlTests.length} tests yet.`
+          : "No lease attempts recorded yet.",
+      ),
+    );
+  } else {
+    const labelW = 130;
+    const chartW = 670;
+    const laneH = 28;
+    const padTop = 20;
+    const svg = svgEl("svg", {
+      class: "timeline-svg",
+      viewBox: `0 0 ${labelW + chartW + 10} ${padTop + tl.lanes.length * laneH + 10}`,
+      role: "group",
+      "aria-label": `Per-machine lease timeline across ${tl.lanes.length} runners`,
+    });
+    for (const [frac, anchor] of [[0, "start"], [0.5, "middle"], [1, "end"]]) {
+      const t = svgEl("text", { x: (labelW + frac * chartW).toFixed(1), y: 13, class: "axis-label", "text-anchor": anchor });
+      t.textContent = formatDuration(tl.spanMS * frac);
+      svg.append(t);
     }
-  });
-  wrap.append(svg);
 
-  if (focusTarget) focusTarget.focus({ preventScroll: true });
-  if (updatedDetailBar && !$("lease-detail").hidden) renderLeaseDetail(updatedDetailBar);
+    let focusTarget = null;
+    let updatedDetailBar = null;
+
+    tl.lanes.forEach((lane, idx) => {
+      const y = padTop + idx * laneH;
+      svg.append(svgEl("rect", { x: labelW, y, width: chartW, height: laneH - 4, rx: 3, class: "lane-bg" }));
+      const lbl = svgEl("text", { x: 4, y: y + 16, class: "lane-label" });
+      const shortID = lane.runnerID.length > 12 ? lane.runnerID.slice(0, 12) + "…" : lane.runnerID;
+      lbl.textContent = lane.machineIndex !== null ? `m${lane.machineIndex} ${shortID}` : shortID;
+      svg.append(lbl);
+
+      for (const bar of lane.bars) {
+        const bx = labelW + (bar.xPct / 100) * chartW;
+        const bw = Math.max(8, (bar.wPct / 100) * chartW);
+        const leaseAttr = String(bar.leaseID);
+        const rect = svgEl("rect", {
+          x: bx.toFixed(1),
+          y: y + 2,
+          width: bw.toFixed(1),
+          height: laneH - 8,
+          rx: 3,
+          class: `bar bar-${bar.kind}`,
+          tabindex: "0",
+          role: "button",
+          "data-lease-id": leaseAttr,
+          "aria-label": `Lease ${bar.leaseID} (${bar.meta.label}), ${bar.tests.length} files, ${formatDuration(bar.endMS - bar.startMS)}`,
+        });
+        const open = () => renderLeaseDetail(bar);
+        rect.addEventListener("click", open);
+        rect.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            open();
+          }
+        });
+        if (focusedLeaseID === leaseAttr) focusTarget = rect;
+        if (ui.leaseID === bar.leaseID) updatedDetailBar = bar;
+        svg.append(rect);
+        if (bw >= 16) {
+          const sym = svgEl("text", { x: (bx + 4).toFixed(1), y: y + 15, class: "bar-text" });
+          sym.textContent = bw >= 44 ? `${bar.meta.symbol} ${bar.tests.length}` : bar.meta.symbol;
+          svg.append(sym);
+        }
+      }
+    });
+    wrap.append(svg);
+
+    if (focusTarget) focusTarget.focus({ preventScroll: true });
+    if (updatedDetailBar && !$("lease-detail").hidden) renderLeaseDetail(updatedDetailBar);
+  }
 
   if (ui.tlCursor !== null) {
     const pager = el("div", "pager");
@@ -493,7 +514,14 @@ $("auth-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const tok = $("token-input").value.trim();
   if (!tok) return;
-  sessionStorage.setItem(TOKEN_KEY, tok);
+  try {
+    sessionStorage.setItem(TOKEN_KEY, tok);
+  } catch {
+    const msg = "The dashboard needs sessionStorage to keep your token for this tab.";
+    showError(msg);
+    announce(msg);
+    return;
+  }
   $("token-input").value = "";
   void renderRoute();
 });
