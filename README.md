@@ -120,4 +120,11 @@ go build -o bin/bunpo ./cmd/bunpo
 go build -o bin/bunpo-server ./cmd/bunpo-server
 ```
 
+The Cloudflare Worker in `worker/` has its own checks:
+
+```sh
+(cd worker && npm ci --ignore-scripts && npm run typecheck && npm run test:core && npm run test:do)
+./worker/scripts/test-blackbox.sh
+```
+
 Licensed under Apache-2.0.

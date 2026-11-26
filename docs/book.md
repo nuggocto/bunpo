@@ -207,9 +207,12 @@ Pushing a tag such as `v0.0.3` runs `.github/workflows/release.yml`:
    tag, `v0`, to the release, so `uses: nuggocto/bunpo@v0` follows the newest
    `v0.x.y` that installs everywhere. A prerelease such as `v0.0.3-rc.1` stays
    a prerelease and leaves `v0` where it is.
-6. After publishing, update `bunpo-site`'s `src/data/releases.ts` with the new
-   version and its six CLI hashes from `SHA256SUMS`, because
-   `bunpo.org/install.sh` and `bunpo.org/install.ps1` pin them.
+
+The workflow does not touch the website. After a stable release, update
+`src/data/releases.ts` in the `bunpo-site` repository with the new version and
+the six `bunpo` hashes from its `SHA256SUMS`, because
+`bunpo.org/install.sh` and `bunpo.org/install.ps1` pin them. The site's tests
+fail if any of the six is missing.
 
 ## The GitHub Action
 
@@ -836,7 +839,7 @@ allocations); full CLI wall time for 50,000 tests is 0.16 to 0.26 s on `v0.1.0`
 (see [docs/benchmark.md](benchmark.md)).
 
 `worker/test/` verifies the Cloudflare Worker and dashboard in TypeScript:
-dashboard pure logic (`dashboard-core.test.ts`), the 19 shared JSON vectors
+dashboard pure logic (`dashboard-core.test.ts`), the 18 shared JSON vectors
 (`vectors.test.ts`), Go-to-Worker differential traces (`differential.test.ts`),
 `LeaseDeadlineTracker` wake-grace properties (`deadlines.test.ts`), Durable
 Object auth, bounds, alarm backoff retry, and eviction lifecycle
