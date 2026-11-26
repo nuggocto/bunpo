@@ -14,6 +14,7 @@ import {
   formatTimeLeft,
   parseRoute,
   pollStep,
+  refreshBuild,
   sortBuilds,
 } from "../../internal/dashboard/static/dashboard/core.js";
 
@@ -263,6 +264,91 @@ describe("dashboard pure core", () => {
       // Must not have requested page 3.
       expect(seen).toEqual(["/api/v1/builds/b/tests?cursor=0", "/api/v1/builds/b/tests?cursor=200"]);
     }
+  });
+
+  it("retries details after a 503 even when status is already terminal and stops polling only once details load", async () => {
+    let now = 50_000;
+    let poll = pollStep(createPollState(), { type: "watch", verdict: "running", nowMS: now }).state;
+    let detailsLastSeenMS: number | null = 1_000;
+    let detailsAttempts = 0;
+
+    const terminalStatus = { verdict: "failed", last_seen_ms: 2_000 };
+    const failedTest = { test_index: 3, test: "tests/fail.py", state: "failed" };
+
+    const loader = createGuardedLoader<unknown>(async (path) => {
+      if (path === "/api/v1/builds/b-term") return terminalStatus;
+      if (path.includes("state=failed,unresolved")) {
+        detailsAttempts++;
+        if (detailsAttempts === 1) {
+          const err = new Error("HTTP 503") as Error & { httpStatus: number };
+          err.httpStatus = 503;
+          throw err;
+        }
+        return { tests: [failedTest], next_cursor: null };
+      }
+      return { tests: [failedTest], next_cursor: null };
+    });
+    const gen = loader.invalidate();
+
+    // Poll 1: status returns terminal "failed" (last_seen_ms 2000), filtered tests page returns 503.
+    now = poll.nextAtMS!;
+    let step = pollStep(poll, { type: "tick", nowMS: now });
+    poll = step.state;
+    expect(step.actions.some((a) => a.type === "fetch")).toBe(true);
+
+    const r1 = await refreshBuild(loader, gen, {
+      buildID: "b-term",
+      detailsLastSeenMS,
+      manual: false,
+      tlPages: 1,
+      testsPages: 1,
+      testsQuery: (c) => `cursor=${c}&limit=200&state=failed,unresolved`,
+      onStatus: (st) => {
+        // Simulate old bug check: caller tracks status separately; detailsLastSeenMS must NOT be overwritten here.
+        expect(st.verdict).toBe("failed");
+      },
+    });
+    expect(r1.stale).toBe(false);
+    if (r1.stale || r1.ok) throw new Error("expected 503 failure on first refresh");
+    // detailsLastSeenMS must remain unchanged after a failed refresh.
+
+    const err = r1.error as { httpStatus?: number };
+    now += 100;
+    step = pollStep(poll, { type: "response_error", httpStatus: err.httpStatus || 0, nowMS: now });
+    poll = step.state;
+    // Polling must stay active with backoff because details are still behind.
+    expect(poll.active).toBe(true);
+    expect(poll.failures).toBe(1);
+    expect(poll.nextAtMS).not.toBeNull();
+
+    // Poll 2: server returns the exact same terminal status (last_seen_ms 2000). Details MUST be fetched again.
+    now = poll.nextAtMS!;
+    step = pollStep(poll, { type: "tick", nowMS: now });
+    poll = step.state;
+    expect(step.actions.some((a) => a.type === "fetch")).toBe(true);
+
+    const r2 = await refreshBuild(loader, gen, {
+      buildID: "b-term",
+      detailsLastSeenMS,
+      manual: false,
+      tlPages: 1,
+      testsPages: 1,
+      testsQuery: (c) => `cursor=${c}&limit=200&state=failed,unresolved`,
+    });
+    expect(r2.stale).toBe(false);
+    if (r2.stale || !r2.ok) throw new Error("expected second refresh to succeed");
+    expect(r2.value.detailsLoaded).toBe(true);
+    expect(r2.value.detailsLastSeenMS).toBe(2_000);
+    expect(r2.value.tests?.tests).toEqual([failedTest]);
+    expect(detailsAttempts).toBe(2);
+
+    // Only now that details are loaded for last_seen_ms 2000 does polling stop.
+    now += 100;
+    step = pollStep(poll, { type: "response_ok", verdict: r2.value.status.verdict, manual: false, nowMS: now });
+    poll = step.state;
+    expect(poll.active).toBe(false);
+    expect(poll.stoppedReason).toBe("finished");
+    expect(poll.nextAtMS).toBeNull();
   });
 
   it("lays out per-machine timeline bars with non-color status symbols, wall-time durations, and active lease clamping", () => {

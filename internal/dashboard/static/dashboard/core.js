@@ -136,6 +136,40 @@ export async function fetchRefreshedPages(loader, gen, pathForCursor, pageCount)
   return { stale: false, ok: true, value: { tests, nextCursor: cursor, pagesLoaded } };
 }
 
+export async function refreshBuild(loader, gen, opts) {
+  const { buildID, detailsLastSeenMS, manual, tlPages, testsPages, testsQuery, onStatus } = opts;
+  const enc = encodeURIComponent(buildID);
+  const stRes = await loader.fetch(`/api/v1/builds/${enc}`, gen);
+  if (stRes.stale || !loader.isCurrent(gen)) return { stale: true };
+  if (!stRes.ok) return stRes;
+  const st = stRes.value;
+  if (onStatus) onStatus(st);
+
+  if (!manual && detailsLastSeenMS === st.last_seen_ms) {
+    return { stale: false, ok: true, value: { status: st, detailsLoaded: false, detailsLastSeenMS } };
+  }
+
+  const [tlRes, testsRes] = await Promise.all([
+    fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/${enc}/tests?cursor=${c}&limit=${PAGE_LIMIT}`, Math.max(1, tlPages)),
+    fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/${enc}/tests?${testsQuery(c)}`, Math.max(1, testsPages)),
+  ]);
+  if (tlRes.stale || testsRes.stale || !loader.isCurrent(gen)) return { stale: true };
+  if (!tlRes.ok) return tlRes;
+  if (!testsRes.ok) return testsRes;
+
+  return {
+    stale: false,
+    ok: true,
+    value: {
+      status: st,
+      detailsLoaded: true,
+      detailsLastSeenMS: st.last_seen_ms,
+      timeline: tlRes.value,
+      tests: testsRes.value,
+    },
+  };
+}
+
 export function buildTimeline(status, tests, nowMS) {
   const runnerByID = new Map((status?.runners || []).map((r) => [r.runner_id, r]));
   const leases = new Map();

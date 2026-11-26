@@ -53,6 +53,28 @@ declare module "*dashboard/core.js" {
     pageCount: number,
   ): Promise<GuardedResult<{ tests: T[]; nextCursor: number | null; pagesLoaded: number }>>;
 
+  export interface RefreshBuildResult<S = unknown, T = unknown> {
+    status: S;
+    detailsLoaded: boolean;
+    detailsLastSeenMS: number | null;
+    timeline?: { tests: T[]; nextCursor: number | null; pagesLoaded: number };
+    tests?: { tests: T[]; nextCursor: number | null; pagesLoaded: number };
+  }
+
+  export function refreshBuild<S extends { last_seen_ms: number; verdict: string } = { last_seen_ms: number; verdict: string }, T = unknown>(
+    loader: GuardedLoader<unknown>,
+    gen: number,
+    opts: {
+      buildID: string;
+      detailsLastSeenMS: number | null;
+      manual: boolean;
+      tlPages: number;
+      testsPages: number;
+      testsQuery: (cursor: number) => string;
+      onStatus?: (status: S) => void;
+    },
+  ): Promise<GuardedResult<RefreshBuildResult<S, T>>>;
+
   export interface TimelineBar {
     leaseID: number;
     runnerID: string;
