@@ -115,12 +115,25 @@ export async function fetchBuildInitial(loader, gen, buildID, testsQS, onStatus)
   return { stale: false, ok: true, value: { status: st.value, timeline: tl.value, tests: tests.value } };
 }
 
-// Resets the test list to fresh page 1 on refresh so later pages never go stale or miss newly matching tests.
-export function replaceWithRefreshedPage(freshPage) {
-  return {
-    tests: freshPage?.tests || [],
-    nextCursor: freshPage?.next_cursor ?? null,
-  };
+// Reloads up to pageCount pages from cursor 0 along the next_cursor chain,
+// stopping early when next_cursor is null or the loader generation changes.
+export async function fetchRefreshedPages(loader, gen, pathForCursor, pageCount) {
+  const targetPages = Math.max(1, pageCount || 1);
+  const tests = [];
+  let cursor = 0;
+  let pagesLoaded = 0;
+
+  for (let i = 0; i < targetPages && cursor !== null; i++) {
+    const res = await loader.fetch(pathForCursor(cursor), gen);
+    if (res.stale || !loader.isCurrent(gen)) return { stale: true };
+    if (!res.ok) return res;
+    const page = res.value || {};
+    tests.push(...(page.tests || []));
+    cursor = page.next_cursor ?? null;
+    pagesLoaded++;
+  }
+
+  return { stale: false, ok: true, value: { tests, nextCursor: cursor, pagesLoaded } };
 }
 
 export function buildTimeline(status, tests, nowMS) {

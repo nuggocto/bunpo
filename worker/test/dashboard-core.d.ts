@@ -46,9 +46,12 @@ declare module "*dashboard/core.js" {
     onStatus?: (status: T) => void,
   ): Promise<GuardedResult<{ status: T; timeline: T; tests: T }>>;
 
-  export function replaceWithRefreshedPage<T extends { test_index: number }>(
-    freshPage: { tests?: T[]; next_cursor?: number | null },
-  ): { tests: T[]; nextCursor: number | null };
+  export function fetchRefreshedPages<T = unknown>(
+    loader: GuardedLoader<{ tests?: T[]; next_cursor?: number | null }>,
+    gen: number,
+    pathForCursor: (cursor: number) => string,
+    pageCount: number,
+  ): Promise<GuardedResult<{ tests: T[]; nextCursor: number | null; pagesLoaded: number }>>;
 
   export interface TimelineBar {
     leaseID: number;

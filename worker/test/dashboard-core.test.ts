@@ -8,12 +8,12 @@ import {
   createGuardedLoader,
   createPollState,
   fetchBuildInitial,
+  fetchRefreshedPages,
   formatAttemptDuration,
   formatDuration,
   formatTimeLeft,
   parseRoute,
   pollStep,
-  replaceWithRefreshedPage,
   sortBuilds,
 } from "../../internal/dashboard/static/dashboard/core.js";
 
@@ -119,27 +119,150 @@ describe("dashboard pure core", () => {
     expect(await buildB).toEqual({ stale: true });
   });
 
-  it("resets to fresh page 1 on refresh so multi-page views never keep stale pages or miss newly matching tests", () => {
-    const refreshed = replaceWithRefreshedPage({
-      tests: [
-        { test_index: 0, state: "failed" },
-        { test_index: 5, state: "failed" },
-      ],
-      next_cursor: 6,
-    });
-    expect(refreshed).toEqual({
-      tests: [
-        { test_index: 0, state: "failed" },
-        { test_index: 5, state: "failed" },
-      ],
-      nextCursor: 6,
-    });
+  it("reloads the same page count along the next_cursor chain, captures newly matching tests, stops early on shrink, and drops stale generations", async () => {
+    type Page = { tests: { test_index: number; state: string }[]; next_cursor: number | null };
 
-    const single = replaceWithRefreshedPage({
-      tests: [{ test_index: 0, state: "passed" }],
-      next_cursor: null,
-    });
-    expect(single).toEqual({ tests: [{ test_index: 0, state: "passed" }], nextCursor: null });
+    // (a) A newly matching test between old page boundaries now appears across the reloaded pages.
+    {
+      const seen: string[] = [];
+      const pages: Record<number, Page> = {
+        0: {
+          tests: [
+            { test_index: 0, state: "failed" },
+            { test_index: 5, state: "failed" },
+          ],
+          next_cursor: 6,
+        },
+        6: {
+          tests: [
+            { test_index: 10, state: "failed" },
+            { test_index: 15, state: "failed" },
+          ],
+          next_cursor: 16,
+        },
+      };
+      const loader = createGuardedLoader<Page>(async (path) => {
+        seen.push(path);
+        const cursor = Number(new URL(path, "http://x").searchParams.get("cursor"));
+        return pages[cursor]!;
+      });
+      const gen = loader.invalidate();
+      const res = await fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/b/tests?cursor=${c}&state=failed`, 2);
+      expect(seen).toEqual([
+        "/api/v1/builds/b/tests?cursor=0&state=failed",
+        "/api/v1/builds/b/tests?cursor=6&state=failed",
+      ]);
+      expect(res).toEqual({
+        stale: false,
+        ok: true,
+        value: {
+          tests: [
+            { test_index: 0, state: "failed" },
+            { test_index: 5, state: "failed" },
+            { test_index: 10, state: "failed" },
+            { test_index: 15, state: "failed" },
+          ],
+          nextCursor: 16,
+          pagesLoaded: 2,
+        },
+      });
+    }
+
+    // (b) With 3 pages loaded, refresh fetches exactly 3 pages in order and keeps them without fetching page 4.
+    {
+      const seen: string[] = [];
+      const pages: Record<number, Page> = {
+        0: { tests: [{ test_index: 0, state: "passed" }], next_cursor: 200 },
+        200: { tests: [{ test_index: 200, state: "passed" }], next_cursor: 400 },
+        400: { tests: [{ test_index: 400, state: "leased" }], next_cursor: 600 },
+        600: { tests: [{ test_index: 600, state: "pending" }], next_cursor: null },
+      };
+      const loader = createGuardedLoader<Page>(async (path) => {
+        seen.push(path);
+        const cursor = Number(new URL(path, "http://x").searchParams.get("cursor"));
+        return pages[cursor]!;
+      });
+      const gen = loader.invalidate();
+      const res = await fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/b/tests?cursor=${c}`, 3);
+      expect(seen).toEqual([
+        "/api/v1/builds/b/tests?cursor=0",
+        "/api/v1/builds/b/tests?cursor=200",
+        "/api/v1/builds/b/tests?cursor=400",
+      ]);
+      expect(res).toEqual({
+        stale: false,
+        ok: true,
+        value: {
+          tests: [
+            { test_index: 0, state: "passed" },
+            { test_index: 200, state: "passed" },
+            { test_index: 400, state: "leased" },
+          ],
+          nextCursor: 600,
+          pagesLoaded: 3,
+        },
+      });
+    }
+
+    // (c) A list that shrinks so next_cursor becomes null stops early.
+    {
+      const seen: string[] = [];
+      const loader = createGuardedLoader<Page>(async (path) => {
+        seen.push(path);
+        const cursor = Number(new URL(path, "http://x").searchParams.get("cursor"));
+        if (cursor === 0) return { tests: [{ test_index: 0, state: "failed" }], next_cursor: 10 };
+        return { tests: [{ test_index: 10, state: "failed" }], next_cursor: null };
+      });
+      const gen = loader.invalidate();
+      const res = await fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/b/tests?cursor=${c}`, 4);
+      expect(seen).toEqual([
+        "/api/v1/builds/b/tests?cursor=0",
+        "/api/v1/builds/b/tests?cursor=10",
+      ]);
+      expect(res).toEqual({
+        stale: false,
+        ok: true,
+        value: {
+          tests: [
+            { test_index: 0, state: "failed" },
+            { test_index: 10, state: "failed" },
+          ],
+          nextCursor: null,
+          pagesLoaded: 2,
+        },
+      });
+    }
+
+    // (d) A stale generation discards the result and stops further page fetches.
+    {
+      const seen: string[] = [];
+      const inflight = new Map<string, ReturnType<typeof deferred<Page>>>();
+      const loader = createGuardedLoader<Page>((path) => {
+        seen.push(path);
+        const d = deferred<Page>();
+        inflight.set(path, d);
+        return d.promise;
+      });
+      const gen = loader.invalidate();
+      const pending = fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/b/tests?cursor=${c}`, 3);
+      inflight.get("/api/v1/builds/b/tests?cursor=0")!.resolve({
+        tests: [{ test_index: 0, state: "passed" }],
+        next_cursor: 200,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(seen).toEqual(["/api/v1/builds/b/tests?cursor=0", "/api/v1/builds/b/tests?cursor=200"]);
+
+      // User navigates away / signs out while page 2 is in flight.
+      loader.invalidate();
+      inflight.get("/api/v1/builds/b/tests?cursor=200")!.resolve({
+        tests: [{ test_index: 200, state: "passed" }],
+        next_cursor: 400,
+      });
+      expect(await pending).toEqual({ stale: true });
+      // Must not have requested page 3.
+      expect(seen).toEqual(["/api/v1/builds/b/tests?cursor=0", "/api/v1/builds/b/tests?cursor=200"]);
+    }
   });
 
   it("lays out per-machine timeline bars with non-color status symbols, wall-time durations, and active lease clamping", () => {

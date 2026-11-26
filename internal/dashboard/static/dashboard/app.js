@@ -1,7 +1,7 @@
 import {
   BASE_POLL_MS, PAGE_LIMIT, buildPath, buildTimeline, createGuardedLoader, createPollState,
-  fetchBuildInitial, formatAttemptDuration, formatDuration, formatTimeLeft, formatTimestamp,
-  parseRoute, pollStep, replaceWithRefreshedPage, sortBuilds, statusMeta,
+  fetchBuildInitial, fetchRefreshedPages, formatAttemptDuration, formatDuration, formatTimeLeft, formatTimestamp,
+  parseRoute, pollStep, sortBuilds, statusMeta,
 } from "./core.js";
 
 const TOKEN_KEY = "bunpo_queue_read_token";
@@ -16,9 +16,11 @@ const ui = {
   filter: "problems",
   tests: [],
   nextCursor: null,
+  testsPages: 0,
   filterSeq: 0,
   tlTests: [],
   tlCursor: null,
+  tlPages: 0,
   leaseID: null,
   announced: "",
 };
@@ -27,8 +29,10 @@ function resetBuildState() {
   ui.status = null;
   ui.tests = [];
   ui.nextCursor = null;
+  ui.testsPages = 0;
   ui.tlTests = [];
   ui.tlCursor = null;
+  ui.tlPages = 0;
   ui.leaseID = null;
 }
 
@@ -221,8 +225,10 @@ async function loadBuild(buildID, gen) {
   const { status: st, timeline, tests } = res.value;
   ui.tlTests = timeline.tests || [];
   ui.tlCursor = timeline.next_cursor ?? null;
+  ui.tlPages = 1;
   ui.tests = tests.tests || [];
   ui.nextCursor = tests.next_cursor ?? null;
+  ui.testsPages = 1;
   renderTimeline();
   renderTests();
   dispatchPoll({ type: "watch", verdict: st.verdict });
@@ -247,23 +253,27 @@ async function refreshActiveBuild(manual) {
 
   if (st.last_seen_ms !== prevLastSeen || manual) {
     const seq = ui.filterSeq;
+    const tlPagesBefore = ui.tlPages;
+    const testsPagesBefore = ui.testsPages;
     const [tlRes, testsRes] = await Promise.all([
-      loader.fetch(`/api/v1/builds/${enc}/tests?cursor=0&limit=${PAGE_LIMIT}`, gen),
-      loader.fetch(`/api/v1/builds/${enc}/tests?${testsQuery(0)}`, gen),
+      fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/${enc}/tests?cursor=${c}&limit=${PAGE_LIMIT}`, Math.max(1, tlPagesBefore)),
+      fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/${enc}/tests?${testsQuery(c)}`, Math.max(1, testsPagesBefore)),
     ]);
     if (tlRes.stale || testsRes.stale || !loader.isCurrent(gen)) return;
     if (!tlRes.ok) return handleFetchError(tlRes.error, !manual);
     if (!testsRes.ok) return handleFetchError(testsRes.error, !manual);
 
-    const tl = replaceWithRefreshedPage(tlRes.value);
-    ui.tlTests = tl.tests;
-    ui.tlCursor = tl.nextCursor;
-    renderTimeline();
+    if (ui.tlPages === tlPagesBefore) {
+      ui.tlTests = tlRes.value.tests;
+      ui.tlCursor = tlRes.value.nextCursor;
+      ui.tlPages = tlRes.value.pagesLoaded;
+      renderTimeline();
+    }
 
-    if (seq === ui.filterSeq) {
-      const ts = replaceWithRefreshedPage(testsRes.value);
-      ui.tests = ts.tests;
-      ui.nextCursor = ts.nextCursor;
+    if (seq === ui.filterSeq && ui.testsPages === testsPagesBefore) {
+      ui.tests = testsRes.value.tests;
+      ui.nextCursor = testsRes.value.nextCursor;
+      ui.testsPages = testsRes.value.pagesLoaded;
       renderTests();
     }
   }
@@ -318,6 +328,7 @@ async function loadNextTimelinePage() {
   if (!res.ok) return handleFetchError(res.error, false);
   ui.tlTests = ui.tlTests.concat(res.value.tests || []);
   ui.tlCursor = res.value.next_cursor ?? null;
+  ui.tlPages++;
   renderTimeline();
 }
 
@@ -443,6 +454,7 @@ async function loadTestsPage(reset) {
   if (!res.ok) return handleFetchError(res.error, false);
   ui.tests = reset ? res.value.tests || [] : ui.tests.concat(res.value.tests || []);
   ui.nextCursor = res.value.next_cursor ?? null;
+  ui.testsPages = reset ? 1 : ui.testsPages + 1;
   renderTests();
 }
 
