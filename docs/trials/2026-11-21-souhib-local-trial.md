@@ -79,7 +79,7 @@ sidecar recreated fresh before every machine.
 | 3, timed | 369.9 s (123) | 379.3 s (122) | 369.0 s (127) | 372.0 s (123) | **10.3 s** | 5m59s each |
 
 Bunpō predicted `5m59s` (359 s) on every machine in rounds 2 and 3; pytest
-finished in `359.4–368.1 s` (within 0.3–2.5% of prediction), and all four
+finished in `369.0–379.3 s` (2.8–5.7% above the 359 s prediction), and all four
 6-minute shards finished within 5.4 s in round 2 and 10.3 s in round 3.
 Speedup was **4.07x** (round 2) and **4.03x** (round 3), slightly over 4x
 because each shard gets a fresh Postgres database rather than accumulating
