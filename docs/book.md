@@ -404,12 +404,15 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   builds, build verdicts and conflicts, a keyboard-accessible per-machine SVG
   lease timeline covering the tests loaded so far (starting with the first 200
   tests, not the whole build), slowest files, and paged (`/tests?limit=200`)
-  failed, unresolved, and retried attempts. Refresh resets to fresh page 1 so
-  multi-page views never hold stale states or skip newly matching tests. It
-  accepts only `BUNPO_QUEUE_READ_TOKEN` stored in `sessionStorage`, sets a
-  strict CSP (`default-src 'none'`), and polls a running build at most every
-  10 s while the tab is visible (360 requests/hour idle, up to 1,080
-  requests/hour while tests change, 0 once finished or hidden). See
+  failed, unresolved, and retried attempts. Refresh reloads the same number of
+  loaded pages from cursor 0 along each list's `next_cursor` chain (stopping
+  early when `next_cursor` is null), keeping loaded pages while avoiding stale
+  states or missed filter matches. It accepts only `BUNPO_QUEUE_READ_TOKEN`
+  stored in `sessionStorage`, sets a strict CSP (`default-src 'none'`), and
+  polls a running build at most every 10 s while the tab is visible (360
+  requests/hour idle; `360 * (1 + timeline pages + test pages)` requests/hour
+  while state changes, or up to 1,080/hour with one page each; 0 once finished
+  or hidden). See
   [docs/cli.md](cli.md) for every command and flag and
   [docs/self-hosting.md](self-hosting.md) for deployment.
 - **`version`** (or **`-version`**, **`--version`**) prints the module version

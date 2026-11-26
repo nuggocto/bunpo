@@ -121,7 +121,7 @@ What happens on failures and limits:
 - **Edge or Worker rejection (Worker daily quota Error 1027, rate limit, or Worker CPU limit):** Cloudflare returns 429 or 5xx outside the Worker's JSON envelope; the Go client maps non-JSON errors to `http_error`.
 - **Client retry and fail-safe exit:** `bunpo --queue` treats 429, all 5xx responses (including 503 `storage_error`), and network errors as transient, retrying with exponential backoff and jitter up to 2 minutes before exiting 1. A build never reports a false pass when the server hits a limit.
 - **Large matrices (64+ machines):** Heartbeats at `lease_ttl / 3` are roughly half of all requests; increase `--lease-ttl` (up to 10m) to cut request volume proportionally.
-- **Open dashboard tabs:** One visible tab viewing a running build makes 360 req/hr when idle, up to 1,080 req/hr while state changes every 10 s (refresh resets to page 1), and 0 req/hr once finished or hidden.
+- **Open dashboard tabs:** One visible tab viewing a running build makes 360 req/hr when idle, `360 * (1 + timeline pages + test pages)` req/hr while state changes every 10 s (up to 1,080 req/hr with one page each, reloading loaded pages from cursor 0 along the `next_cursor` chain), and 0 req/hr once finished or hidden.
 
 ## 3. Standalone Go server (`bunpo-server`)
 
