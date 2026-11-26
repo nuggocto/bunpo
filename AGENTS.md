@@ -94,11 +94,6 @@
   end-to-end tests against a local Worker.
 - Release build: `scripts/build-release.sh VERSION OUTDIR` (12 binaries and
   `SHA256SUMS`).
-- After every stable release, update `src/data/releases.ts` in `bunpo-site`:
-  `LATEST_VERSION`, the release entry, and the six `bunpo` CLI hashes copied
-  from the published `SHA256SUMS`. `bunpo.org/install.sh` and
-  `bunpo.org/install.ps1` pin those hashes, so until the site is updated they
-  keep installing the previous release.
 
 - Run the checks relevant to the change.
 - Report which checks passed, failed, or were not run.
