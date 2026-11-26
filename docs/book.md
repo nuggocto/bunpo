@@ -406,13 +406,15 @@ as machine 0, and a missing `ms` in a run report would record 0 ms.
   tests, not the whole build), slowest files, and paged (`/tests?limit=200`)
   failed, unresolved, and retried attempts. Refresh reloads the same number of
   loaded pages from cursor 0 along each list's `next_cursor` chain (stopping
-  early when `next_cursor` is null), keeping loaded pages while avoiding stale
-  states or missed filter matches. It accepts only `BUNPO_QUEUE_READ_TOKEN`
-  stored in `sessionStorage`, sets a strict CSP (`default-src 'none'`), and
-  polls a running build at most every 10 s while the tab is visible (360
-  requests/hour idle; `360 * (1 + timeline pages + test pages)` requests/hour
-  while state changes, or up to 1,080/hour with one page each; 0 once finished
-  or hidden). See
+  early when `next_cursor` is null), tracks the last status timestamp for which
+  both lists succeeded, and keeps retrying with backoff until details catch up
+  even if the build already reached a terminal verdict. It accepts only
+  `BUNPO_QUEUE_READ_TOKEN` stored in `sessionStorage` (reporting an error if
+  storage is blocked), sets a strict CSP (`default-src 'none'`), and polls a
+  running build at most every 10 s while the tab is visible (360 requests/hour
+  idle; `360 * (1 + timeline pages + test pages)` requests/hour while state
+  changes, or up to 1,080/hour with one page each; 0 once finished and caught
+  up, or hidden). See
   [docs/cli.md](cli.md) for every command and flag and
   [docs/self-hosting.md](self-hosting.md) for deployment.
 - **`version`** (or **`-version`**, **`--version`**) prints the module version

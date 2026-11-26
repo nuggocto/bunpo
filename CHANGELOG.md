@@ -3,6 +3,15 @@
 All notable changes to Bunpō are recorded here. Release binaries and checksums
 start at `v0.0.3` on [GitHub Releases](https://github.com/nuggocto/bunpo/releases).
 
+## [v0.1.2] - 2026-11-26
+
+### Fixed
+
+- Keep retrying live-queue dashboard details after a failed page request (such as HTTP 503) even when the build status is already terminal, stopping polling only once timeline and test details catch up to the latest status or retries run out.
+- Keep the timeline's "Load next 200 tests into timeline" pager visible when the loaded tests have no lease attempts yet, instead of hiding the pager behind an empty state.
+- Show an error message instead of failing silently when signing into the dashboard with `sessionStorage` blocked, keeping the token field intact.
+- Correct the LaTabdhir PostgreSQL prose summary in `docs/trials/2026-11-21-souhib-local-trial.md` to match its measured table (`369.0–379.3 s`, 2.8–5.7% above the 359 s prediction).
+
 ## [v0.1.1] - 2026-11-26
 
 ### Fixed
@@ -139,6 +148,7 @@ First release with cross-compiled binaries, checksums, GitHub Action, runner gui
 - Table-driven tests, 2,000-seed property tests, a brute-force optimal solver oracle verifying the 4/3 makespan bound, fuzzing for timing decoding, and a 50,000-test benchmark.
 - Go 1.27 module with pinned `staticcheck` and `govulncheck` tools, GitHub Actions CI, specification (`PROJECT.md`), and developer guide (`docs/book.md`).
 
+[v0.1.2]: https://github.com/nuggocto/bunpo/compare/v0.1.1...v0.1.2
 [v0.1.1]: https://github.com/nuggocto/bunpo/compare/v0.1.0...v0.1.1
 [v0.1.0]: https://github.com/nuggocto/bunpo/compare/v0.0.7...v0.1.0
 [v0.0.7]: https://github.com/nuggocto/bunpo/compare/v0.0.6...v0.0.7
