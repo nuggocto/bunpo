@@ -11,11 +11,8 @@ export const MaxDurationMS = 30 * 24 * 60 * 60 * 1000;
 
 const MinLeaseTTLMS = 10_000;
 const MaxLeaseTTLMS = 600_000;
-
 const MaxBuildTimeoutMS = 24 * 60 * 60 * 1000;
-
 const MaxAttemptsLimit = 10;
-
 const MaxBatchLimit = 200;
 
 export const MaxInitConflicts = 8;
@@ -276,6 +273,8 @@ export function stateVerdict(s: State): Verdict {
   return computeVerdict(s.counts, s.conflicts.length > 0);
 }
 
+// Derives the build verdict from counts and init-conflict state.
+// Once no tests remain pending or leased, failed takes precedence over unresolved.
 export function computeVerdict(c: Counts, hasConflict: boolean): Verdict {
   if (c.pending > 0 || c.leased > 0) {
     return "running";
@@ -358,6 +357,7 @@ export function validateTestList(
   if (predictions.length !== tests.length) {
     return errInvalid(`predictions_ms length ${predictions.length} does not match tests length ${tests.length}`);
   }
+
   for (let i = 0; i < tests.length; i++) {
     const id = tests[i]!;
     if (!isCanonicalPOSIXTestID(id, MaxTestIDBytes)) {
@@ -378,10 +378,17 @@ export function validateTestList(
   return null;
 }
 
+// Computes the canonical SHA-256 hex digest of build config and test paths,
+// matching configDigest in Go's internal/queue.
 export function configDigest(cfg: Config, tests: readonly string[]): string {
   const h = createHash("sha256");
   h.update(
-    `bunpo queue ${ProtocolVersion}\nmachines ${cfg.machines}\nlease_ttl_ms ${cfg.lease_ttl_ms}\nbuild_timeout_ms ${cfg.build_timeout_ms}\nmax_attempts ${cfg.max_attempts}\nmax_batch ${cfg.max_batch}\n`,
+    `bunpo queue ${ProtocolVersion}\n` +
+      `machines ${cfg.machines}\n` +
+      `lease_ttl_ms ${cfg.lease_ttl_ms}\n` +
+      `build_timeout_ms ${cfg.build_timeout_ms}\n` +
+      `max_attempts ${cfg.max_attempts}\n` +
+      `max_batch ${cfg.max_batch}\n`,
   );
   if (tests.length > 0) {
     h.update(tests.join("\n"));
@@ -390,6 +397,8 @@ export function configDigest(cfg: Config, tests: readonly string[]): string {
   return h.digest("hex");
 }
 
+// Replaces null predictions with the integer half-up median of known values,
+// or 0 when every prediction is null.
 export function computeEffectivePredictions(predictions: readonly (number | null)[]): number[] {
   const known: number[] = [];
   for (let i = 0; i < predictions.length; i++) {
@@ -398,6 +407,7 @@ export function computeEffectivePredictions(predictions: readonly (number | null
       known.push(p);
     }
   }
+
   const fill = median(known);
   const eff = new Array<number>(predictions.length);
   for (let i = 0; i < predictions.length; i++) {

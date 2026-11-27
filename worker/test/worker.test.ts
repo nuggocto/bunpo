@@ -41,6 +41,7 @@ async function req(
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json; charset=utf-8";
+
   const resp = await exports.default.fetch(`http://localhost${path}`, {
     method,
     headers,
@@ -304,7 +305,7 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     const initR = await stub.init(bid, initRaw, now);
     expect(initR.status).toBe(200);
 
-    // Runner A leases tests/a.py and heartbeats twice (forcing a lease_deadlines meta write), then dies.
+    // Runner A leases tests/a.py and heartbeats once past grace (forcing a lease_deadlines meta write), then dies.
     const lA = await stub.lease(
       JSON.stringify({ version: 1, runner_id: "runner-a", machine_index: 0, request_id: "a-1" }),
       now,
@@ -313,7 +314,7 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     const leaseA = JSON.parse(lA.body) as { lease_id: number; attempts: { test: string }[] };
     expect(leaseA.attempts[0]!.test).toBe("tests/a.py");
 
-    // Heartbeat past grace triggers one meta write; then runner A stops forever.
+    // Advance past grace so this heartbeat persists lease_deadlines; then runner A stops.
     now += 10_000;
     const hbA = await stub.heartbeat(
       JSON.stringify({ version: 1, runner_id: "runner-a", lease_id: leaseA.lease_id }),
@@ -351,9 +352,9 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
       now + 100,
     );
 
-    // Now Runner B polls every 12 s with a full DO eviction before EVERY poll.
+    // Runner B polls every 12 s with a full DO eviction before each poll.
     // Under the old reset-on-wake rule this stayed "wait" forever; under LeaseDeadlineTracker
-    // runner-a's lease MUST expire by lastRealDeadlineA + graceMS.
+    // runner-a's lease expires by lastRealDeadlineA + graceMS.
     let reapedAt: number | null = null;
     for (let poll = 1; poll <= 5; poll++) {
       now += 12_000;
@@ -431,7 +432,7 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     const listedAfter = await idxStub.list(finishedAt + RETENTION_MS + 1);
     expect(listedAfter.find((b) => b.build_id === bid)).toBeUndefined();
 
-    // Immediately re-init the same build ID after deleteAll (no eviction in between!).
+    // Immediately re-init the same build ID after deleteAll (no eviction in between).
     const reInit = await req("POST", `/api/v1/builds/${bid}/init`, WRITE_TOKEN, makeInitBody());
     expect(reInit.status).toBe(200);
     expect(reInit.json["created"]).toBe(true);
@@ -639,7 +640,11 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
     let now = Date.now();
     const initR = await stub.init(
       bid,
-      makeInitBody({ tests: ["only.py"], predictions_ms: [100], config: { machines: 1, lease_ttl_ms: 30_000, build_timeout_ms: 300_000, max_attempts: 3, max_batch: 1 } }),
+      makeInitBody({
+        tests: ["only.py"],
+        predictions_ms: [100],
+        config: { machines: 1, lease_ttl_ms: 30_000, build_timeout_ms: 300_000, max_attempts: 3, max_batch: 1 },
+      }),
       now,
     );
     expect(initR.status).toBe(200);
@@ -947,7 +952,7 @@ describe("Cloudflare Worker auth, config, streaming bounds, and Durable Object l
       now + 100,
     );
 
-    // Evict and wake -> verdict-only mismatch (running vs passed, has_conflicts=false) MUST repair BuildIndex!
+    // Evict and wake: a verdict-only mismatch (running vs passed, has_conflicts=false) repairs BuildIndex.
     await evictDurableObject(stub);
     const st = await req("GET", `/api/v1/builds/${bid}`, READ_TOKEN);
     expect(st.status).toBe(200);

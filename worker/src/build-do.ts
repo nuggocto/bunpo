@@ -65,6 +65,8 @@ function errReply(err: WireError): DoHttpReply {
   };
 }
 
+// Per-build SQLite Durable Object holding the append-only event log, chunked
+// test catalog, throttled lease deadlines, and deadline/retention alarms.
 export class BuildDO extends DurableObject<Env> {
   private state: State;
   private nextSeq = 1;
@@ -196,6 +198,7 @@ export class BuildDO extends DurableObject<Env> {
         "SELECT k, v FROM meta WHERE k IN ('lease_deadlines', 'index_synced', 'index_retry_attempts')",
       )
       .toArray();
+
     let storedDeadlinesRaw: string | null = null;
     for (let i = 0; i < metaRows.length; i++) {
       const row = metaRows[i]!;
@@ -222,6 +225,7 @@ export class BuildDO extends DurableObject<Env> {
           activeSeeds.push({ leaseID: l.lease_id, grantedDeadlineMS: l.deadline_ms });
         }
       }
+
       const storedDeadlines = parseSerializedDeadlines(storedDeadlinesRaw);
       const effective = this.deadlines.restoreOnWake(
         activeSeeds,
@@ -277,6 +281,7 @@ export class BuildDO extends DurableObject<Env> {
     try {
       const idx = this.env.BUILD_INDEX.get(this.env.BUILD_INDEX.idFromName(INDEX_NAME));
       await idx.upsert(entry);
+
       const synced: IndexSyncState = { verdict: entry.verdict, has_conflicts: entry.has_conflicts };
       if (this.state.initialized && this.state.buildID === entry.build_id) {
         const hadRetries = this.indexRetryAttempts > 0;
@@ -369,6 +374,7 @@ export class BuildDO extends DurableObject<Env> {
             );
             chunkIdx++;
           }
+
           const headerRecord: QueueEvent[] = [
             {
               type: "initialized",
@@ -498,6 +504,7 @@ export class BuildDO extends DurableObject<Env> {
     if (!parsed.ok) {
       return errReply(parsed.error);
     }
+
     if (!this.state.initialized && parsed.value.tests.length > this.maxTests) {
       return errReply(
         wireErr(
@@ -507,6 +514,7 @@ export class BuildDO extends DurableObject<Env> {
         ),
       );
     }
+
     return this.executeDecision(nowMS, () => decideInit(this.state, nowMS, parsed.value), {
       trustedInit: true,
     });
@@ -562,9 +570,10 @@ export class BuildDO extends DurableObject<Env> {
   }
 
   // Lifecycle alarm:
-  //   1. While running: at build deadline, finalize to unresolved, update BuildIndex,
-  //      and schedule cleanup for +7 days.
-  //   2. Once terminal: at +7 days, deleteAll() and reset in-memory state.
+  //   1. While running: retries out-of-sync BuildIndex updates before deadline,
+  //      then finalizes to unresolved at deadline and schedules +7d cleanup.
+  //   2. Once terminal: retries out-of-sync BuildIndex updates before cleanup,
+  //      then calls deleteAll() and resets in-memory state at +7d.
   // Idempotent when delivered more than once.
   override async alarm(): Promise<void> {
     await this.runAlarmAt(Date.now());
@@ -575,14 +584,17 @@ export class BuildDO extends DurableObject<Env> {
     if (!this.state.initialized) {
       return;
     }
+
     const verdict = stateVerdict(this.state);
     if (verdict === "running") {
       if (nowMS >= this.state.deadlineMS) {
         const out = decideStatus(this.state, nowMS);
         this.persistAndApply(out.events);
+
         const deleteAt = (this.state.finishedAtMS || nowMS) + RETENTION_MS;
         // Same synchronous turn as persistAndApply so alarm + finalization commit atomically.
         await this.ctx.storage.setAlarm(deleteAt);
+
         const synced = await this.trySyncIndex(nowMS);
         if (!synced) {
           await this.scheduleIndexRetryAlarm(nowMS, deleteAt);

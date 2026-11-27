@@ -40,6 +40,7 @@ export function wireErr(httpStatus: number, code: string, message: string): Wire
   return { httpStatus, code, message };
 }
 
+// Allows an omitted Content-Type header; rejects non-JSON media types.
 export function checkJSONContentType(contentType: string | null): WireError | null {
   if (!contentType) {
     return null;
@@ -58,6 +59,7 @@ export async function readBoundedUTF8Body(req: Request, maxBytes: number): Promi
   if (!body) {
     return { ok: true, value: "" };
   }
+
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -242,6 +244,7 @@ export function parseInitBody(buildID: string, raw: string): ParseResult<InitCom
       return { ok: false, error: wireErr(400, ErrCodeInvalidRequest, `unknown config member ${JSON.stringify(k)}`) };
     }
   }
+
   const machines = requireInt(rawCfg, "machines");
   if (!machines.ok) return machines;
   const leaseTTL = requireInt(rawCfg, "lease_ttl_ms");
@@ -375,6 +378,7 @@ export function parseReportBody(raw: string): ParseResult<ReportCommand> {
         };
       }
     }
+
     const attemptID = requireString(item, "attempt_id");
     if (!attemptID.ok) return attemptID;
     const testIndex = requireInt(item, "test_index");
@@ -408,6 +412,7 @@ export function parseReportBody(raw: string): ParseResult<ReportCommand> {
   };
 }
 
+// Parses and validates query parameters for GET /api/v1/builds/:id/tests.
 export function parseListTestsQuery(url: URL): ParseResult<ListTestsCommand> {
   let cursor = 0;
   let limit = 0;

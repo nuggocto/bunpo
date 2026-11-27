@@ -60,6 +60,8 @@ interface VectorFile {
   };
 }
 
+// When persistentOnly is true, lease deadline_ms is zeroed so state replayed
+// from the event log can be compared against live in-memory state.
 function serializeState(s: State, persistentOnly: boolean): string {
   const runners: Record<string, unknown> = {};
   for (const id of s.runnerOrder) {

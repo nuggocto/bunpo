@@ -87,6 +87,7 @@ export class LeaseDeadlineTracker {
     if (prevBase === undefined) {
       throw new Error(`lease ${leaseID} is not active in LeaseDeadlineTracker`);
     }
+
     const realDeadline = nowMS + ttlMS;
     const nextBase = realDeadline > prevBase ? realDeadline : prevBase;
 
@@ -123,14 +124,17 @@ export class LeaseDeadlineTracker {
   }
 }
 
+// Validates the persisted lease_deadlines JSON meta row on DO wake.
 export function parseSerializedDeadlines(raw: string | null): SerializedDeadlines | null {
   if (!raw) {
     return null;
   }
+
   const parsed: unknown = JSON.parse(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("corrupt lease_deadlines meta row: expected object");
   }
+
   const out: SerializedDeadlines = {};
   for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) {

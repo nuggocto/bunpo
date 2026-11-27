@@ -27,6 +27,7 @@ const INDEX_NAME = "global";
 const DASHBOARD_CSP =
   "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
+// Reject "/" and "%" so encoded slashes or dot segments never reach SPA fallback.
 function isDashboardBuildRoute(pathname: string): boolean {
   if (!pathname.startsWith("/builds/")) return false;
   const raw = pathname.slice("/builds/".length);
@@ -46,11 +47,13 @@ async function serveDashboardIndex(request: Request, env: Env): Promise<Response
   if (request.method !== "GET" && request.method !== "HEAD") {
     return methodNotAllowed("GET, HEAD");
   }
+
   const indexReq = new Request(new URL("/index.html", request.url), { method: request.method });
   const assetResp = await env.ASSETS.fetch(indexReq);
   if (!assetResp.ok) {
     return errorResponse(wireErr(404, ErrCodeNotFound, "not found"));
   }
+
   return new Response(request.method === "HEAD" ? null : assetResp.body, {
     status: 200,
     headers: {
@@ -118,6 +121,7 @@ export default {
       if (request.method !== "GET") {
         return methodNotAllowed("GET");
       }
+
       try {
         const indexStub = env.BUILD_INDEX.get(env.BUILD_INDEX.idFromName(INDEX_NAME));
         const builds = await indexStub.list();

@@ -20,6 +20,8 @@ interface BuildRow extends Record<string, SqlStorageValue> {
   expires_at_ms: number;
 }
 
+// Global SQLite Durable Object tracking summaries for up to MAX_INDEX_BUILDS
+// recent builds so GET /api/v1/builds never fans out to individual BuildDOs.
 export class BuildIndex extends DurableObject<Env> {
   private entries = new Map<string, IndexEntry>();
 
@@ -39,6 +41,7 @@ export class BuildIndex extends DurableObject<Env> {
           expires_at_ms INTEGER NOT NULL
         )
       `);
+
       const rows = this.ctx.storage.sql.exec<BuildRow>("SELECT * FROM builds").toArray();
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i]!;
@@ -118,12 +121,14 @@ export class BuildIndex extends DurableObject<Env> {
         expired.push(id);
       }
     }
+
     if (expired.length > 0) {
       this.ctx.storage.sql.exec("DELETE FROM builds WHERE expires_at_ms <= ?", nowMS);
       for (let i = 0; i < expired.length; i++) {
         this.entries.delete(expired[i]!);
       }
     }
+
     return pruneAndCapIndex(this.entries.values(), nowMS).map(toBuildSummary);
   }
 }

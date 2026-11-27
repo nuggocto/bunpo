@@ -19,6 +19,8 @@ function sha256Bytes(s: string): Uint8Array {
   return createHash("sha256").update(s).digest();
 }
 
+// validateTokens checks both bearer tokens and returns their SHA-256 digests so
+// timingSafeEqual always compares fixed 32-byte buffers without leaking lengths.
 export function validateTokens(
   writeToken: string | undefined,
   readToken: string | undefined,
@@ -29,14 +31,18 @@ export function validateTokens(
   if (!readToken || utf8Encoder.encode(readToken).byteLength < MIN_TOKEN_BYTES) {
     return { ok: false, message: `BUNPO_QUEUE_READ_TOKEN must be set and at least ${MIN_TOKEN_BYTES} bytes` };
   }
+
   const writeDigest = sha256Bytes(writeToken);
   const readDigest = sha256Bytes(readToken);
   if (timingSafeEqual(writeDigest, readDigest)) {
     return { ok: false, message: "BUNPO_QUEUE_TOKEN and BUNPO_QUEUE_READ_TOKEN must not be equal" };
   }
+
   return { ok: true, digests: { writeDigest, readDigest } };
 }
 
+// authenticateBearer always compares the presented token against both digests so
+// response timing does not distinguish write-token matches from read-token matches.
 export function authenticateBearer(authHeader: string | null, digests: TokenDigests): AuthRole {
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return "none";
@@ -45,9 +51,11 @@ export function authenticateBearer(authHeader: string | null, digests: TokenDige
   if (token.length === 0) {
     return "none";
   }
+
   const presented = sha256Bytes(token);
   const isWrite = timingSafeEqual(presented, digests.writeDigest);
   const isRead = timingSafeEqual(presented, digests.readDigest);
+
   if (isWrite) {
     return "write";
   }

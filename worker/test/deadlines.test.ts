@@ -70,7 +70,7 @@ describe("LeaseDeadlineTracker (hibernation wake deadline rule)", () => {
         const roll = rng();
 
         if (roll < 0.3) {
-          // Simulate DO hibernation + wake (can happen repeatedly back-to-back!).
+          // Simulate DO hibernation + wake (may happen repeatedly back-to-back).
           const seeds: ActiveLeaseSeed[] = [];
           for (const l of leases.values()) {
             if (l.alive) {
@@ -82,14 +82,15 @@ describe("LeaseDeadlineTracker (hibernation wake deadline rule)", () => {
             storedMeta ? parseSerializedDeadlines(JSON.stringify(storedMeta)) : null,
             ttl,
           );
+
           for (const l of leases.values()) {
             if (!l.alive) continue;
             const eff = restored.get(l.id)!;
-            // Invariant 1: never expires before any previously promised deadline!
+            // Invariant 1: never expires before any previously promised deadline.
             expect(eff, `seed=${seed} step=${step} lease=${l.id} ttl=${ttl}: wake expired before promise`).toBeGreaterThanOrEqual(
               l.lastPromised,
             );
-            // Invariant 2: never exceeds last real deadline + floor(ttl/2), even after many wakes!
+            // Invariant 2: never exceeds last real deadline + floor(ttl/2), even after many wakes.
             expect(eff, `seed=${seed} step=${step} lease=${l.id} ttl=${ttl}: wake grace compounded`).toBeLessThanOrEqual(
               l.lastRealDeadline + grace,
             );
@@ -101,7 +102,7 @@ describe("LeaseDeadlineTracker (hibernation wake deadline rule)", () => {
           if (active.length === 0) break;
           const target = active[randInt(rng, active.length)]!;
           if (now >= target.effective) {
-            // Lease expired! Check it did not expire before lastPromised and did expire <= lastRealDeadline + grace.
+            // Lease expired: verify it did not expire before lastPromised and expired by lastRealDeadline + grace.
             expect(target.effective).toBeGreaterThanOrEqual(target.lastPromised);
             expect(target.effective).toBeLessThanOrEqual(target.lastRealDeadline + grace);
             target.alive = false;
@@ -179,6 +180,7 @@ describe("LeaseDeadlineTracker (hibernation wake deadline rule)", () => {
         if (t >= targetTime) break;
         t = Math.min(targetTime, t + 10_000);
       }
+
       for (const l of leases.values()) {
         expect(l.alive, `seed=${seed} lease=${l.id} failed to expire by lastRealDeadline + ttl/2`).toBe(false);
       }
@@ -262,7 +264,7 @@ describe("LeaseDeadlineTracker (hibernation wake deadline rule)", () => {
     expect(t2.planExtend(1, 1_000, 10_000)).toBeNull(); // backward clock: base[1] must stay 14_000
     // Lease 1 requests write (16_000 > 15_000) but caller does NOT commitPersist (simulating failed write).
     expect(t2.planExtend(1, 6_000, 10_000)).toEqual({ "1": 16_000, "2": 10_000 });
-    // Now lease 2 triggers a write: snapshot must see lease 1's committed base (14_000), NOT uncommitted 16_000!
+    // Lease 2 triggers a write: snapshot must see lease 1's committed base (14_000), not uncommitted 16_000.
     expect(t2.planExtend(2, 6_000, 10_000)).toEqual({ "1": 14_000, "2": 16_000 });
 
     // parseSerializedDeadlines validation.

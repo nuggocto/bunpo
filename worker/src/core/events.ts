@@ -121,6 +121,8 @@ export function hasHistoryRecord(
   return false;
 }
 
+// Enforces protocol timing rules: only passed outcomes may be timed, and
+// untimed results must report duration_ms === 0.
 export function validateReportValues(outcome: Outcome, timed: boolean, durationMS: number) {
   if (!isValidOutcome(outcome)) {
     return errInvalid(`invalid outcome ${JSON.stringify(outcome)}`);
@@ -160,6 +162,8 @@ export interface ApplyOptions {
   trustedInit?: boolean;
 }
 
+// Validates all event invariants before mutating State; throws on corrupt or
+// out-of-order events.
 export function applyEvent(s: State, ev: QueueEvent, opts?: ApplyOptions): void {
   if (ev.at_ms < 0) {
     throw new Error("event at_ms must not be negative");
@@ -339,6 +343,7 @@ function applyLeased(s: State, atMS: number, d: LeasedData | undefined): void {
   if (d.attempts.length === 0 || d.attempts.length > s.config.max_batch) {
     throw new Error(`leased attempts count ${d.attempts.length} outside 1..${s.config.max_batch}`);
   }
+
   const existingRunner = s.runners.get(d.runner_id);
   const lim = effectiveLimits(s.limits);
   if (!existingRunner && s.runners.size >= lim.maxRunners) {
@@ -661,9 +666,11 @@ function applyFinalized(s: State, atMS: number, d: FinalizedData | undefined): v
       s.counts.unresolved++;
     }
   }
+
   s.finishedAtMS = atMS;
 }
 
+// Monotonically extends an active lease's in-memory deadline without writing an event.
 export function extendLease(s: State, leaseID: number, deadlineMS: number): void {
   if (leaseID < 1 || leaseID > s.leases.length) {
     return;

@@ -6,6 +6,7 @@ export function resetActiveLeaseDeadlinesForGoRestart(s: State, nowMS: number): 
   if (!s.initialized) {
     return;
   }
+
   const now = Math.max(nowMS, s.lastSeenMS);
   const newDeadline = now + s.config.lease_ttl_ms;
   for (let i = 0; i < s.activeLeases.length; i++) {

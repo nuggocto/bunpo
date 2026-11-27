@@ -249,6 +249,7 @@ function evaluateExpiry(s: State, nowMS: number): ExpiryOverlay {
       ov.expiredTests = new Map();
     }
     ov.expiredLeases.add(leaseID);
+
     for (let j = 0; j < lease.attempts.length; j++) {
       const a = lease.attempts[j]!;
       const t = s.tests[a.test_index]!;
@@ -264,12 +265,14 @@ function evaluateExpiry(s: State, nowMS: number): ExpiryOverlay {
         ov.counts.pending++;
       }
     }
+
     ov.events.push({
       type: "expired",
       at_ms: now,
       expired: { lease_id: leaseID },
     });
   }
+
   return ov;
 }
 
@@ -305,6 +308,9 @@ function overlayVerdict(ov: ExpiryOverlay, s: State): Verdict {
   return computeVerdict(ov.counts, s.conflicts.length > 0);
 }
 
+// Pure init decision: never mutates State. Returns an initialized event on first
+// call, an idempotent reply on matching digest, or a 409 conflict (recording up
+// to MaxInitConflicts distinct runner/digest pairs).
 export function decideInit(s: State, nowMS: number, cmd: InitCommand): DecideOutcome<InitResponse> {
   if (!Number.isInteger(nowMS) || nowMS < 0) {
     return { events: [], response: null, error: errInvalid("now_ms must not be negative") };
@@ -412,7 +418,11 @@ function describeInitDiff(s: State, cmd: InitCommand): string {
     sc.max_attempts !== cc.max_attempts ||
     sc.max_batch !== cc.max_batch
   ) {
-    return `config differs from initialized build (got machines=${cc.machines} ttl=${cc.lease_ttl_ms} timeout=${cc.build_timeout_ms} attempts=${cc.max_attempts} batch=${cc.max_batch}, want machines=${sc.machines} ttl=${sc.lease_ttl_ms} timeout=${sc.build_timeout_ms} attempts=${sc.max_attempts} batch=${sc.max_batch})`;
+    return (
+      `config differs from initialized build (` +
+      `got machines=${cc.machines} ttl=${cc.lease_ttl_ms} timeout=${cc.build_timeout_ms} attempts=${cc.max_attempts} batch=${cc.max_batch}, ` +
+      `want machines=${sc.machines} ttl=${sc.lease_ttl_ms} timeout=${sc.build_timeout_ms} attempts=${sc.max_attempts} batch=${sc.max_batch})`
+    );
   }
   if (cmd.tests.length !== s.tests.length) {
     return `test list differs: got ${cmd.tests.length} tests, initialized build has ${s.tests.length}`;
@@ -426,6 +436,8 @@ function describeInitDiff(s: State, cmd: InitCommand): string {
   return "init digest differs from initialized build";
 }
 
+// Pure lease decision: evaluates lazy expiry, handles idempotent request_id
+// replay, and deals a new batch or returns wait/done without mutating State.
 export function decideLease(s: State, nowMS: number, cmd: LeaseCommand): DecideOutcome<LeaseResponse> {
   if (!s.initialized) {
     return {
@@ -470,6 +482,7 @@ export function decideLease(s: State, nowMS: number, cmd: LeaseCommand): DecideO
         ),
       };
     }
+
     if (r.activeLeaseID > 0 && overlayLeaseActive(ov, s, r.activeLeaseID)) {
       return {
         events: ov.events,
@@ -517,6 +530,7 @@ export function decideLease(s: State, nowMS: number, cmd: LeaseCommand): DecideO
   const deadlineMS = now + s.config.lease_ttl_ms;
   const attempts = new Array<LeaseAttempt>(chosen.length);
   const views = new Array<LeasedAttemptView>(chosen.length);
+
   for (let i = 0; i < chosen.length; i++) {
     const idx = chosen[i]!;
     const gen = s.tests[idx]!.generation + 1;
@@ -576,6 +590,9 @@ function leaseResponseFromLease(s: State, lease: Lease, deadlineMS: number): Lea
   };
 }
 
+// First attempts always precede retries; retries are dealt one test at a time.
+// Batch size targets ceil(remaining_ms / (2 * machines)), or
+// ceil(pending / (2 * machines)) when every prediction is 0, capped by max_batch.
 function selectBatch(s: State, ov: ExpiryOverlay): number[] {
   const firstPending: number[] = [];
   let firstRetry = -1;
@@ -665,6 +682,8 @@ function computeWaitMS(s: State, ov: ExpiryOverlay, now: number): number {
   return Math.max(minWait, Math.min(wait, maxWait));
 }
 
+// Pure heartbeat decision: emits no events when the lease is still active so
+// the caller can extend deadlines without appending to the event log.
 export function decideHeartbeat(s: State, nowMS: number, cmd: HeartbeatCommand): DecideOutcome<HeartbeatResponse> {
   if (!s.initialized) {
     return {
@@ -718,6 +737,8 @@ export function decideHeartbeat(s: State, nowMS: number, cmd: HeartbeatCommand):
   };
 }
 
+// Pure report decision: classifies each attempt as accepted, duplicate,
+// conflict, or stale and emits a reported event only for state-changing items.
 export function decideReport(s: State, nowMS: number, cmd: ReportCommand): DecideOutcome<ReportResponse> {
   if (!s.initialized) {
     return {
@@ -899,6 +920,7 @@ export function decideReport(s: State, nowMS: number, cmd: ReportCommand): Decid
         disposition: disp,
       });
     }
+
     disps[i] = {
       attempt_id: formatAttemptID(res.test_index, res.generation),
       test_index: res.test_index,
@@ -931,6 +953,8 @@ export function decideReport(s: State, nowMS: number, cmd: ReportCommand): Decid
   };
 }
 
+// Pure status read: emits events only if lazy expiry transitions a running
+// build to a terminal verdict.
 export function decideStatus(s: State, nowMS: number): DecideOutcome<StatusResponse> {
   if (!s.initialized) {
     return {
@@ -990,6 +1014,7 @@ export function decideStatus(s: State, nowMS: number): DecideOutcome<StatusRespo
         }
       }
     }
+
     if (st === "failed") {
       failedProblems.push({
         test_index: t.index,
@@ -1040,6 +1065,8 @@ export function decideStatus(s: State, nowMS: number): DecideOutcome<StatusRespo
   };
 }
 
+// Pure paginated test listing: emits events only if lazy expiry transitions a
+// running build to a terminal verdict.
 export function decideListTests(s: State, nowMS: number, cmd: ListTestsCommand): DecideOutcome<ListTestsResponse> {
   if (!s.initialized) {
     return {
@@ -1048,6 +1075,7 @@ export function decideListTests(s: State, nowMS: number, cmd: ListTestsCommand):
       error: new QueueError(404, ErrCodeBuildNotFound, "build not initialized"),
     };
   }
+
   if (!Number.isInteger(cmd.cursor) || cmd.cursor < 0) {
     return { events: [], response: null, error: errInvalid(`cursor ${cmd.cursor} must not be negative`) };
   }
@@ -1144,7 +1172,10 @@ function insertSlowest(list: SlowestTest[], item: SlowestTest): void {
   let pos = list.length;
   while (pos > 0) {
     const prev = list[pos - 1]!;
-    if (prev.duration_ms > item.duration_ms || (prev.duration_ms === item.duration_ms && prev.test_index < item.test_index)) {
+    if (
+      prev.duration_ms > item.duration_ms ||
+      (prev.duration_ms === item.duration_ms && prev.test_index < item.test_index)
+    ) {
       break;
     }
     pos--;

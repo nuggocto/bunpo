@@ -1,7 +1,7 @@
-// Seeded Deterministic Simulation Test driving the REAL SQLite BuildDO inside
+// Seeded deterministic simulation test driving the real SQLite BuildDO inside
 // local workerd with evictDurableObject() injected at seeded points (including
-// after EVERY request with a dead runner), asserting every single response
-// matches the pure TypeScript core + LeaseDeadlineTracker byte-for-byte.
+// after every request with a dead runner), asserting every response matches the
+// pure TypeScript core and LeaseDeadlineTracker byte-for-byte.
 //
 // Replay a single failing seed:
 //   BUNPO_DO_DST_SEED=<seed> npm run test:do
@@ -141,6 +141,7 @@ async function runSeedThroughRealDO(seed: number, opts: DstOptions): Promise<voi
     await evictDurableObject(stub);
     currentlyEvicted = true;
     evictedCount++;
+
     if (oracle.initialized) {
       const activeSeeds: ActiveLeaseSeed[] = [];
       for (const l of oracle.leases) {
@@ -179,6 +180,7 @@ async function runSeedThroughRealDO(seed: number, opts: DstOptions): Promise<voi
         `seed ${seed} (evictions=${evictedCount}) @ ${stepLabel}: status=${doReply.status}, want ${expectedStatus}\nDO body: ${doReply.body}`,
       );
     }
+
     const gotCan = canonicalJSON(JSON.parse(doReply.body));
     const wantCan = canonicalJSON(expectedBodyObj);
     if (gotCan !== wantCan) {
@@ -188,7 +190,7 @@ async function runSeedThroughRealDO(seed: number, opts: DstOptions): Promise<voi
     }
   };
 
-  // Step 0: init from runner-0.
+  // Step 0: init from r0.
   const initCmd: InitCommand = {
     build_id: bid,
     runner_id: "r0",

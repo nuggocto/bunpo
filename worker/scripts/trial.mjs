@@ -80,6 +80,7 @@ function classifyError(status, text, json, err) {
     }
     return { kind: "network_error", detail: err.cause?.code || err.message || String(err) };
   }
+
   // Worker catches Durable Object exceptions (CPU limit, quota, or SQLite error)
   // and answers 503 storage_error; check the wrangler tail capture for the cause.
   if (status === 503 && json?.error?.code === "storage_error") {
@@ -89,12 +90,19 @@ function classifyError(status, text, json, err) {
       detail: "503 storage_error (Durable Object threw; check wrangler tail capture for CPU limit, quota, or storage exception)",
     };
   }
+
   const lower = (text || "").toLowerCase();
   if (status === 503 || status === 500 || status === 524) {
-    if (lower.includes("1102") || lower.includes("exceeded cpu") || lower.includes("cpu time") || lower.includes("worker exceeded resource")) {
+    if (
+      lower.includes("1102") ||
+      lower.includes("exceeded cpu") ||
+      lower.includes("cpu time") ||
+      lower.includes("worker exceeded resource")
+    ) {
       return { kind: "cpu_limit", detail: `HTTP ${status}: ${text.slice(0, 160)}` };
     }
   }
+
   if (
     status === 429 ||
     lower.includes("1027") ||
@@ -104,9 +112,11 @@ function classifyError(status, text, json, err) {
   ) {
     return { kind: "quota_limit", detail: `HTTP ${status}: ${text.slice(0, 160)}` };
   }
+
   if (json && typeof json === "object" && json.error && typeof json.error.code === "string") {
     return { kind: "api_error", code: json.error.code, detail: `${json.error.code}: ${json.error.message || ""}` };
   }
+
   return { kind: "http_error", detail: `HTTP ${status}: ${text.slice(0, 160)}` };
 }
 
@@ -140,12 +150,14 @@ async function req(method, path, { token = "", body = undefined } = {}) {
   }
   const text = await resp.text();
   const ms = Math.round(performance.now() - t0);
+
   let json = null;
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
     json = null;
   }
+
   const failure = resp.ok ? null : classifyError(resp.status, text, json, null);
   return { ok: resp.ok, status: resp.status, ms, headers: resp.headers, text, json, failure };
 }
@@ -344,12 +356,22 @@ for (const n of SIZES) {
           version: 1,
           runner_id: "retry-r0",
           lease_id: l1.json.lease_id,
-          results: [{ attempt_id: a1.attempt_id, test_index: a1.test_index, generation: a1.generation, outcome: "error", timed: false, duration_ms: 0 }],
+          results: [
+            {
+              attempt_id: a1.attempt_id,
+              test_index: a1.test_index,
+              generation: a1.generation,
+              outcome: "error",
+              timed: false,
+              duration_ms: 0,
+            },
+          ],
         },
       });
       ok = r1.status === 200 && r1.json?.verdict === "running";
       if (!ok) detail = `report1: ${formatFailure(r1)}`;
     }
+
     if (ok) {
       const l2 = await req("POST", `/api/v1/builds/${bid}/lease`, {
         token: writeToken,
@@ -365,7 +387,16 @@ for (const n of SIZES) {
             version: 1,
             runner_id: "retry-r0",
             lease_id: l2.json.lease_id,
-            results: [{ attempt_id: a2.attempt_id, test_index: a2.test_index, generation: a2.generation, outcome: "passed", timed: true, duration_ms: 40 }],
+            results: [
+              {
+                attempt_id: a2.attempt_id,
+                test_index: a2.test_index,
+                generation: a2.generation,
+                outcome: "passed",
+                timed: true,
+                duration_ms: 40,
+              },
+            ],
           },
         });
         ok = r2.status === 200 && r2.json?.verdict === "passed";
@@ -431,9 +462,19 @@ for (const n of SIZES) {
             version: 1,
             runner_id: "survivor-r1",
             lease_id: reassigned.lease_id,
-            results: [{ attempt_id: a.attempt_id, test_index: a.test_index, generation: a.generation, outcome: "passed", timed: true, duration_ms: 30 }],
+            results: [
+              {
+                attempt_id: a.attempt_id,
+                test_index: a.test_index,
+                generation: a.generation,
+                outcome: "passed",
+                timed: true,
+                duration_ms: 30,
+              },
+            ],
           },
         });
+
         const testsR = await req("GET", `/api/v1/builds/${bid}/tests?limit=10`, { token: readToken });
         const attempts = testsR.json?.tests?.[0]?.attempts || [];
         const serverDeltaMS =
@@ -441,7 +482,10 @@ for (const n of SIZES) {
         const budgetMS = DEAD_TTL_MS + DEAD_WAKE_GRACE_MS + DEAD_POLL_INTERVAL_MS + DEAD_RTT_MARGIN_MS;
         const withinBudget = serverDeltaMS <= budgetMS && rep.status === 200 && rep.json?.verdict === "passed";
         ok = withinBudget;
-        detail = `reassigned in ${serverDeltaMS} ms server time (${elapsedMS} ms wall, budget <= ${budgetMS} ms = ${DEAD_TTL_MS} TTL + ${DEAD_WAKE_GRACE_MS} grace + ${DEAD_POLL_INTERVAL_MS} poll + ${DEAD_RTT_MARGIN_MS} RTT)`;
+        detail =
+          `reassigned in ${serverDeltaMS} ms server time (${elapsedMS} ms wall, ` +
+          `budget <= ${budgetMS} ms = ${DEAD_TTL_MS} TTL + ${DEAD_WAKE_GRACE_MS} grace + ` +
+          `${DEAD_POLL_INTERVAL_MS} poll + ${DEAD_RTT_MARGIN_MS} RTT)`;
       }
     }
   }
@@ -479,7 +523,9 @@ console.log("Size   | init    | lease   | report  | status  | list    | wake(15s
 console.log("-------+---------+---------+---------+---------+---------+-----------+------------------");
 for (const r of sizeRows) {
   console.log(
-    `${String(r.size).padEnd(6)} | ${r.init.padEnd(7)} | ${r.lease.padEnd(7)} | ${r.report.padEnd(7)} | ${r.status.padEnd(7)} | ${r.list.padEnd(7)} | ${r.wake.padEnd(9)} | ${r.verdict}`,
+    `${String(r.size).padEnd(6)} | ${r.init.padEnd(7)} | ${r.lease.padEnd(7)} | ` +
+      `${r.report.padEnd(7)} | ${r.status.padEnd(7)} | ${r.list.padEnd(7)} | ` +
+      `${r.wake.padEnd(9)} | ${r.verdict}`,
   );
 }
 

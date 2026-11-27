@@ -1,3 +1,6 @@
+// Ambient declarations for the plain-JS dashboard core module imported by
+// worker/test/dashboard-core.test.ts.
+
 declare module "*dashboard/core.js" {
   export const BASE_POLL_MS: number;
   export const MAX_POLL_MS: number;
@@ -61,7 +64,10 @@ declare module "*dashboard/core.js" {
     tests?: { tests: T[]; nextCursor: number | null; pagesLoaded: number };
   }
 
-  export function refreshBuild<S extends { last_seen_ms: number; verdict: string } = { last_seen_ms: number; verdict: string }, T = unknown>(
+  export function refreshBuild<
+    S extends { last_seen_ms: number; verdict: string } = { last_seen_ms: number; verdict: string },
+    T = unknown,
+  >(
     loader: GuardedLoader<unknown>,
     gen: number,
     opts: {

@@ -1,4 +1,4 @@
-// Minimal Node ambient declarations for local test/benchmark harnesses without
+// Minimal Node ambient declarations for local test harnesses without
 // adding @types/node as a dependency.
 
 interface ImportMeta {

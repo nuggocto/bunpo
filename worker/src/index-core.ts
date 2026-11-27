@@ -17,6 +17,8 @@ export interface IndexEntry extends BuildSummary {
   expires_at_ms: number;
 }
 
+// pruneAndCapIndex drops expired entries, sorts newest-first with UTF-8
+// build_id tiebreak, and caps the list at MAX_INDEX_BUILDS.
 export function pruneAndCapIndex(entries: Iterable<IndexEntry>, nowMS: number): IndexEntry[] {
   const live: IndexEntry[] = [];
   for (const e of entries) {
@@ -24,12 +26,14 @@ export function pruneAndCapIndex(entries: Iterable<IndexEntry>, nowMS: number): 
       live.push(e);
     }
   }
+
   live.sort((a, b) => {
     if (a.created_at_ms !== b.created_at_ms) {
       return b.created_at_ms - a.created_at_ms;
     }
     return compareUTF8(a.build_id, b.build_id);
   });
+
   if (live.length > MAX_INDEX_BUILDS) {
     live.length = MAX_INDEX_BUILDS;
   }

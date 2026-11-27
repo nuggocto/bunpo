@@ -15,9 +15,11 @@ export function parseMaxTests(raw: string | undefined): MaxTestsResult {
   if (!/^[1-9][0-9]*$/.test(raw)) {
     return { ok: false, message: `invalid MAX_TESTS ${JSON.stringify(raw)}: must be an integer between 1 and ${MaxTests}` };
   }
+
   const n = Number(raw);
   if (!Number.isSafeInteger(n) || n < 1 || n > MaxTests) {
     return { ok: false, message: `invalid MAX_TESTS ${JSON.stringify(raw)}: must be between 1 and ${MaxTests}` };
   }
+
   return { ok: true, maxTests: n };
 }

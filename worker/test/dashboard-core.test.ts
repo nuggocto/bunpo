@@ -149,6 +149,7 @@ describe("dashboard pure core", () => {
       });
       const gen = loader.invalidate();
       const res = await fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/b/tests?cursor=${c}&state=failed`, 2);
+
       expect(seen).toEqual([
         "/api/v1/builds/b/tests?cursor=0&state=failed",
         "/api/v1/builds/b/tests?cursor=6&state=failed",
@@ -185,6 +186,7 @@ describe("dashboard pure core", () => {
       });
       const gen = loader.invalidate();
       const res = await fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/b/tests?cursor=${c}`, 3);
+
       expect(seen).toEqual([
         "/api/v1/builds/b/tests?cursor=0",
         "/api/v1/builds/b/tests?cursor=200",
@@ -216,6 +218,7 @@ describe("dashboard pure core", () => {
       });
       const gen = loader.invalidate();
       const res = await fetchRefreshedPages(loader, gen, (c) => `/api/v1/builds/b/tests?cursor=${c}`, 4);
+
       expect(seen).toEqual([
         "/api/v1/builds/b/tests?cursor=0",
         "/api/v1/builds/b/tests?cursor=10",
@@ -304,13 +307,13 @@ describe("dashboard pure core", () => {
       testsPages: 1,
       testsQuery: (c) => `cursor=${c}&limit=200&state=failed,unresolved`,
       onStatus: (st) => {
-        // Simulate old bug check: caller tracks status separately; detailsLastSeenMS must NOT be overwritten here.
+        // Caller updates status UI without advancing detailsLastSeenMS until details load.
         expect(st.verdict).toBe("failed");
       },
     });
     expect(r1.stale).toBe(false);
     if (r1.stale || r1.ok) throw new Error("expected 503 failure on first refresh");
-    // detailsLastSeenMS must remain unchanged after a failed refresh.
+    // Leave detailsLastSeenMS unchanged because details failed to load.
 
     const err = r1.error as { httpStatus?: number };
     now += 100;
