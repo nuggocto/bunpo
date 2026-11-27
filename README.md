@@ -103,6 +103,7 @@ and [docs/queue-protocol.md](docs/queue-protocol.md) for setup and limits.
 - [docs/benchmark.md](docs/benchmark.md): synthetic benchmark results and 50,000-test CLI timing.
 - [docs/trials/](docs/trials/): local and GitHub Actions trials on real suites.
 - [CHANGELOG.md](CHANGELOG.md): release history.
+- [SECURITY.md](SECURITY.md): how to report a vulnerability privately.
 - [PROJECT.md](PROJECT.md): the specification and the roadmap.
 
 ## Development
