@@ -9,6 +9,7 @@ import {
   type ReportResult,
   type TestStatus,
   ErrCodeInvalidRequest,
+  MaxTests,
   MaxTestsPageLimit,
   ProtocolVersion,
 } from "./core/index.ts";
@@ -419,21 +420,21 @@ export function parseListTestsQuery(url: URL): ParseResult<ListTestsCommand> {
   let states: TestStatus[] | undefined;
   let retried = false;
 
+  // Same rule as pageParam in the Go server: plain decimal digits, no sign or
+  // leading zero, within range. Huge values become large floats, which the
+  // range check still rejects.
   const rawCursor = url.searchParams.get("cursor");
   if (rawCursor !== null && rawCursor !== "") {
-    if (!/^(0|[1-9][0-9]*)$/.test(rawCursor)) {
-      return { ok: false, error: wireErr(400, ErrCodeInvalidRequest, "cursor must be a non-negative integer") };
-    }
     cursor = Number(rawCursor);
+    if (!/^(0|[1-9][0-9]*)$/.test(rawCursor) || cursor > MaxTests) {
+      return { ok: false, error: wireErr(400, ErrCodeInvalidRequest, `cursor must be 0..${MaxTests}`) };
+    }
   }
 
   const rawLimit = url.searchParams.get("limit");
   if (rawLimit !== null && rawLimit !== "") {
-    if (!/^[1-9][0-9]*$/.test(rawLimit)) {
-      return { ok: false, error: wireErr(400, ErrCodeInvalidRequest, `limit must be 1..${MaxTestsPageLimit}`) };
-    }
     limit = Number(rawLimit);
-    if (limit < 1 || limit > MaxTestsPageLimit) {
+    if (!/^[1-9][0-9]*$/.test(rawLimit) || limit > MaxTestsPageLimit) {
       return { ok: false, error: wireErr(400, ErrCodeInvalidRequest, `limit must be 1..${MaxTestsPageLimit}`) };
     }
   }

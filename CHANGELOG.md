@@ -3,6 +3,12 @@
 All notable changes to Bunpō are recorded here. Release binaries and checksums
 start at `v0.0.3` on [GitHub Releases](https://github.com/nuggocto/bunpo/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- Both live-queue servers now read the `cursor` and `limit` parameters of `GET /api/v1/builds/{build}/tests` the same way: plain decimal digits, with `cursor` from 0 to 20,000. Before, `bunpo-server` accepted spellings such as `007` or `+5` that the Cloudflare Worker rejected, and the Worker answered an empty page for a cursor too large for `bunpo-server`, which rejected it.
+
 ## [v0.1.2] - 2026-11-26
 
 ### Fixed
@@ -148,6 +154,7 @@ First release with cross-compiled binaries, checksums, GitHub Action, runner gui
 - Table-driven tests, 2,000-seed property tests, a brute-force optimal solver oracle verifying the 4/3 makespan bound, fuzzing for timing decoding, and a 50,000-test benchmark.
 - Go 1.27 module with pinned `staticcheck` and `govulncheck` tools, GitHub Actions CI, specification (`PROJECT.md`), and developer guide (`docs/book.md`).
 
+[Unreleased]: https://github.com/nuggocto/bunpo/compare/v0.1.2...HEAD
 [v0.1.2]: https://github.com/nuggocto/bunpo/compare/v0.1.1...v0.1.2
 [v0.1.1]: https://github.com/nuggocto/bunpo/compare/v0.1.0...v0.1.1
 [v0.1.0]: https://github.com/nuggocto/bunpo/compare/v0.0.7...v0.1.0

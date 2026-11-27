@@ -13,7 +13,6 @@ import (
 	"mime"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -602,17 +601,43 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request, buildID s
 	writeJSON(w, http.StatusOK, StatusResponse{Version: queue.ProtocolVersion, StatusResponse: resp})
 }
 
+// pageParam reads a paging query parameter written as plain decimal digits,
+// with no sign or leading zero, and reports whether it lies in lo..hi. The
+// Cloudflare Worker applies the same rule, so both servers accept exactly the
+// same values.
+func pageParam(raw string, lo, hi int) (int, bool) {
+	if raw == "" || (len(raw) > 1 && raw[0] == '0') {
+		return 0, false
+	}
+
+	n := 0
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+
+		// Stop as soon as the value passes hi, so a long input cannot overflow.
+		n = n*10 + int(c-'0')
+		if n > hi {
+			return 0, false
+		}
+	}
+
+	return n, n >= lo
+}
+
 func (h *Handler) handleListTests(w http.ResponseWriter, r *http.Request, buildID string) {
 	q := r.URL.Query()
 	var cmd queue.ListTestsCommand
 
 	if rawCursor := q.Get("cursor"); rawCursor != "" {
-		c, err := strconv.Atoi(rawCursor)
-		if err != nil || c < 0 {
+		c, ok := pageParam(rawCursor, 0, queue.MaxTests)
+		if !ok {
 			writeAPIError(w, &APIError{
 				HTTPStatus: http.StatusBadRequest,
 				Code:       queue.ErrCodeInvalidRequest,
-				Message:    "cursor must be a non-negative integer",
+				Message:    fmt.Sprintf("cursor must be 0..%d", queue.MaxTests),
 			})
 			return
 		}
@@ -621,8 +646,8 @@ func (h *Handler) handleListTests(w http.ResponseWriter, r *http.Request, buildI
 	}
 
 	if rawLimit := q.Get("limit"); rawLimit != "" {
-		l, err := strconv.Atoi(rawLimit)
-		if err != nil || l < 1 || l > queue.MaxTestsPageLimit {
+		l, ok := pageParam(rawLimit, 1, queue.MaxTestsPageLimit)
+		if !ok {
 			writeAPIError(w, &APIError{
 				HTTPStatus: http.StatusBadRequest,
 				Code:       queue.ErrCodeInvalidRequest,

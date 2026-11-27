@@ -475,8 +475,12 @@ Auth: read or write token.
 
 Query parameters:
 
-- `cursor`: non-negative integer `test_index` to start from (default `0`).
+- `cursor`: `test_index` to start from, `0..20,000` (default `0`).
 - `limit`: `1..1000` (default `200`).
+
+Write `cursor` and `limit` as plain decimal digits, with no sign or leading zero
+(`0` itself is allowed). Any other spelling, or a value out of range, returns
+`400 invalid_request` from both servers.
 - `state`: optional comma-separated filter (`pending`, `leased`, `passed`, `failed`, `skipped`, `unresolved`).
 - `retried`: optional `true` to return only tests with `generation > 1` or non-empty `history` / `history_truncated == true`.
 

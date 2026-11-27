@@ -447,6 +447,24 @@ func TestProtocolBlackBox(t *testing.T) {
 				}
 			})
 		}
+
+		// Both servers must read cursor and limit the same way: plain decimal
+		// digits, no sign or leading zero, within range.
+		for _, query := range []string{
+			"cursor=007",
+			"cursor=%2B5", // a literal plus sign; a bare + decodes to a space
+			"cursor=-1",
+			"cursor=20001",
+			"cursor=99999999999999999999",
+			"limit=007",
+			"limit=%2B5",
+			"limit=0",
+		} {
+			t.Run("pagination "+query+" returns 400", func(t *testing.T) {
+				resp, data := env.rawRequest(t, http.MethodGet, "/api/v1/builds/"+bid+"/tests?"+query, env.readToken, nil)
+				assertErrorBody(t, resp, data, http.StatusBadRequest, queue.ErrCodeInvalidRequest)
+			})
+		}
 	})
 
 	t.Run("full lifecycle, idempotency, conflicts, expiry, pagination", func(t *testing.T) {
