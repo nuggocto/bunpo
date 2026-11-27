@@ -20,6 +20,14 @@ import (
 var binary string
 
 func TestMain(m *testing.M) {
+	// The live-queue tests run this test binary again as the test command of a
+	// real bunpo --queue process (TestQueueHelperProcess). That child needs no
+	// built binary, and it ends with os.Exit, so a temporary directory made
+	// here would never be removed.
+	if os.Getenv("BUNPO_E2E_HELPER") != "" {
+		os.Exit(m.Run())
+	}
+
 	dir, err := os.MkdirTemp("", "bunpo-e2e")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
