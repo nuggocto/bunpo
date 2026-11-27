@@ -32,16 +32,20 @@ var defaultTestCfg = queue.Config{
 
 func newTestServer(t *testing.T, cfg queueapi.HandlerConfig) (*httptest.Server, *queueapi.Client) {
 	t.Helper()
+
 	if cfg.WriteToken == "" {
 		cfg.WriteToken = testWriteTok
 	}
+
 	if cfg.ReadToken == "" {
 		cfg.ReadToken = testReadTok
 	}
+
 	h, err := queueapi.NewHandler(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	c, err := queueapi.NewClient(queueapi.ClientConfig{
@@ -52,6 +56,7 @@ func newTestServer(t *testing.T, cfg queueapi.HandlerConfig) (*httptest.Server, 
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return srv, c
 }
 
@@ -71,23 +76,30 @@ func (l *blockingLog) Append(ctx context.Context, buildID string, events []queue
 	if buildID == l.blockBuild {
 		l.enteredOnce.Do(func() { close(l.entered) })
 		<-l.release
+
 		if ctx.Err() != nil {
 			l.sawCancelled.Store(true)
 		}
 	}
+
 	if l.failUnwritten.Load() {
 		return fmt.Errorf("simulated clean write error: %w", queueapi.ErrAppendUnwritten)
 	}
+
 	if l.failUncertain.Load() {
 		return errors.New("simulated uncertain fsync error")
 	}
+
 	l.mu.Lock()
+
 	if l.appended == nil {
 		l.appended = make(map[string][]queue.EventType)
 	}
+
 	for _, ev := range events {
 		l.appended[buildID] = append(l.appended[buildID], ev.Type)
 	}
+
 	l.mu.Unlock()
 	return nil
 }
@@ -152,11 +164,14 @@ func TestSlowAppendDoesNotBlockOtherBuilds(t *testing.T) {
 	slowDone := make(chan error, 1)
 	go func() { slowDone <- initOne("b-slow", "r1") }()
 	<-log.entered
+
 	if err := initOne("b-fast", "r2"); err != nil {
 		close(log.release)
 		t.Fatalf("b-fast blocked by b-slow: %v", err)
 	}
+
 	close(log.release)
+
 	if err := <-slowDone; err != nil {
 		t.Fatalf("b-slow failed: %v", err)
 	}
@@ -181,6 +196,7 @@ func TestAppendErrorsPreserveInvariants(t *testing.T) {
 			wantGetStatus: 404,
 			wantGetCode:   queue.ErrCodeBuildNotFound,
 		},
+
 		{
 			name:          "uncertain on init returns 500 and marks build broken (500)",
 			op:            "init",
@@ -190,6 +206,7 @@ func TestAppendErrorsPreserveInvariants(t *testing.T) {
 			wantGetStatus: 500,
 			wantGetCode:   queueapi.ErrCodeInternalError,
 		},
+
 		{
 			name:          "unwritten on lease returns 503 and build stays healthy (200)",
 			op:            "lease",
@@ -198,6 +215,7 @@ func TestAppendErrorsPreserveInvariants(t *testing.T) {
 			wantCode:      queueapi.ErrCodeStorageError,
 			wantGetStatus: 200,
 		},
+
 		{
 			name:          "uncertain on lease returns 500 and marks build broken (500)",
 			op:            "lease",
@@ -233,6 +251,7 @@ func TestAppendErrorsPreserveInvariants(t *testing.T) {
 			} else {
 				log.failUncertain.Store(true)
 			}
+
 			var err error
 			if tc.op == "init" {
 				_, err = c.Init(ctx, queue.InitCommand{
@@ -245,6 +264,7 @@ func TestAppendErrorsPreserveInvariants(t *testing.T) {
 			} else {
 				_, err = c.Lease(ctx, bid, queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
 			}
+
 			log.failUnwritten.Store(false)
 			log.failUncertain.Store(false)
 			assertAPIErr(t, err, tc.wantStatus, tc.wantCode)
@@ -254,8 +274,10 @@ func TestAppendErrorsPreserveInvariants(t *testing.T) {
 				if getErr != nil || st.Verdict != queue.VerdictRunning || st.Counts.Leased != 0 {
 					t.Fatalf("GET after unwritten lease = (%+v, %v); want running with 0 leased", st, getErr)
 				}
+
 				return
 			}
+
 			assertAPIErr(t, getErr, tc.wantGetStatus, tc.wantGetCode)
 		})
 	}
@@ -301,6 +323,7 @@ func TestCapacityRetentionAndIdleEviction(t *testing.T) {
 		RetentionMS: 100_000,
 		Log:         log,
 	})
+
 	ctx := context.Background()
 	cfg := queue.Config{
 		Machines:       1,
@@ -309,6 +332,7 @@ func TestCapacityRetentionAndIdleEviction(t *testing.T) {
 		MaxAttempts:    3,
 		MaxBatch:       1,
 	}
+
 	initBuild := func(id string) error {
 		_, err := c.Init(ctx, queue.InitCommand{
 			BuildID:       id,
@@ -323,7 +347,9 @@ func TestCapacityRetentionAndIdleEviction(t *testing.T) {
 	if err := initBuild("b1"); err != nil {
 		t.Fatal(err)
 	}
+
 	nowMS.Store(1_005_000)
+
 	if err := initBuild("b2"); err != nil {
 		t.Fatal(err)
 	}
@@ -337,9 +363,11 @@ func TestCapacityRetentionAndIdleEviction(t *testing.T) {
 			foundB2 = true
 		}
 	}
+
 	log.mu.Lock()
 	b2Evs := log.appended["b2"]
 	log.mu.Unlock()
+
 	if !foundB2 || len(b2Evs) == 0 || b2Evs[len(b2Evs)-1] != queue.EventFinalized {
 		t.Fatalf("b2 deadline finalization failed: found=%t evs=%v", foundB2, b2Evs)
 	}
@@ -353,15 +381,19 @@ func TestCapacityRetentionAndIdleEviction(t *testing.T) {
 	if err := initBuild("b3"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := initBuild("b4"); err != nil {
 		t.Fatal(err)
 	}
+
 	log.failUncertain.Store(true)
 	_, _ = c.Lease(ctx, "b3", queue.LeaseCommand{RunnerID: "r1", RequestID: "q3"})
 	log.failUncertain.Store(false)
+
 	if err := initBuild("b5"); err != nil {
 		t.Fatalf("b5 should evict broken b3: %v", err)
 	}
+
 	_, err = c.Status(ctx, "b3")
 	assertAPIErr(t, err, 500, queueapi.ErrCodeInternalError)
 }
@@ -429,6 +461,7 @@ func TestClientMalformed200Bodies(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if _, err := c.Lease(context.Background(), "b1", queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"}); err == nil {
 				t.Fatalf("Lease(%s) succeeded; want error", tc.body)
 			}
@@ -450,6 +483,7 @@ func TestClientRefusesRedirectWithoutLeakingToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_, err = c.Status(context.Background(), "b1")
 	if err == nil || !strings.Contains(err.Error(), "redirect") || strings.Contains(err.Error(), testWriteTok) {
 		t.Fatalf("redirect err = %v", err)
@@ -477,6 +511,7 @@ func TestClientTimeoutIsTransient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_, err = c.Status(context.Background(), "b1")
 	if err == nil || !queueapi.IsTransientError(err) {
 		t.Fatalf("http.Client.Timeout err = %v (transient=%t)", err, queueapi.IsTransientError(err))
@@ -499,11 +534,13 @@ func TestSlowReaderDoesNotHoldBuildLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	writeStarted := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/tests") {
 			w = &notifyFirstWriteWriter{ResponseWriter: w, notify: writeStarted}
 		}
+
 		h.ServeHTTP(w, r)
 	}))
 	defer srv.Close()
@@ -512,16 +549,26 @@ func TestSlowReaderDoesNotHoldBuildLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx := context.Background()
 	pad := strings.Repeat("dir/", 110)
 	tests := make([]string, 1000)
 	preds := make([]*int64, 1000)
+
 	for i := range tests {
 		tests[i] = fmt.Sprintf("%st%04d.py", pad, i)
 	}
-	if _, err := c.Init(ctx, queue.InitCommand{BuildID: "slow-read", RunnerID: "r1", Config: defaultTestCfg, Tests: tests, PredictionsMS: preds}); err != nil {
+
+	if _, err := c.Init(ctx, queue.InitCommand{
+		BuildID:       "slow-read",
+		RunnerID:      "r1",
+		Config:        defaultTestCfg,
+		Tests:         tests,
+		PredictionsMS: preds,
+	}); err != nil {
 		t.Fatal(err)
 	}
+
 	l, err := c.Lease(ctx, "slow-read", queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
 	if err != nil {
 		t.Fatal(err)
@@ -531,6 +578,7 @@ func TestSlowReaderDoesNotHoldBuildLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetReadBuffer(4096)
 	}
@@ -540,6 +588,7 @@ func TestSlowReaderDoesNotHoldBuildLock(t *testing.T) {
 		"Authorization: Bearer %s\r\n" +
 		"Connection: close\r\n\r\n"
 	_, _ = fmt.Fprintf(conn, rawReq, testReadTok)
+
 	select {
 	case <-writeStarted:
 	case <-time.After(5 * time.Second):
@@ -559,11 +608,13 @@ func TestClientDisconnectDoesNotCancelAppendContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	reqCancelled := make(chan struct{})
 	var cancelOnce sync.Once
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		done := make(chan struct{})
 		defer close(done)
+
 		go func() {
 			select {
 			case <-r.Context().Done():
@@ -571,6 +622,7 @@ func TestClientDisconnectDoesNotCancelAppendContext(t *testing.T) {
 			case <-done:
 			}
 		}()
+
 		h.ServeHTTP(w, r)
 	}))
 	defer srv.Close()
@@ -579,22 +631,33 @@ func TestClientDisconnectDoesNotCancelAppendContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	reqCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		_, _ = c.Init(reqCtx, queue.InitCommand{BuildID: "b-disc", RunnerID: "r1", Config: defaultTestCfg, Tests: []string{"a.py"}, PredictionsMS: []*int64{nil}})
+		_, _ = c.Init(reqCtx, queue.InitCommand{
+			BuildID:       "b-disc",
+			RunnerID:      "r1",
+			Config:        defaultTestCfg,
+			Tests:         []string{"a.py"},
+			PredictionsMS: []*int64{nil},
+		})
 		close(done)
 	}()
+
 	<-log.entered
 	cancel()
+
 	select {
 	case <-reqCancelled:
 	case <-time.After(5 * time.Second):
 		close(log.release)
 		t.Fatal("timed out waiting for server request context cancellation")
 	}
+
 	close(log.release)
 	<-done
+
 	if log.sawCancelled.Load() {
 		t.Fatal("EventLog.Append context was cancelled when client disconnected")
 	}

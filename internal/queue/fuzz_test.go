@@ -20,6 +20,7 @@ func FuzzEventReplay(f *testing.F) {
 			f.Add(raw)
 		}
 	}
+
 	f.Add([]byte(`{"type":"expired","at_ms":1000,"expired":{"lease_id":1}}`))
 	f.Add([]byte(`{"type":"finalized","at_ms":2000,"finalized":{"reason":"deadline"}}`))
 	f.Add([]byte(`{}`))
@@ -29,16 +30,19 @@ func FuzzEventReplay(f *testing.F) {
 		if len(data) > 64<<10 {
 			return
 		}
+
 		st := queue.NewState(queue.DefaultLimits())
 		for line := range bytes.SplitSeq(data, []byte{'\n'}) {
 			line = bytes.TrimSpace(line)
 			if len(line) == 0 {
 				continue
 			}
+
 			ev, err := queue.DecodeEvent(line)
 			if err != nil {
 				continue
 			}
+
 			before := cloneState(t, st)
 			if err := st.Apply(ev); err != nil {
 				if !equalExact(t, st, before) {
@@ -46,6 +50,7 @@ func FuzzEventReplay(f *testing.F) {
 				}
 			}
 		}
+
 		if st.Counts.Total != len(st.Tests) {
 			t.Fatalf("Counts.Total = %d != len(Tests) = %d", st.Counts.Total, len(st.Tests))
 		}

@@ -41,12 +41,14 @@ var suites = []suite{
 		machines: 4,
 		files:    manyFiles(40),
 	},
+
 	{
 		name:     "Tight",
 		about:    "13 files that divide exactly into four machines of 3000 ms each, for example {1500, 900, 600}, {1400, 1000, 600}, {1300, 1200, 500} and {1100, 800, 700, 400}. Longest-first dealing misses every perfect split; finding one needs an exact search, which Bunpō does not run.",
 		machines: 4,
 		files:    []int64{1500, 900, 600, 1400, 1000, 600, 1300, 1200, 500, 1100, 800, 700, 400},
 	},
+
 	{
 		name:     "Indivisible",
 		about:    "One 6000 ms file and twelve 500 ms files on four machines. No file-level split can bring the slowest machine below 6000 ms, twice the 3000 ms average.",
@@ -61,6 +63,7 @@ func manyFiles(n int) []int64 {
 	for i := range files {
 		files[i] = 100 + int64(i*37%9)*100
 	}
+
 	return files
 }
 
@@ -99,6 +102,7 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
+
 	writeHeader(&report, *runs, setup)
 
 	for _, s := range suites {
@@ -106,6 +110,7 @@ func main() {
 		if err != nil {
 			fail(fmt.Errorf("%s: %w", s.name, err))
 		}
+
 		writeSuite(&report, s, results)
 	}
 
@@ -113,6 +118,7 @@ func main() {
 		os.Stdout.Write(report.Bytes())
 		return
 	}
+
 	if err := os.WriteFile(*out, report.Bytes(), 0o644); err != nil {
 		fail(err)
 	}
@@ -155,12 +161,14 @@ func runSuite(dir string, s suite, bunpo, pytest string, runs int) ([][]machineR
 				machines[i], errs[i] = runMachine(dir, run, i, s.machines, list, timings, bunpo, pytest)
 			})
 		}
+
 		wg.Wait()
 
 		for i, err := range errs {
 			if err != nil {
 				return nil, fmt.Errorf("run %d, machine %d: %w", run+1, i, err)
 			}
+
 			for _, name := range []string{fmt.Sprintf("manifest-%d.json", i), fmt.Sprintf("report-%d.json", i)} {
 				if err := copyFile(filepath.Join(machineDir(dir, run, i), name), filepath.Join(final, name)); err != nil {
 					return nil, err
@@ -176,6 +184,7 @@ func runSuite(dir string, s suite, bunpo, pytest string, runs int) ([][]machineR
 
 		results = append(results, machines)
 	}
+
 	return results, nil
 }
 
@@ -184,6 +193,7 @@ func runMachine(dir string, run, index, total int, list string, timings []byte, 
 	if err := os.MkdirAll(state, 0o755); err != nil {
 		return machineRun{}, err
 	}
+
 	if timings != nil {
 		if err := os.WriteFile(filepath.Join(state, "timings.json"), timings, 0o644); err != nil {
 			return machineRun{}, err
@@ -195,11 +205,13 @@ func runMachine(dir string, run, index, total int, list string, timings []byte, 
 	if err != nil {
 		return machineRun{}, err
 	}
+
 	files := strings.Fields(share)
 	pred, err := predicted(timings, files)
 	if err != nil {
 		return machineRun{}, err
 	}
+
 	result := machineRun{files: len(files), predicted: pred}
 
 	if len(files) == 0 {
@@ -209,9 +221,14 @@ func runMachine(dir string, run, index, total int, list string, timings []byte, 
 
 	report := filepath.Join(state, "junit.xml")
 	start := time.Now()
-	if _, err := command(dir, "", pytest, slices.Concat([]string{"-q", "-p", "no:cacheprovider", "-o", "junit_family=xunit1", "--junitxml=" + report, "--"}, files)...); err != nil {
+
+	if _, err := command(dir, "", pytest, slices.Concat(
+		[]string{"-q", "-p", "no:cacheprovider", "-o", "junit_family=xunit1", "--junitxml=" + report, "--"},
+		files,
+	)...); err != nil {
 		return machineRun{}, err
 	}
+
 	result.wall = time.Since(start)
 
 	if _, err := command(dir, "", bunpo, "record", "--dir", state, "--index", idx, report); err != nil {
@@ -227,6 +244,7 @@ func predicted(timings []byte, files []string) (int64, error) {
 	if timings == nil {
 		return 0, nil
 	}
+
 	f, err := timing.Decode(timings)
 	if err != nil {
 		return 0, err
@@ -237,6 +255,7 @@ func predicted(timings []byte, files []string) (int64, error) {
 	for _, id := range files {
 		sum += durations[id]
 	}
+
 	return sum, nil
 }
 
@@ -245,6 +264,7 @@ func recordedMS(path string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	r, err := manifest.DecodeRunReport(data)
 	if err != nil {
 		return 0, err
@@ -254,6 +274,7 @@ func recordedMS(path string) (int64, error) {
 	for _, o := range r.Tests {
 		sum += o.MS
 	}
+
 	return sum, nil
 }
 
@@ -264,6 +285,7 @@ func measureSetup(work, pytest string) (time.Duration, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return 0, err
 	}
+
 	if err := os.WriteFile(filepath.Join(dir, "test_nothing.py"), []byte("def test_nothing():\n    pass\n"), 0o644); err != nil {
 		return 0, err
 	}
@@ -271,9 +293,11 @@ func measureSetup(work, pytest string) (time.Duration, error) {
 	var times []time.Duration
 	for range 3 {
 		start := time.Now()
+
 		if _, err := command(dir, "", pytest, "-q", "-p", "no:cacheprovider", "test_nothing.py"); err != nil {
 			return 0, err
 		}
+
 		times = append(times, time.Since(start))
 	}
 
@@ -294,8 +318,10 @@ func writeSuiteFiles(dir string, durations []int64) (string, error) {
 		if err := os.WriteFile(filepath.Join(tests, name), []byte(body), 0o644); err != nil {
 			return "", err
 		}
+
 		fmt.Fprintf(&list, "tests/%s\n", name)
 	}
+
 	return list.String(), nil
 }
 
@@ -315,6 +341,7 @@ func command(dir, stdin, name string, args ...string) (string, error) {
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("%s %s: %w\n%s", filepath.Base(name), strings.Join(args, " "), err, &stderr)
 	}
+
 	return stdout.String(), nil
 }
 
@@ -323,6 +350,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
+
 	return os.WriteFile(dst, data, 0o644)
 }
 
@@ -358,17 +386,20 @@ func writeSuite(w io.Writer, s suite, results [][]machineRun) {
 			if run > 0 {
 				pred = fmt.Sprintf("%d ms", m.predicted)
 			}
+
 			fmt.Fprintf(w, "| %d | %d | %d | %s | %d ms | %s |\n", run+1, i, m.files, pred, m.tests, ms(m.wall))
 		}
 	}
 
 	fmt.Fprintln(w, "\n| Run | Predicted ratio | Tests ratio | Wall ratio | Slowest wall |")
 	fmt.Fprintln(w, "| --- | --- | --- | --- | --- |")
+
 	for run, machines := range results {
 		pred := "none yet"
 		if run > 0 {
 			pred = ratio(machines, func(m machineRun) float64 { return float64(m.predicted) })
 		}
+
 		tests := ratio(machines, func(m machineRun) float64 { return float64(m.tests) })
 		wall := ratio(machines, func(m machineRun) float64 { return m.wall.Seconds() })
 
@@ -376,6 +407,7 @@ func writeSuite(w io.Writer, s suite, results [][]machineRun) {
 		for _, m := range machines {
 			slowest = max(slowest, m.wall)
 		}
+
 		fmt.Fprintf(w, "| %d | %s | %s | %s | %s |\n", run+1, pred, tests, wall, ms(slowest))
 	}
 }
@@ -388,9 +420,11 @@ func ratio(machines []machineRun, value func(machineRun) float64) string {
 			values = append(values, value(m))
 		}
 	}
+
 	if len(values) == 0 || slices.Min(values) == 0 {
 		return "n/a"
 	}
+
 	return fmt.Sprintf("%.3f", slices.Max(values)/slices.Min(values))
 }
 

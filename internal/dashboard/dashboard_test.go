@@ -29,6 +29,7 @@ func newWrappedHandler(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return dashboard.Wrap(api)
 }
 
@@ -54,24 +55,31 @@ func TestDashboardServesFilesAndHeaders(t *testing.T) {
 		t.Run(tc.path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+
 			if rec.Code != http.StatusOK {
 				t.Fatalf("GET %s = %d; want 200", tc.path, rec.Code)
 			}
+
 			if got := rec.Header().Get("Content-Security-Policy"); got != dashboard.CSP {
 				t.Fatalf("CSP = %q; want %q", got, dashboard.CSP)
 			}
+
 			if got := rec.Header().Get("X-Content-Type-Options"); got != dashboard.NoSniff {
 				t.Fatalf("nosniff = %q", got)
 			}
+
 			if got := rec.Header().Get("Referrer-Policy"); got != dashboard.ReferrerPolicy {
 				t.Fatalf("Referrer-Policy = %q", got)
 			}
+
 			if got := rec.Header().Get("Cache-Control"); got != tc.wantCache {
 				t.Fatalf("Cache-Control = %q; want %q", got, tc.wantCache)
 			}
+
 			if got := rec.Header().Get("Content-Type"); got != tc.wantCT {
 				t.Fatalf("Content-Type = %q; want %q", got, tc.wantCT)
 			}
+
 			if !strings.Contains(rec.Body.String(), tc.wantSub) {
 				t.Fatalf("body missing %q", tc.wantSub)
 			}
@@ -81,12 +89,14 @@ func TestDashboardServesFilesAndHeaders(t *testing.T) {
 	// HEAD returns headers and empty body; POST returns 405.
 	headRec := httptest.NewRecorder()
 	h.ServeHTTP(headRec, httptest.NewRequest(http.MethodHead, "/", nil))
+
 	if headRec.Code != http.StatusOK || headRec.Body.Len() != 0 {
 		t.Fatalf("HEAD / = %d len=%d; want 200 len=0", headRec.Code, headRec.Body.Len())
 	}
 
 	postRec := httptest.NewRecorder()
 	h.ServeHTTP(postRec, httptest.NewRequest(http.MethodPost, "/", nil))
+
 	if postRec.Code != http.StatusMethodNotAllowed || postRec.Header().Get("Allow") != "GET, HEAD" {
 		t.Fatalf("POST / = %d Allow=%q", postRec.Code, postRec.Header().Get("Allow"))
 	}
@@ -115,9 +125,11 @@ func TestDashboardRejectsTraversalDirectoryListingAndUnknownPaths(t *testing.T) 
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+p, nil)
 			h.ServeHTTP(rec, req)
+
 			if rec.Code != http.StatusNotFound {
 				t.Fatalf("GET %s = %d; want 404 (body=%s)", p, rec.Code, rec.Body.String())
 			}
+
 			var env struct {
 				Version int `json:"version"`
 				Error   struct {
@@ -127,6 +139,7 @@ func TestDashboardRejectsTraversalDirectoryListingAndUnknownPaths(t *testing.T) 
 			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 				t.Fatalf("GET %s body is not JSON 404: %v (%q)", p, err, rec.Body.String())
 			}
+
 			if env.Version != 1 || env.Error.Code != "not_found" {
 				t.Fatalf("GET %s JSON = %+v; want version=1 code=not_found", p, env)
 			}
@@ -139,6 +152,7 @@ func TestDashboardPreservesAPIAndHealthzAndHeadersParity(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
 	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"ok":true}` {
 		t.Fatalf("GET /healthz = %d %q", rec.Code, rec.Body.String())
 	}
@@ -147,6 +161,7 @@ func TestDashboardPreservesAPIAndHealthzAndHeadersParity(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+testReadTok)
 	apiRec := httptest.NewRecorder()
 	h.ServeHTTP(apiRec, req)
+
 	if apiRec.Code != http.StatusOK || !strings.Contains(apiRec.Body.String(), `"builds":[]`) {
 		t.Fatalf("GET /api/v1/builds = %d %q", apiRec.Code, apiRec.Body.String())
 	}
@@ -156,15 +171,18 @@ func TestDashboardPreservesAPIAndHealthzAndHeadersParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	headersText := string(rawHeaders)
 	cspLineRe := regexp.MustCompile(`(?m)^\s*Content-Security-Policy:\s*(.+?)\s*$`)
 	headerMatches := cspLineRe.FindAllStringSubmatch(headersText, -1)
 	if len(headerMatches) != 1 {
 		t.Fatalf("static/_headers has %d Content-Security-Policy lines; want 1", len(headerMatches))
 	}
+
 	if got := headerMatches[0][1]; got != dashboard.CSP {
 		t.Fatalf("static/_headers CSP = %q; want Go CSP %q", got, dashboard.CSP)
 	}
+
 	for _, want := range []string{
 		"X-Content-Type-Options: " + dashboard.NoSniff,
 		"Referrer-Policy: " + dashboard.ReferrerPolicy,
@@ -180,11 +198,13 @@ func TestDashboardPreservesAPIAndHealthzAndHeadersParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	workerCSPRe := regexp.MustCompile(`const\s+DASHBOARD_CSP\s*=\s*"([^"]+)"\s*;`)
 	workerMatch := workerCSPRe.FindStringSubmatch(string(rawWorker))
 	if workerMatch == nil {
 		t.Fatal("worker/src/index.ts missing DASHBOARD_CSP string literal")
 	}
+
 	if got := workerMatch[1]; got != dashboard.CSP {
 		t.Fatalf("worker/src/index.ts CSP = %q; want Go CSP %q", got, dashboard.CSP)
 	}

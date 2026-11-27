@@ -51,6 +51,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("invalid queue URL %q", cfg.BaseURL)
 	}
+
 	switch u.Scheme {
 	case "https":
 	case "http":
@@ -60,6 +61,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	default:
 		return nil, fmt.Errorf("unsupported queue URL scheme %q (want https or loopback http)", u.Scheme)
 	}
+
 	if u.User != nil {
 		return nil, errors.New("queue URL must not embed credentials; pass tokens via environment variables")
 	}
@@ -71,6 +73,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		cp := *hc
 		hc = &cp
 	}
+
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
@@ -86,6 +89,7 @@ func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
+
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
@@ -98,6 +102,7 @@ func checkRespVersion(got int64, endpoint string) error {
 	if got != queue.ProtocolVersion {
 		return fmt.Errorf("%s: invalid response protocol version %d (want %d)", endpoint, got, queue.ProtocolVersion)
 	}
+
 	return nil
 }
 
@@ -113,6 +118,7 @@ func EncodeInit(cmd queue.InitCommand) (WireRequest, error) {
 	if err != nil {
 		return WireRequest{}, fmt.Errorf("encode init request: %w", err)
 	}
+
 	return WireRequest{
 		Method:      http.MethodPost,
 		Path:        "/api/v1/builds/" + url.PathEscape(cmd.BuildID) + "/init",
@@ -126,12 +132,15 @@ func ParseInitResponse(status int, raw []byte) (InitResponse, error) {
 	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return InitResponse{}, err
 	}
+
 	if err := checkRespVersion(resp.Version, "init"); err != nil {
 		return InitResponse{}, err
 	}
+
 	if !validVerdict(resp.Verdict) {
 		return InitResponse{}, fmt.Errorf("init: invalid verdict %q", resp.Verdict)
 	}
+
 	return resp, nil
 }
 
@@ -145,6 +154,7 @@ func EncodeLease(buildID string, cmd queue.LeaseCommand) (WireRequest, error) {
 	if err != nil {
 		return WireRequest{}, fmt.Errorf("encode lease request: %w", err)
 	}
+
 	return WireRequest{
 		Method:      http.MethodPost,
 		Path:        "/api/v1/builds/" + url.PathEscape(buildID) + "/lease",
@@ -158,9 +168,11 @@ func ParseLeaseResponse(status int, raw []byte) (LeaseResponse, error) {
 	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return LeaseResponse{}, err
 	}
+
 	if err := checkRespVersion(resp.Version, "lease"); err != nil {
 		return LeaseResponse{}, err
 	}
+
 	switch resp.Status {
 	case queue.LeaseGranted:
 		if resp.LeaseID <= 0 || len(resp.Attempts) == 0 {
@@ -177,6 +189,7 @@ func ParseLeaseResponse(status int, raw []byte) (LeaseResponse, error) {
 	default:
 		return LeaseResponse{}, fmt.Errorf("lease: unknown status %q", resp.Status)
 	}
+
 	return resp, nil
 }
 
@@ -189,6 +202,7 @@ func EncodeHeartbeat(buildID string, cmd queue.HeartbeatCommand) (WireRequest, e
 	if err != nil {
 		return WireRequest{}, fmt.Errorf("encode heartbeat request: %w", err)
 	}
+
 	return WireRequest{
 		Method:      http.MethodPost,
 		Path:        "/api/v1/builds/" + url.PathEscape(buildID) + "/heartbeat",
@@ -202,12 +216,15 @@ func ParseHeartbeatResponse(status int, raw []byte) (HeartbeatResponse, error) {
 	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return HeartbeatResponse{}, err
 	}
+
 	if err := checkRespVersion(resp.Version, "heartbeat"); err != nil {
 		return HeartbeatResponse{}, err
 	}
+
 	if !validVerdict(resp.Verdict) {
 		return HeartbeatResponse{}, fmt.Errorf("heartbeat: invalid verdict %q", resp.Verdict)
 	}
+
 	return resp, nil
 }
 
@@ -221,6 +238,7 @@ func EncodeReport(buildID string, cmd queue.ReportCommand) (WireRequest, error) 
 	if err != nil {
 		return WireRequest{}, fmt.Errorf("encode report request: %w", err)
 	}
+
 	return WireRequest{
 		Method:      http.MethodPost,
 		Path:        "/api/v1/builds/" + url.PathEscape(buildID) + "/report",
@@ -234,12 +252,15 @@ func ParseReportResponse(status int, raw []byte) (ReportResponse, error) {
 	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return ReportResponse{}, err
 	}
+
 	if err := checkRespVersion(resp.Version, "report"); err != nil {
 		return ReportResponse{}, err
 	}
+
 	if !validVerdict(resp.Verdict) {
 		return ReportResponse{}, fmt.Errorf("report: invalid verdict %q", resp.Verdict)
 	}
+
 	return resp, nil
 }
 
@@ -255,12 +276,15 @@ func ParseStatusResponse(status int, raw []byte) (StatusResponse, error) {
 	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return StatusResponse{}, err
 	}
+
 	if err := checkRespVersion(resp.Version, "status"); err != nil {
 		return StatusResponse{}, err
 	}
+
 	if !validVerdict(resp.Verdict) {
 		return StatusResponse{}, fmt.Errorf("status: invalid verdict %q", resp.Verdict)
 	}
+
 	return resp, nil
 }
 
@@ -269,23 +293,29 @@ func EncodeListTests(buildID string, cmd queue.ListTestsCommand) WireRequest {
 	if cmd.Cursor > 0 {
 		q.Set("cursor", strconv.Itoa(cmd.Cursor))
 	}
+
 	if cmd.Limit > 0 {
 		q.Set("limit", strconv.Itoa(cmd.Limit))
 	}
+
 	if len(cmd.States) > 0 {
 		parts := make([]string, len(cmd.States))
 		for i, st := range cmd.States {
 			parts[i] = string(st)
 		}
+
 		q.Set("state", strings.Join(parts, ","))
 	}
+
 	if cmd.Retried {
 		q.Set("retried", "true")
 	}
+
 	path := "/api/v1/builds/" + url.PathEscape(buildID) + "/tests"
 	if enc := q.Encode(); enc != "" {
 		path += "?" + enc
 	}
+
 	return WireRequest{
 		Method: http.MethodGet,
 		Path:   path,
@@ -297,12 +327,15 @@ func ParseListTestsResponse(status int, raw []byte) (ListTestsResponse, error) {
 	if err := decodeWireResponse(status, raw, &resp); err != nil {
 		return ListTestsResponse{}, err
 	}
+
 	if err := checkRespVersion(resp.Version, "list_tests"); err != nil {
 		return ListTestsResponse{}, err
 	}
+
 	if !validVerdict(resp.Verdict) {
 		return ListTestsResponse{}, fmt.Errorf("list_tests: invalid verdict %q", resp.Verdict)
 	}
+
 	return resp, nil
 }
 
@@ -311,10 +344,12 @@ func (c *Client) Init(ctx context.Context, cmd queue.InitCommand) (InitResponse,
 	if err != nil {
 		return InitResponse{}, err
 	}
+
 	status, raw, err := c.doRaw(ctx, req)
 	if err != nil {
 		return InitResponse{}, err
 	}
+
 	return ParseInitResponse(status, raw)
 }
 
@@ -323,10 +358,12 @@ func (c *Client) Lease(ctx context.Context, buildID string, cmd queue.LeaseComma
 	if err != nil {
 		return LeaseResponse{}, err
 	}
+
 	status, raw, err := c.doRaw(ctx, req)
 	if err != nil {
 		return LeaseResponse{}, err
 	}
+
 	return ParseLeaseResponse(status, raw)
 }
 
@@ -335,10 +372,12 @@ func (c *Client) Heartbeat(ctx context.Context, buildID string, cmd queue.Heartb
 	if err != nil {
 		return HeartbeatResponse{}, err
 	}
+
 	status, raw, err := c.doRaw(ctx, req)
 	if err != nil {
 		return HeartbeatResponse{}, err
 	}
+
 	return ParseHeartbeatResponse(status, raw)
 }
 
@@ -347,10 +386,12 @@ func (c *Client) Report(ctx context.Context, buildID string, cmd queue.ReportCom
 	if err != nil {
 		return ReportResponse{}, err
 	}
+
 	status, raw, err := c.doRaw(ctx, req)
 	if err != nil {
 		return ReportResponse{}, err
 	}
+
 	return ParseReportResponse(status, raw)
 }
 
@@ -359,6 +400,7 @@ func (c *Client) Status(ctx context.Context, buildID string) (StatusResponse, er
 	if err != nil {
 		return StatusResponse{}, err
 	}
+
 	return ParseStatusResponse(status, raw)
 }
 
@@ -367,6 +409,7 @@ func (c *Client) ListTests(ctx context.Context, buildID string, cmd queue.ListTe
 	if err != nil {
 		return ListTestsResponse{}, err
 	}
+
 	return ParseListTestsResponse(status, raw)
 }
 
@@ -375,13 +418,16 @@ func (c *Client) doRaw(ctx context.Context, wr WireRequest) (int, []byte, error)
 	if wr.Body != nil {
 		body = bytes.NewReader(wr.Body)
 	}
+
 	req, err := http.NewRequestWithContext(ctx, wr.Method, c.baseURL+wr.Path, body)
 	if err != nil {
 		return 0, nil, fmt.Errorf("build request: %w", err)
 	}
+
 	if wr.ContentType != "" {
 		req.Header.Set("Content-Type", wr.ContentType)
 	}
+
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
@@ -393,6 +439,7 @@ func (c *Client) doRaw(ctx context.Context, wr WireRequest) (int, []byte, error)
 		if ctx.Err() != nil {
 			return 0, nil, ctx.Err()
 		}
+
 		return 0, nil, &transportError{msg: fmt.Sprintf("queue request %s %s failed: %v", wr.Method, wr.Path, sanitizeTransportError(err))}
 	}
 	defer resp.Body.Close()
@@ -406,11 +453,14 @@ func (c *Client) doRaw(ctx context.Context, wr WireRequest) (int, []byte, error)
 		if ctx.Err() != nil {
 			return 0, nil, ctx.Err()
 		}
+
 		return 0, nil, &transportError{msg: fmt.Sprintf("reading queue response: %v", err)}
 	}
+
 	if len(raw) > MaxResponseBytes {
 		return 0, nil, fmt.Errorf("queue response exceeds %d byte limit", MaxResponseBytes)
 	}
+
 	return resp.StatusCode, raw, nil
 }
 
@@ -424,15 +474,18 @@ func decodeWireResponse(status int, raw []byte, out any) error {
 				Message:    env.Error.Message,
 			}
 		}
+
 		return &APIError{
 			HTTPStatus: status,
 			Code:       "http_error",
 			Message:    http.StatusText(status),
 		}
 	}
+
 	if err := json.Unmarshal(raw, out); err != nil {
 		return fmt.Errorf("decoding queue response: %w", err)
 	}
+
 	return nil
 }
 
@@ -455,14 +508,17 @@ func IsTransientError(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+
 	var te *transportError
 	if errors.As(err, &te) {
 		return true
 	}
+
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.HTTPStatus == http.StatusTooManyRequests || apiErr.HTTPStatus >= 500
 	}
+
 	return false
 }
 
@@ -471,5 +527,6 @@ func sanitizeTransportError(err error) string {
 	if errors.As(err, &ue) {
 		return ue.Err.Error()
 	}
+
 	return err.Error()
 }

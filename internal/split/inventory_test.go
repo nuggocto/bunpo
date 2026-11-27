@@ -24,30 +24,35 @@ func TestNewInventory(t *testing.T) {
 			raw:   []string{"b.py", "a.py", "B.py", "é.py", "z.py"},
 			want:  []string{"B.py", "a.py", "b.py", "z.py", "é.py"},
 		},
+
 		{
 			name:  "removes exact repeats",
 			style: split.POSIX,
 			raw:   []string{"a.py", "b.py", "a.py"},
 			want:  []string{"a.py", "b.py"},
 		},
+
 		{
 			name:  "removes . and empty components",
 			style: split.POSIX,
 			raw:   []string{"./tests//a.py"},
 			want:  []string{"tests/a.py"},
 		},
+
 		{
 			name:  "keeps spaces and case",
 			style: split.POSIX,
 			raw:   []string{"Tests/my test.py", "tests/my test.py"},
 			want:  []string{"Tests/my test.py", "tests/my test.py"},
 		},
+
 		{
 			name:  "converts Windows separators",
 			style: split.Windows,
 			raw:   []string{`tests\unit\a.py`, "tests/b.py"},
 			want:  []string{"tests/b.py", "tests/unit/a.py"},
 		},
+
 		{
 			name:  "empty list",
 			style: split.POSIX,

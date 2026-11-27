@@ -57,6 +57,7 @@ func TestSplit(t *testing.T) {
 			wantShards: [][]string{{"a.py", "d.py", "f.py"}, {"b.py", "c.py", "e.py"}},
 			wantLoads:  []int64{17 * minute, 17 * minute},
 		},
+
 		{
 			name:       "equal durations deal in path order to the lowest machine",
 			ids:        []string{"d.py", "b.py", "c.py", "a.py"},
@@ -65,6 +66,7 @@ func TestSplit(t *testing.T) {
 			wantShards: [][]string{{"a.py", "c.py"}, {"b.py", "d.py"}},
 			wantLoads:  []int64{10, 10},
 		},
+
 		{
 			name:       "empty list",
 			ids:        nil,
@@ -72,6 +74,7 @@ func TestSplit(t *testing.T) {
 			wantShards: [][]string{{}, {}, {}},
 			wantLoads:  []int64{0, 0, 0},
 		},
+
 		{
 			name:       "one test",
 			ids:        []string{"only.py"},
@@ -80,6 +83,7 @@ func TestSplit(t *testing.T) {
 			wantShards: [][]string{{"only.py"}},
 			wantLoads:  []int64{42},
 		},
+
 		{
 			name:       "more machines than tests",
 			ids:        []string{"a.py", "b.py"},
@@ -88,6 +92,7 @@ func TestSplit(t *testing.T) {
 			wantShards: [][]string{{"b.py"}, {"a.py"}, {}, {}},
 			wantLoads:  []int64{8, 3, 0, 0},
 		},
+
 		{
 			name:       "no history deals evenly",
 			ids:        []string{"a.py", "b.py", "c.py", "d.py", "e.py"},
@@ -95,6 +100,7 @@ func TestSplit(t *testing.T) {
 			wantShards: [][]string{{"a.py", "c.py", "e.py"}, {"b.py", "d.py"}},
 			wantLoads:  []int64{0, 0},
 		},
+
 		{
 			// With ties broken by index alone, all four land on machine 0.
 			name:       "zero durations spread by test count",
@@ -104,6 +110,7 @@ func TestSplit(t *testing.T) {
 			wantShards: [][]string{{"a.py", "c.py"}, {"b.py", "d.py"}},
 			wantLoads:  []int64{0, 0},
 		},
+
 		{
 			name:       "a recorded zero stays shorter than one millisecond",
 			ids:        []string{"a.py", "b.py"},
@@ -112,6 +119,7 @@ func TestSplit(t *testing.T) {
 			wantShards: [][]string{{"b.py"}, {"a.py"}},
 			wantLoads:  []int64{1, 0},
 		},
+
 		{
 			name:       "equal loads prefer the machine with fewer tests",
 			ids:        []string{"v.py", "w.py", "x.py", "y.py", "z.py"},
@@ -120,6 +128,7 @@ func TestSplit(t *testing.T) {
 			wantShards: [][]string{{"x.py"}, {"v.py", "y.py"}, {"w.py", "z.py"}},
 			wantLoads:  []int64{2, 1, 1},
 		},
+
 		{
 			// LPT and the optimum are 6, but the usual lower bound is 4: four
 			// thirds of that bound is no ceiling for LPT.

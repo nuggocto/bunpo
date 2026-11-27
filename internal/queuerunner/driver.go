@@ -64,9 +64,11 @@ func Run(ctx context.Context, cfg RunConfig) (queue.Verdict, error) {
 	if len(cfg.Command) == 0 {
 		return "", errors.New("test command is required after --")
 	}
+
 	if cfg.ReadReports == nil {
 		return "", errors.New("report reader is required")
 	}
+
 	if cfg.KillGrace <= 0 {
 		cfg.KillGrace = defaultKillGrace
 	}
@@ -88,6 +90,7 @@ func Run(ctx context.Context, cfg RunConfig) (queue.Verdict, error) {
 	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
 		return "", err
 	}
+
 	dirRoot, err := os.OpenRoot(cfg.Dir)
 	if err != nil {
 		return "", err
@@ -98,6 +101,7 @@ func Run(ctx context.Context, cfg RunConfig) (queue.Verdict, error) {
 	if err != nil {
 		return "", err
 	}
+
 	batchFileName := fmt.Sprintf("queue-%s.txt", m.RunnerID())
 	batchFileAbs := filepath.Join(absDir, batchFileName)
 
@@ -119,6 +123,7 @@ func Run(ctx context.Context, cfg RunConfig) (queue.Verdict, error) {
 	if err != nil {
 		return "", err
 	}
+
 	return done.Verdict, done.Err
 }
 
@@ -136,17 +141,21 @@ func RunStatus(ctx context.Context, cfg StatusConfig) (StatusResult, error) {
 	if err != nil {
 		return StatusResult{}, err
 	}
+
 	if done.Err != nil {
 		return StatusResult{}, done.Err
 	}
+
 	var res StatusResult
 	if done.Status != nil {
 		res.Status = *done.Status
 	}
+
 	if done.HasReport && done.Report != nil {
 		res.Report = *done.Report
 		res.HasReport = true
 	}
+
 	return res, nil
 }
 
@@ -176,9 +185,11 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 	if d.logInfo == nil {
 		d.logInfo = func(string, ...any) {}
 	}
+
 	if d.logWarn == nil {
 		d.logWarn = func(string, ...any) {}
 	}
+
 	if d.ent == nil {
 		d.ent = cryptoEntropy{}
 	}
@@ -206,6 +217,7 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 		for k := range timers {
 			cancelTimer(k)
 		}
+
 		opCancel()
 		close(driverDone)
 		wg.Wait()
@@ -237,10 +249,12 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 				delay := max(time.Duration(a.AtMS-nowMS())*time.Millisecond, 0)
 				kind, gen := a.TimerKind, a.TimerGen
 				wg.Add(1)
+
 				go func() {
 					defer wg.Done()
 					t := time.NewTimer(delay)
 					defer t.Stop()
+
 					select {
 					case <-t.C:
 						post(Event{Kind: EvTimer, TimerKind: kind, TimerGen: gen})
@@ -252,6 +266,7 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 			case ActSend:
 				opID, req := a.OpID, a.Req
 				wg.Add(1)
+
 				go func() {
 					defer wg.Done()
 					resp := doRequest(opCtx, d.client, req)
@@ -262,28 +277,33 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 				if err := writeBatchFile(d.dirRoot, d.batchFileName, a.Attempts, d.ent); err != nil {
 					return fmt.Errorf("writing batch file: %w", err)
 				}
+
 				if a.ClearReports {
 					if err := removeReportFiles(d.reportPaths); err != nil {
 						return fmt.Errorf("removing old report file: %w", err)
 					}
 				}
+
 				cmd := exec.Command(d.command[0], d.command[1:]...)
 				cmd.Stdin = nil
 				cmd.Stdout = d.stdout
 				cmd.Stderr = d.stderr
 				cmd.Env = filteredChildEnv(os.Environ(), d.batchFileAbs)
 				configureProcessGroup(cmd)
+
 				if err := cmd.Start(); err != nil {
 					d.logWarn("failed to start command: %v", err)
 					post(Event{Kind: EvCommandExited, LeaseID: a.LeaseID, ExitCode: -1, Signaled: true})
 					continue
 				}
+
 				rc := &runningCmd{
 					leaseID: a.LeaseID,
 					stopCh:  make(chan struct{}),
 				}
 				activeCmd = rc
 				wg.Add(1)
+
 				go func() {
 					defer wg.Done()
 					childDone := make(chan error, 1)
@@ -296,6 +316,7 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 						// group (including grandchildren) before posting EvCommandExited.
 						waitErr = stopProcessGroup(cmd, childDone, d.killGrace)
 					}
+
 					exitCode, signaled := classifyExit(waitErr)
 					post(Event{Kind: EvCommandExited, LeaseID: rc.leaseID, ExitCode: exitCode, Signaled: signaled})
 				}()
@@ -308,6 +329,7 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 			case ActReadReports:
 				leaseID := a.LeaseID
 				wg.Add(1)
+
 				go func() {
 					defer wg.Done()
 					files, err := d.readReports(d.reportPaths)
@@ -319,15 +341,18 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 				if errors.Is(cp.Err, context.Canceled) && ctx.Err() != nil {
 					cp.Err = ctx.Err()
 				}
+
 				doneAction = &cp
 			}
 		}
+
 		return nil
 	}
 
 	if err := execActions(step(nowMS(), Event{Kind: EvStart})); err != nil {
 		return Action{}, err
 	}
+
 	if doneAction != nil {
 		return *doneAction, nil
 	}
@@ -344,11 +369,13 @@ func driveMachine(ctx context.Context, step func(nowMS int64, ev Event) []Action
 			if ev.Kind == EvCommandExited && activeCmd != nil && activeCmd.leaseID == ev.LeaseID {
 				activeCmd = nil
 			}
+
 			if err := execActions(step(nowMS(), ev)); err != nil {
 				return Action{}, err
 			}
 		}
 	}
+
 	return *doneAction, nil
 }
 
@@ -359,6 +386,7 @@ func doRequest(ctx context.Context, client *queueapi.Client, req Request) Respon
 		if err != nil {
 			return Response{Kind: req.Kind, Err: err}
 		}
+
 		return Response{Kind: req.Kind, Init: &r}
 
 	case ReqLease:
@@ -366,6 +394,7 @@ func doRequest(ctx context.Context, client *queueapi.Client, req Request) Respon
 		if err != nil {
 			return Response{Kind: req.Kind, Err: err}
 		}
+
 		return Response{Kind: req.Kind, Lease: &r}
 
 	case ReqHeartbeat:
@@ -373,6 +402,7 @@ func doRequest(ctx context.Context, client *queueapi.Client, req Request) Respon
 		if err != nil {
 			return Response{Kind: req.Kind, Err: err}
 		}
+
 		return Response{Kind: req.Kind, Heartbeat: &r}
 
 	case ReqReport:
@@ -380,6 +410,7 @@ func doRequest(ctx context.Context, client *queueapi.Client, req Request) Respon
 		if err != nil {
 			return Response{Kind: req.Kind, Err: err}
 		}
+
 		return Response{Kind: req.Kind, Report: &r}
 
 	case ReqStatus:
@@ -387,6 +418,7 @@ func doRequest(ctx context.Context, client *queueapi.Client, req Request) Respon
 		if err != nil {
 			return Response{Kind: req.Kind, Err: err}
 		}
+
 		return Response{Kind: req.Kind, Status: &r}
 
 	case ReqListTests:
@@ -394,6 +426,7 @@ func doRequest(ctx context.Context, client *queueapi.Client, req Request) Respon
 		if err != nil {
 			return Response{Kind: req.Kind, Err: err}
 		}
+
 		return Response{Kind: req.Kind, ListTests: &r}
 
 	default:
@@ -405,10 +438,12 @@ func classifyExit(waitErr error) (exitCode int, signaled bool) {
 	if waitErr == nil {
 		return 0, false
 	}
+
 	var exitErr *exec.ExitError
 	if errors.As(waitErr, &exitErr) {
 		return exitErr.ExitCode(), processSignaled(exitErr.ProcessState)
 	}
+
 	return -1, true
 }
 
@@ -424,8 +459,10 @@ func filteredChildEnv(env []string, testsFile string) []string {
 			strings.EqualFold(key, "BUNPO_TESTS_FILE") {
 			continue
 		}
+
 		out = append(out, kv)
 	}
+
 	out = append(out, "BUNPO_TESTS_FILE="+testsFile)
 	return out
 }
@@ -436,6 +473,7 @@ func writeBatchFile(root *os.Root, name string, attempts []queue.LeasedAttemptVi
 		b.WriteString(a.Test)
 		b.WriteByte('\n')
 	}
+
 	tmp := fmt.Sprintf(".%s.%s.tmp", name, ent.Hex16()[:8])
 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
@@ -447,15 +485,19 @@ func writeBatchFile(root *os.Root, name string, attempts []queue.LeasedAttemptVi
 			root.Remove(tmp)
 		}
 	}()
+
 	if _, err = io.WriteString(f, b.String()); err != nil {
 		return err
 	}
+
 	if err = f.Sync(); err != nil {
 		return err
 	}
+
 	if err = f.Close(); err != nil {
 		return err
 	}
+
 	return root.Rename(tmp, name)
 }
 
@@ -465,14 +507,18 @@ func removeReportFiles(paths []string) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
+
 		if err != nil {
 			return err
 		}
+
 		err = root.Remove(filepath.Base(p))
 		_ = root.Close()
+
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
+
 	return nil
 }

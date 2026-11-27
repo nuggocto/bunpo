@@ -121,9 +121,11 @@ func TestDecodeReturnsZeroOnValidationError(t *testing.T) {
 	if got, err := manifest.DecodeManifest([]byte(`{"version":1,"index":2,"machines":1,"digest":"` + digestA + `","tests":[]}`)); err == nil || !reflect.ValueOf(got).IsZero() {
 		t.Fatalf("DecodeManifest = %+v, %v; want zero value and error", got, err)
 	}
+
 	if got, err := manifest.DecodePlan([]byte(`{"version":1,"machines":2,"digest":"` + digestA + `","shards":[["a.py"]]}`)); err == nil || !reflect.ValueOf(got).IsZero() {
 		t.Fatalf("DecodePlan = %+v, %v; want zero value and error", got, err)
 	}
+
 	if got, err := manifest.DecodeRunReport([]byte(`{"version":1,"index":2,"machines":1,"tests":{}}`)); err == nil || !reflect.ValueOf(got).IsZero() {
 		t.Fatalf("DecodeRunReport = %+v, %v; want zero value and error", got, err)
 	}

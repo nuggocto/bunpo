@@ -158,6 +158,7 @@ func TestSplitWarnings(t *testing.T) {
 		want    []string
 	}{
 		{"no timing file", nil, suite, 2, []string{"no timings.json", "every test counts the same"}},
+
 		{
 			name:    "timing file with no matching tests",
 			timings: map[string]timing.Entry{"tests/other.py": samples(4000)},
@@ -165,6 +166,7 @@ func TestSplitWarnings(t *testing.T) {
 			total:   2,
 			want:    []string{"none of the 4 tests have a recorded time yet, so every test counts the same"},
 		},
+
 		{
 			name: "one unknown test",
 			timings: map[string]timing.Entry{
@@ -176,10 +178,13 @@ func TestSplitWarnings(t *testing.T) {
 			total: 2,
 			want:  []string{"1 of 4 tests has no recorded time and counts as the median, 4s"},
 		},
+
 		{"unknown tests", map[string]timing.Entry{"tests/a.py": samples(4000)}, suite, 2, []string{"3 of 4 tests have no recorded time and count as the median, 4s"}},
+
 		{"balanced suite", map[string]timing.Entry{
 			"tests/a.py": samples(4000), "tests/b.py": samples(4000), "tests/c.py": samples(2000), "tests/d.py": samples(2000),
 		}, suite, 2, []string{"predicted machine loads from 6s to 6s, average 6s; longest file tests/a.py at 4s"}},
+
 		{"dominant file", dominant, suite, 2, []string{"longest file tests/a.py at 10m0s", "tests/a.py alone takes longer than the average machine load"}},
 		{"empty shards", nil, "tests/a.py\n", 3, []string{"2 of 3 machines get no tests", "machine 2 has no tests"}},
 	}
@@ -236,6 +241,7 @@ func TestPlanThenSplitFromPlan(t *testing.T) {
 	if code, _, _ := bunpo(t, "", "split", "--dir", missing, "--index", "0", "--plan"); code != 2 {
 		t.Fatalf("split --plan in missing dir exited %d; want 2", code)
 	}
+
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {
 		t.Fatalf("split --plan created missing directory %s", missing)
 	}
@@ -255,18 +261,21 @@ func TestRecordRealReports(t *testing.T) {
 			fast:   "tests/test_fast.py",
 			fails:  "tests/sub/test_fails.py",
 		},
+
 		{
 			runner: "jest",
 			files:  []string{"tests/fast.test.js", "tests/slow.test.js", "tests/sub/fails.test.js", "tests/sub/skips.test.js"},
 			fast:   "tests/fast.test.js",
 			fails:  "tests/sub/fails.test.js",
 		},
+
 		{
 			runner: "vitest",
 			files:  []string{"tests/fast.test.js", "tests/slow.test.js", "tests/sub/fails.test.js", "tests/sub/skips.test.js"},
 			fast:   "tests/fast.test.js",
 			fails:  "tests/sub/fails.test.js",
 		},
+
 		{
 			runner: "playwright",
 			flags:  []string{"--file-from", "classname", "--path-prefix", "tests"},
@@ -274,6 +283,7 @@ func TestRecordRealReports(t *testing.T) {
 			fast:   "tests/fast.spec.js",
 			fails:  "tests/sub/fails.spec.js",
 		},
+
 		{
 			runner: "rspec",
 			files:  []string{"spec/fast_spec.rb", "spec/slow_spec.rb", "spec/sub/fails_spec.rb", "spec/sub/skips_spec.rb"},
@@ -355,6 +365,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 0,
 			wantMsg:  "recorded 0 files for machine 0",
 		},
+
 		{
 			name:     "empty shard with invalid path prefix",
 			noReport: true,
@@ -363,6 +374,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 2,
 			wantMsg:  "invalid --path-prefix",
 		},
+
 		{
 			name:     "empty shard that ran the whole suite",
 			report:   "a.py 5\nb.py 5\n",
@@ -370,6 +382,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 1,
 			wantMsg:  "skip the test command on a machine with no tests",
 		},
+
 		{
 			name:     "assigned tests but no report",
 			assigned: []string{"a.py"},
@@ -378,6 +391,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 2,
 			wantMsg:  "no reports given",
 		},
+
 		{
 			name:     "report without file paths",
 			assigned: []string{"a.py"},
@@ -386,6 +400,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 2,
 			wantMsg:  "junit_family=xunit1",
 		},
+
 		{
 			name:     "a file assigned elsewhere ran here",
 			assigned: []string{"a.py"},
@@ -394,6 +409,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 1,
 			wantMsg:  "1 file in the reports was not assigned to machine 0, so it may have run on two machines: other.py",
 		},
+
 		{
 			name:     "nothing in the report matches",
 			assigned: []string{"a.py"},
@@ -402,6 +418,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 2,
 			wantMsg:  "check --index, --file-from and --path-prefix",
 		},
+
 		{
 			name:     "a failed file in lines format stays seen with no time",
 			assigned: []string{"a.py", "b.py"},
@@ -410,6 +427,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 0,
 			wantMsg:  "recorded 2 files for machine 0; 1 had failures and keeps its earlier times",
 		},
+
 		{
 			name:     "an assigned file is missing from the report",
 			assigned: []string{"a.py", "b.py"},
@@ -418,6 +436,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 0,
 			wantMsg:  "1 assigned file has no test cases in the reports and stays unrecorded: b.py",
 		},
+
 		{
 			name:     "an absolute path in the report",
 			assigned: []string{"a.py"},
@@ -426,6 +445,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 2,
 			wantMsg:  "absolute",
 		},
+
 		{
 			// "/a" must fail before the prefix turns it into "tests/a".
 			name:     "an absolute path behind a prefix",
@@ -436,6 +456,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 2,
 			wantMsg:  "absolute",
 		},
+
 		{
 			// A runner that crashed before writing must not pass for an empty report.
 			name:     "an empty report file",
@@ -445,6 +466,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 2,
 			wantMsg:  "no root element",
 		},
+
 		{
 			name:     "a report that is not XML",
 			assigned: []string{"a.py"},
@@ -453,6 +475,7 @@ func TestRecord(t *testing.T) {
 			wantCode: 2,
 			wantMsg:  "outside the root",
 		},
+
 		{
 			name:     "a failing case that names no file",
 			assigned: []string{"a.py"},
@@ -525,6 +548,7 @@ func TestSplitFailsWhenTheListCannotBeWritten(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "manifest-0.json")); err == nil {
 		t.Fatal("a manifest is left after the failed split")
 	}
+
 	if code, _, _ := bunpo(t, suite, "verify", "--dir", dir); code == 0 {
 		t.Fatal("verify passed after the failed split")
 	}
@@ -553,6 +577,7 @@ func TestRecordRemovesStaleReportOnFailure(t *testing.T) {
 
 	bad := filepath.Join(t.TempDir(), "bad.xml")
 	put(t, bad, []byte("not XML"))
+
 	if code, _, _ := bunpo(t, "", "record", "--dir", dir, "--index", "0", bad); code != 2 {
 		t.Fatalf("record with bad XML exited %d; want 2", code)
 	}
@@ -560,6 +585,7 @@ func TestRecordRemovesStaleReportOnFailure(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "report-0.json")); err == nil {
 		t.Fatal("stale report-0.json remained after failed record")
 	}
+
 	if code, _, _ := bunpo(t, "", "merge", "--dir", dir); code != 1 {
 		t.Fatalf("merge after failed record exited %d; want 1", code)
 	}
@@ -600,9 +626,11 @@ func TestReusedDirectory(t *testing.T) {
 	put(t, times, []byte("tests/a.py 19\ntests/b.py 5\ntests/c.py 5\ntests/d.py 5\n"))
 
 	split := func(dir string) []string { return []string{"split", "--dir", dir, "--index", "0", "--total", "1"} }
+
 	record := func(dir string) []string {
 		return []string{"record", "--dir", dir, "--index", "0", "--format", "lines", times}
 	}
+
 	merge := func(dir string) []string { return []string{"merge", "--dir", dir} }
 
 	type step func(string) []string
@@ -662,6 +690,7 @@ func TestWriteFile(t *testing.T) {
 
 	// A destination that cannot be replaced fails, and the temporary file goes.
 	put(t, filepath.Join(dir, "busy", "keep"), nil)
+
 	if err := writeFile(root, "busy", []byte("x")); err == nil {
 		t.Fatal("writeFile replaced a directory")
 	}
@@ -691,16 +720,19 @@ func TestMergeRejects(t *testing.T) {
 			name:    "no reports",
 			wantMsg: "no run reports",
 		},
+
 		{
 			name:    "a machine's report is missing",
 			reports: map[int][]byte{0: report(0, 3, nil), 2: report(2, 3, nil)},
 			wantMsg: "no run report from machine 1 of 3",
 		},
+
 		{
 			name:    "multiple machines' reports are missing",
 			reports: map[int][]byte{0: report(0, 3, nil)},
 			wantMsg: "no run report from machines 1, 2 of 3",
 		},
+
 		{
 			name: "a file in two reports",
 			reports: map[int][]byte{
@@ -709,6 +741,7 @@ func TestMergeRejects(t *testing.T) {
 			},
 			wantMsg: `"a.py" appears in reports`,
 		},
+
 		{
 			name:    "machine counts disagree",
 			reports: map[int][]byte{0: report(0, 2, nil), 1: report(1, 3, nil)},
@@ -758,6 +791,7 @@ func TestExitCodes(t *testing.T) {
 	split := func(dir string, extra ...string) []string {
 		return append([]string{"split", "--dir", dir}, extra...)
 	}
+
 	queueEnv := func(k string) string {
 		switch k {
 		case "BUNPO_QUEUE_TOKEN":
@@ -799,57 +833,69 @@ func TestExitCodes(t *testing.T) {
 		{"merge in a missing directory", "", []string{"merge", "--dir", filepath.Join(dir, "nope")}, nil, 2},
 		// Live-queue (--queue) usage errors.
 		{"queue help", "", []string{"--queue", "-h"}, nil, 0},
+
 		{
 			"queue missing build", suite,
 			[]string{"--queue", "http://127.0.0.1:8080", "--total", "1", "--report", "r.xml", "--", "true"},
 			queueEnv, 2,
 		},
+
 		{
 			"queue invalid build", suite,
 			[]string{"--queue", "http://127.0.0.1:8080", "--build", "../bad", "--total", "1", "--report", "r.xml", "--", "true"},
 			queueEnv, 2,
 		},
+
 		{
 			"queue missing token", suite,
 			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--", "true"},
 			noEnv, 2,
 		},
+
 		{"queue status missing token", "", []string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--status"}, noEnv, 2},
+
 		{
 			"queue plain http to remote host", suite,
 			[]string{"--queue", "http://queue.example.com", "--build", "b1", "--total", "1", "--report", "r.xml", "--", "true"},
 			queueEnv, 2,
 		},
+
 		{
 			"queue missing report", suite,
 			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--", "true"},
 			queueEnv, 2,
 		},
+
 		{
 			"queue bad format", suite,
 			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--format", "yaml", "--", "true"},
 			queueEnv, 2,
 		},
+
 		{
 			"queue total 0", suite,
 			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "0", "--report", "r.xml", "--", "true"},
 			queueEnv, 2,
 		},
+
 		{
 			"queue index out of range", suite,
 			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "2", "--index", "256", "--report", "r.xml", "--", "true"},
 			queueEnv, 2,
 		},
+
 		{
 			"queue lease-ttl 0", suite,
 			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--lease-ttl", "0s", "--", "true"},
 			queueEnv, 2,
 		},
+
 		{
 			"queue no command after --", suite,
 			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--total", "1", "--report", "r.xml", "--"},
 			queueEnv, 2,
 		},
+
 		{
 			"queue extra argument with --status", "",
 			[]string{"--queue", "http://127.0.0.1:8080", "--build", "b1", "--status", "extra"},
@@ -863,6 +909,7 @@ func TestExitCodes(t *testing.T) {
 			if getenv == nil {
 				getenv = noEnv
 			}
+
 			var stdout, stderr bytes.Buffer
 			if code := run(tc.args, strings.NewReader(tc.stdin), &stdout, &stderr, getenv); code != tc.want {
 				t.Fatalf("exit %d; want %d\n%s", code, tc.want, stderr.String())

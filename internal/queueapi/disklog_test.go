@@ -37,11 +37,13 @@ func sampleBuildEvents(t *testing.T, buildID string) (initEvs, leaseEvs, repEvs 
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, ev := range initEvs {
 		if err := st.Apply(ev); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	var leaseResp queue.LeaseResponse
 	leaseEvs, leaseResp, err = queue.DecideLease(st, 1100, queue.LeaseCommand{
 		RunnerID:  "r1",
@@ -50,11 +52,13 @@ func sampleBuildEvents(t *testing.T, buildID string) (initEvs, leaseEvs, repEvs 
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, ev := range leaseEvs {
 		if err := st.Apply(ev); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	repEvs, _, err = queue.DecideReport(st, 1200, queue.ReportCommand{
 		RunnerID: "r1",
 		LeaseID:  leaseResp.LeaseID,
@@ -70,6 +74,7 @@ func sampleBuildEvents(t *testing.T, buildID string) (initEvs, leaseEvs, repEvs 
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return initEvs, leaseEvs, repEvs
 }
 
@@ -88,10 +93,12 @@ func TestDiskLogFormatGolden(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	got, err := os.ReadFile(filepath.Join(dir, queueapi.BuildFileName("golden-1")))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	const want = "bunpo-queue-log 1\n" +
 		`5358374d [{"type":"initialized","at_ms":1000,"initialized":` +
 		`{"build_id":"golden-1","digest":"56e035ea0ec29bf819c491da91d950f55d0f74e42964d013ec32ca0b8cbc0109",` +
@@ -115,6 +122,7 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	baseLog := queueapi.NewDiskLog(baseFS, nil)
 	initEvs, leaseEvs, repEvs := sampleBuildEvents(t, "dmg-1")
 	for _, b := range [][]queue.Event{initEvs, leaseEvs, repEvs} {
@@ -122,11 +130,13 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	goodName := queueapi.BuildFileName("dmg-1")
 	fullRaw, err := os.ReadFile(filepath.Join(baseDir, goodName))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := baseFS.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +165,7 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 			},
 			wantDamaged: true,
 		},
+
 		{
 			name:     "flip middle digit (CRC bitrot)",
 			fileName: goodName,
@@ -164,6 +175,7 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 			},
 			wantDamaged: true,
 		},
+
 		{
 			name:     "flip last record truncates tail",
 			fileName: goodName,
@@ -175,6 +187,7 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 			},
 			wantTrunc: true,
 		},
+
 		{
 			name:     "wrong version header",
 			fileName: goodName,
@@ -184,6 +197,7 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 			},
 			wantDamaged: true,
 		},
+
 		{
 			name:        "record of another build",
 			fileName:    queueapi.BuildFileName("other-build"),
@@ -191,6 +205,7 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 			mutate:      func(b []byte) []byte { return bytes.Clone(b) },
 			wantDamaged: true,
 		},
+
 		{
 			name:        "duplicated record refused by Apply",
 			fileName:    goodName,
@@ -213,22 +228,27 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 			if err := queueapi.NewDiskLog(fs, nil).Append(context.Background(), "healthy-sibling", sInit); err != nil {
 				t.Fatal(err)
 			}
+
 			mutated := tc.mutate(fullRaw)
 			if err := os.WriteFile(filepath.Join(dir, tc.fileName), mutated, 0o600); err != nil {
 				t.Fatal(err)
 			}
+
 			loaded, err := queueapi.NewDiskLog(fs, nil).Load(queue.DefaultLimits())
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			after, err := os.ReadFile(filepath.Join(dir, tc.fileName))
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if tc.wantDamaged {
 				if len(loaded.Damaged) != 1 || loaded.Damaged[0] != tc.fileName || len(loaded.Builds) != 1 || !bytes.Equal(after, mutated) {
 					t.Fatalf("damaged mismatch: loaded=%+v fileModified=%t", loaded, !bytes.Equal(after, mutated))
 				}
+
 				_, c := newTestServer(t, queueapi.HandlerConfig{
 					InitialBuilds:  loaded.Builds,
 					InitialDamaged: loaded.Damaged,
@@ -251,14 +271,18 @@ func TestDiskLogDamageAndRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if err := os.WriteFile(filepath.Join(dir, goodName), twoRec[:cut], 0o600); err != nil {
 			fs.Close()
 			t.Fatal(err)
 		}
+
 		loaded, err := queueapi.NewDiskLog(fs, nil).Load(queue.DefaultLimits())
+
 		if closeErr := fs.Close(); closeErr != nil {
 			t.Fatal(closeErr)
 		}
+
 		if err != nil || len(loaded.Damaged) != 0 ||
 			(cut < rec1End && (loaded.Removed != 1 || len(loaded.Builds) != 0)) ||
 			(cut == rec1End && (len(loaded.Builds) != 1 || loaded.Truncated != 0 || len(loaded.Builds[0].Leases) != 0)) ||
@@ -278,15 +302,18 @@ type faultLogFS struct {
 
 func (f *faultLogFS) ReadDir() ([]string, error) { return f.base.ReadDir() }
 func (f *faultLogFS) Remove(name string) error   { return f.base.Remove(name) }
+
 func (f *faultLogFS) SyncDir() error {
 	f.dirSyncs++
 	return f.base.SyncDir()
 }
+
 func (f *faultLogFS) OpenFile(name string, flag int, perm os.FileMode) (queueapi.LogFile, error) {
 	lf, err := f.base.OpenFile(name, flag, perm)
 	if err != nil {
 		return nil, err
 	}
+
 	return &faultLogFile{
 		LogFile:        lf,
 		fs:             f,
@@ -308,19 +335,23 @@ func (f *faultLogFile) Read(p []byte) (int, error) {
 	if f.closed {
 		return 0, os.ErrClosed
 	}
+
 	if f.failReadAtByte >= 0 {
 		if f.pos >= f.failReadAtByte {
 			return 0, errors.New("simulated EIO on read")
 		}
+
 		if len(p) > f.failReadAtByte-f.pos {
 			p = p[:f.failReadAtByte-f.pos]
 		}
 	}
+
 	n, err := f.LogFile.Read(p)
 	f.pos += n
 	if err == nil && f.failReadAtByte >= 0 && f.pos >= f.failReadAtByte {
 		return n, errors.New("simulated EIO on read")
 	}
+
 	return n, err
 }
 
@@ -328,9 +359,11 @@ func (f *faultLogFile) Write(p []byte) (int, error) {
 	if f.closed {
 		return 0, os.ErrClosed
 	}
+
 	if f.failWrite {
 		return 0, errors.New("simulated ENOSPC on create")
 	}
+
 	return f.LogFile.Write(p)
 }
 
@@ -338,6 +371,7 @@ func (f *faultLogFile) Sync() error {
 	if f.closed {
 		return os.ErrClosed
 	}
+
 	f.fs.fileSyncs++
 	return f.LogFile.Sync()
 }
@@ -346,6 +380,7 @@ func (f *faultLogFile) Close() error {
 	if f.closed {
 		return os.ErrClosed
 	}
+
 	f.closed = true
 	return f.LogFile.Close()
 }
@@ -366,16 +401,18 @@ func TestDiskLogReadErrorCreateENOSPCAndLoadFsync(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	origBytes, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	lines := bytes.SplitAfter(origBytes, []byte{'\n'})
 	rec1End := len(lines[0]) + len(lines[1])
 	rec2End := rec1End + len(lines[2])
 
 	// Read error at header, first record, Peek after record 2, or near EOF must
-	// mark the file damaged and NEVER delete or truncate good data.
+	// mark the file damaged and never delete or truncate good data.
 	for _, tc := range []struct {
 		name   string
 		failAt int
@@ -391,13 +428,16 @@ func TestDiskLogReadErrorCreateENOSPCAndLoadFsync(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load returned err: %v", err)
 			}
+
 			if len(loaded.Damaged) != 1 || loaded.Damaged[0] != name || loaded.Truncated != 0 || loaded.Removed != 0 {
 				t.Fatalf("Load = %+v; want damaged=[%s], truncated=0, removed=0", loaded, name)
 			}
+
 			after, err := os.ReadFile(filepath.Join(dir, name))
 			if err != nil {
 				t.Fatalf("file was deleted on read error: %v", err)
 			}
+
 			if !bytes.Equal(after, origBytes) {
 				t.Fatalf("file was modified on read error: len=%d want=%d", len(after), len(origBytes))
 			}
@@ -411,6 +451,7 @@ func TestDiskLogReadErrorCreateENOSPCAndLoadFsync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if len(loaded.Builds) != 1 || ffs.fileSyncs < 1 || ffs.dirSyncs < 1 {
 			t.Fatalf("Load sync counts: builds=%d fileSyncs=%d dirSyncs=%d", len(loaded.Builds), ffs.fileSyncs, ffs.dirSyncs)
 		}
@@ -425,6 +466,7 @@ func TestDiskLogReadErrorCreateENOSPCAndLoadFsync(t *testing.T) {
 		if !errors.Is(err, queueapi.ErrAppendUnwritten) {
 			t.Fatalf("Append err = %v; want wrapped ErrAppendUnwritten", err)
 		}
+
 		if _, statErr := os.Stat(filepath.Join(dir, queueapi.BuildFileName("enospc-init"))); !errors.Is(statErr, os.ErrNotExist) {
 			t.Fatalf("partial file left behind after failed create: %v", statErr)
 		}
@@ -440,6 +482,7 @@ func (f *failRemoveLog) Remove(ctx context.Context, buildID string) error {
 	if f.failRemove {
 		return errors.New("simulated remove error")
 	}
+
 	return f.DiskLog.Remove(ctx, buildID)
 }
 
@@ -471,13 +514,16 @@ func TestDiskLogEvictionAndFailedRemovePreservesEntry(t *testing.T) {
 		})
 		return err
 	}
+
 	if err := initOne("ev-1"); err != nil {
 		t.Fatal(err)
 	}
+
 	lease, err := c.Lease(ctx, "ev-1", queue.LeaseCommand{RunnerID: "r1", RequestID: "q1"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := c.Report(ctx, "ev-1", queue.ReportCommand{
 		RunnerID: "r1",
 		LeaseID:  lease.LeaseID,
@@ -496,18 +542,22 @@ func TestDiskLogEvictionAndFailedRemovePreservesEntry(t *testing.T) {
 	nowMS += 20_000
 	log.failRemove = true
 	assertAPIErr(t, initOne("ev-1"), 503, queueapi.ErrCodeStorageError)
+
 	if _, err := os.Stat(filepath.Join(dir, queueapi.BuildFileName("ev-1"))); err != nil {
 		t.Fatalf("file missing after failed remove: %v", err)
 	}
 
 	log.failRemove = false
+
 	if err := initOne("ev-1"); err != nil {
 		t.Fatalf("re-init after Remove fixed failed: %v", err)
 	}
+
 	entries, err := fs.ReadDir()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(entries) != 1 || !strings.HasPrefix(entries[0], queueapi.BuildFileName("ev-1")) {
 		t.Fatalf("unexpected data dir entries: %v", entries)
 	}
@@ -528,6 +578,7 @@ func TestDiskLogSizeMismatchAndBrokenEvictionKeepFile(t *testing.T) {
 		Log:        dl1,
 	})
 	ctx := context.Background()
+
 	initCmd := func(id string) queue.InitCommand {
 		return queue.InitCommand{
 			BuildID:       id,
@@ -537,6 +588,7 @@ func TestDiskLogSizeMismatchAndBrokenEvictionKeepFile(t *testing.T) {
 			PredictionsMS: []*int64{nil},
 		}
 	}
+
 	if _, err := c.Init(ctx, initCmd("split-1")); err != nil {
 		t.Fatal(err)
 	}
@@ -546,10 +598,12 @@ func TestDiskLogSizeMismatchAndBrokenEvictionKeepFile(t *testing.T) {
 	if _, err := dl2.Load(queue.DefaultLimits()); err != nil {
 		t.Fatal(err)
 	}
+
 	_, leaseEvs, _ := sampleBuildEvents(t, "split-1")
 	if err := dl2.Append(ctx, "split-1", leaseEvs); err != nil {
 		t.Fatal(err)
 	}
+
 	path := filepath.Join(dir, queueapi.BuildFileName("split-1"))
 	before, err := os.ReadFile(path)
 	if err != nil {
@@ -563,6 +617,7 @@ func TestDiskLogSizeMismatchAndBrokenEvictionKeepFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !bytes.Equal(after, before) {
 		t.Fatalf("file changed on size mismatch: len=%d want=%d", len(after), len(before))
 	}
@@ -572,13 +627,16 @@ func TestDiskLogSizeMismatchAndBrokenEvictionKeepFile(t *testing.T) {
 	if _, err := c.Init(ctx, initCmd("healthy-2")); err != nil {
 		t.Fatalf("Init healthy-2 should evict broken split-1: %v", err)
 	}
+
 	afterEvict, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("broken build file was deleted on eviction: %v", err)
 	}
+
 	if !bytes.Equal(afterEvict, before) {
 		t.Fatalf("broken build file changed on eviction")
 	}
+
 	_, err = c.Init(ctx, initCmd("split-1"))
 	assertAPIErr(t, err, 500, queueapi.ErrCodeInternalError)
 }

@@ -25,6 +25,7 @@ func BenchmarkSplit(b *testing.B) {
 	}
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		inv, err := split.NewInventory(raw, split.POSIX)
 		if err != nil {

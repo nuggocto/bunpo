@@ -101,6 +101,7 @@ func DecodeEvent(data []byte) (Event, error) {
 	if err := json.Unmarshal(data, &ev, json.RejectUnknownMembers(true)); err != nil {
 		return Event{}, fmt.Errorf("decode event: %w", err)
 	}
+
 	return ev, nil
 }
 
@@ -110,6 +111,7 @@ func (s *State) Apply(ev Event) error {
 	if ev.AtMS < 0 {
 		return errors.New("event at_ms must not be negative")
 	}
+
 	if s.Initialized && ev.AtMS < s.LastSeenMS {
 		return fmt.Errorf("event at_ms %d precedes last_seen_ms %d", ev.AtMS, s.LastSeenMS)
 	}
@@ -136,22 +138,28 @@ func (s *State) applyInitialized(atMS int64, d *InitializedData) error {
 	if s.Initialized {
 		return errors.New("build already initialized")
 	}
+
 	if d == nil {
 		return errors.New("initialized event missing payload")
 	}
+
 	if !ValidBuildID(d.BuildID) {
 		return fmt.Errorf("invalid build_id %q", d.BuildID)
 	}
+
 	if err := d.Config.validate(s.Limits); err != nil {
 		return err
 	}
+
 	if err := validateTestList(d.Tests, d.PredictionsMS, s.Limits.effective().MaxTests); err != nil {
 		return err
 	}
+
 	wantDigest := configDigest(d.Config, d.Tests)
 	if d.Digest != wantDigest {
 		return fmt.Errorf("initialized digest %q does not match computed %q", d.Digest, wantDigest)
 	}
+
 	if d.DeadlineMS < atMS {
 		return fmt.Errorf("initialized deadline_ms %d precedes at_ms %d", d.DeadlineMS, atMS)
 	}
@@ -169,6 +177,7 @@ func (s *State) applyInitialized(atMS int64, d *InitializedData) error {
 		}
 		order[i] = i
 	}
+
 	slices.SortStableFunc(order, func(a, b int) int {
 		return cmp.Or(cmp.Compare(eff[b], eff[a]), cmp.Compare(a, b))
 	})
@@ -186,6 +195,7 @@ func (s *State) applyInitialized(atMS int64, d *InitializedData) error {
 	if s.Runners == nil {
 		s.Runners = make(map[string]*RunnerState)
 	}
+
 	return nil
 }
 
@@ -193,21 +203,27 @@ func (s *State) applyConflicted(atMS int64, d *ConflictedData) error {
 	if !s.Initialized {
 		return errors.New("conflicted event before initialized")
 	}
+
 	if d == nil {
 		return errors.New("conflicted event missing payload")
 	}
+
 	if !ValidRunnerID(d.RunnerID) {
 		return fmt.Errorf("invalid runner_id %q", d.RunnerID)
 	}
+
 	if err := validateMachineIndex(d.MachineIndex); err != nil {
 		return err
 	}
+
 	if d.GotDigest == "" || d.GotDigest == s.Digest {
 		return errors.New("conflicted event must carry a differing got_digest")
 	}
+
 	if len(s.Conflicts) >= MaxInitConflicts {
 		return errors.New("conflicted event exceeds max stored init conflicts")
 	}
+
 	if hasInitConflict(s.Conflicts, d.RunnerID, d.GotDigest) {
 		return errors.New("duplicate conflicted event")
 	}
@@ -223,6 +239,7 @@ func (s *State) applyConflicted(atMS int64, d *ConflictedData) error {
 	if len(s.Conflicts) == MaxInitConflicts {
 		s.ConflictsTruncated = true
 	}
+
 	return nil
 }
 
@@ -232,6 +249,7 @@ func hasInitConflict(conflicts []InitConflict, runnerID, gotDigest string) bool 
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -239,25 +257,32 @@ func (s *State) applyLeased(atMS int64, d *LeasedData) error {
 	if !s.Initialized {
 		return errors.New("leased event before initialized")
 	}
+
 	if d == nil {
 		return errors.New("leased event missing payload")
 	}
+
 	wantID := int64(len(s.Leases) + 1)
 	if d.LeaseID != wantID {
 		return fmt.Errorf("leased event lease_id %d, want %d", d.LeaseID, wantID)
 	}
+
 	if !ValidRunnerID(d.RunnerID) || !ValidRequestID(d.RequestID) {
 		return errors.New("leased event has invalid runner_id or request_id")
 	}
+
 	if err := validateMachineIndex(d.MachineIndex); err != nil {
 		return err
 	}
+
 	if d.DeadlineMS < atMS {
 		return errors.New("leased deadline_ms precedes at_ms")
 	}
+
 	if len(d.Attempts) == 0 || len(d.Attempts) > s.Config.MaxBatch {
 		return fmt.Errorf("leased attempts count %d outside 1..%d", len(d.Attempts), s.Config.MaxBatch)
 	}
+
 	if r, exists := s.Runners[d.RunnerID]; !exists && len(s.Runners) >= s.Limits.effective().MaxRunners {
 		return errors.New("runner limit exceeded")
 	} else if exists && r.ActiveLeaseID != 0 {
@@ -269,13 +294,16 @@ func (s *State) applyLeased(atMS int64, d *LeasedData) error {
 		if a.TestIndex < 0 || a.TestIndex >= len(s.Tests) {
 			return fmt.Errorf("leased test_index %d out of range", a.TestIndex)
 		}
+
 		if i > 0 && d.Attempts[i-1].TestIndex >= a.TestIndex {
 			return errors.New("leased attempts must be unique and sorted by test_index")
 		}
+
 		t := &s.Tests[a.TestIndex]
 		if t.Status != StatusPending {
 			return fmt.Errorf("test %d is %s, not pending", a.TestIndex, t.Status)
 		}
+
 		if a.Generation != t.Generation+1 || a.Generation > s.Config.MaxAttempts {
 			return fmt.Errorf("test %d generation %d invalid (current %d, max %d)", a.TestIndex, a.Generation, t.Generation, s.Config.MaxAttempts)
 		}
@@ -318,6 +346,7 @@ func (s *State) applyLeased(atMS int64, d *LeasedData) error {
 		s.Counts.Pending--
 		s.Counts.Leased++
 	}
+
 	return nil
 }
 
@@ -325,22 +354,28 @@ func (s *State) applyReported(atMS int64, d *ReportedData) error {
 	if !s.Initialized {
 		return errors.New("reported event before initialized")
 	}
+
 	if d == nil {
 		return errors.New("reported event missing payload")
 	}
+
 	if d.LeaseID < 1 || d.LeaseID > int64(len(s.Leases)) {
 		return fmt.Errorf("reported unknown lease_id %d", d.LeaseID)
 	}
+
 	lease := &s.Leases[d.LeaseID-1]
 	if lease.RunnerID != d.RunnerID {
 		return errors.New("reported runner_id mismatch")
 	}
+
 	if len(d.Results) == 0 || len(d.Results) > len(lease.Attempts) {
 		return errors.New("reported results length is invalid for lease")
 	}
+
 	if d.CloseLease && (lease.Status != LeaseActive || len(d.Results) != len(lease.Attempts)) {
 		return fmt.Errorf("cannot close lease %d with status %s and %d results", d.LeaseID, lease.Status, len(d.Results))
 	}
+
 	if !d.CloseLease && lease.Status == LeaseActive {
 		return fmt.Errorf("reported event for active lease %d must set close_lease", d.LeaseID)
 	}
@@ -350,21 +385,26 @@ func (s *State) applyReported(atMS int64, d *ReportedData) error {
 	for _, a := range lease.Attempts {
 		leaseAttempts[a.TestIndex] = a.Generation
 	}
+
 	for i, res := range d.Results {
 		if i > 0 && d.Results[i-1].TestIndex >= res.TestIndex {
 			return errors.New("reported results must be unique and sorted by test_index")
 		}
+
 		wantGen, ok := leaseAttempts[res.TestIndex]
 		if !ok || res.Generation != wantGen {
 			return fmt.Errorf("reported result %d does not match lease attempt", i)
 		}
+
 		if err := validateReportValues(res.Outcome, res.Timed, res.DurationMS); err != nil {
 			return err
 		}
+
 		t := &s.Tests[res.TestIndex]
 		if res.Generation < 1 || res.Generation > len(t.Attempts) {
 			return fmt.Errorf("reported generation %d out of range", res.Generation)
 		}
+
 		switch res.Disposition {
 		case DispositionAccepted:
 			if !d.CloseLease || t.Status != StatusLeased || t.ActiveLeaseID != d.LeaseID || t.Generation != res.Generation {
@@ -374,9 +414,11 @@ func (s *State) applyReported(atMS int64, d *ReportedData) error {
 			if d.CloseLease {
 				return fmt.Errorf("closing reported event cannot contain %s result", res.Disposition)
 			}
+
 			if len(t.History) >= MaxTestHistory {
 				return fmt.Errorf("test %d history is already full", res.TestIndex)
 			}
+
 			rec := HistoryRecord{
 				AttemptID:   FormatAttemptID(res.TestIndex, res.Generation),
 				Generation:  res.Generation,
@@ -411,9 +453,11 @@ func (s *State) applyReported(atMS int64, d *ReportedData) error {
 
 			t.ActiveLeaseID = 0
 			s.Counts.Leased--
+
 			if r != nil {
 				r.Accepted++
 			}
+
 			switch res.Outcome {
 			case OutcomePassed:
 				t.Status = StatusPassed
@@ -458,6 +502,7 @@ func (s *State) applyReported(atMS int64, d *ReportedData) error {
 		lease.Status = LeaseReported
 		lease.FinishedAtMS = atMS
 		s.removeActiveLease(d.LeaseID)
+
 		if r != nil && r.ActiveLeaseID == d.LeaseID {
 			r.ActiveLeaseID = 0
 		}
@@ -466,6 +511,7 @@ func (s *State) applyReported(atMS int64, d *ReportedData) error {
 	if wasRunning && s.Verdict() != VerdictRunning {
 		s.FinishedAtMS = atMS
 	}
+
 	return nil
 }
 
@@ -481,6 +527,7 @@ func hasHistoryRecord(history []HistoryRecord, rec HistoryRecord) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -488,12 +535,15 @@ func (s *State) applyExpired(atMS int64, d *ExpiredData) error {
 	if !s.Initialized {
 		return errors.New("expired event before initialized")
 	}
+
 	if d == nil {
 		return errors.New("expired event missing payload")
 	}
+
 	if d.LeaseID < 1 || d.LeaseID > int64(len(s.Leases)) {
 		return fmt.Errorf("expired unknown lease_id %d", d.LeaseID)
 	}
+
 	lease := &s.Leases[d.LeaseID-1]
 	if lease.Status != LeaseActive {
 		return fmt.Errorf("expired lease %d is %s, not active", d.LeaseID, lease.Status)
@@ -514,6 +564,7 @@ func (s *State) applyExpired(atMS int64, d *ExpiredData) error {
 		if t.Status != StatusLeased || t.ActiveLeaseID != d.LeaseID {
 			continue
 		}
+
 		att := &t.Attempts[a.Generation-1]
 		att.Status = AttemptExpired
 		att.FinishedAtMS = atMS
@@ -532,6 +583,7 @@ func (s *State) applyExpired(atMS int64, d *ExpiredData) error {
 	if wasRunning && s.Verdict() != VerdictRunning {
 		s.FinishedAtMS = atMS
 	}
+
 	return nil
 }
 
@@ -539,9 +591,11 @@ func (s *State) applyFinalized(atMS int64, d *FinalizedData) error {
 	if !s.Initialized {
 		return errors.New("finalized event before initialized")
 	}
+
 	if d == nil || d.Reason != "deadline" {
 		return errors.New("finalized event requires reason \"deadline\"")
 	}
+
 	if s.Verdict() != VerdictRunning {
 		return errors.New("finalized event after build finished")
 	}
@@ -554,6 +608,7 @@ func (s *State) applyFinalized(atMS int64, d *FinalizedData) error {
 		if r := s.Runners[lease.RunnerID]; r != nil && r.ActiveLeaseID == leaseID {
 			r.ActiveLeaseID = 0
 		}
+
 		for _, a := range lease.Attempts {
 			t := &s.Tests[a.TestIndex]
 			if t.Status == StatusLeased && t.ActiveLeaseID == leaseID {
@@ -563,6 +618,7 @@ func (s *State) applyFinalized(atMS int64, d *FinalizedData) error {
 			}
 		}
 	}
+
 	s.ActiveLeases = s.ActiveLeases[:0]
 
 	for i := range s.Tests {
@@ -579,6 +635,7 @@ func (s *State) applyFinalized(atMS int64, d *FinalizedData) error {
 			s.Counts.Unresolved++
 		}
 	}
+
 	s.FinishedAtMS = atMS
 	return nil
 }
@@ -590,21 +647,24 @@ func (s *State) ExtendLease(leaseID int64, deadlineMS int64) {
 	if leaseID < 1 || leaseID > int64(len(s.Leases)) {
 		return
 	}
+
 	lease := &s.Leases[leaseID-1]
 	if lease.Status != LeaseActive {
 		return
 	}
+
 	if deadlineMS > lease.DeadlineMS {
 		lease.DeadlineMS = deadlineMS
 	}
 }
 
 // ResetActiveLeaseDeadlines resets every active lease's in-memory deadline to
-// max(deadline, now + lease_ttl_ms) after a server restart or DO eviction.
+// max(deadline, now + lease_ttl_ms) after a server restart or Durable Object eviction.
 func (s *State) ResetActiveLeaseDeadlines(nowMS int64) {
 	if !s.Initialized {
 		return
 	}
+
 	now := max(nowMS, s.LastSeenMS)
 	newDeadline := now + s.Config.LeaseTTLMS
 	for _, id := range s.ActiveLeases {
@@ -619,6 +679,7 @@ func (s *State) ensureRunner(runnerID string, machineIndex *int, atMS int64) *Ru
 	if r, ok := s.Runners[runnerID]; ok {
 		return r
 	}
+
 	r := &RunnerState{
 		RunnerID:     runnerID,
 		MachineIndex: cloneIntPtr(machineIndex),
@@ -631,6 +692,7 @@ func (s *State) ensureRunner(runnerID string, machineIndex *int, atMS int64) *Ru
 		ra, rb := s.Runners[a], s.Runners[b]
 		return cmp.Or(cmp.Compare(ra.FirstSeenMS, rb.FirstSeenMS), cmp.Compare(a, b))
 	})
+
 	return r
 }
 
@@ -644,18 +706,23 @@ func validateReportValues(outcome Outcome, timed bool, durationMS int64) error {
 	if !outcome.Valid() {
 		return errInvalid("invalid outcome %q", outcome)
 	}
+
 	if !timed {
 		if durationMS != 0 {
 			return errInvalid("untimed result must have duration_ms 0, got %d", durationMS)
 		}
+
 		return nil
 	}
+
 	if outcome != OutcomePassed {
 		return errInvalid("only passed outcomes may be timed, got %q", outcome)
 	}
+
 	if durationMS < 0 || durationMS > timing.MaxDurationMS {
 		return errInvalid("duration_ms %d is outside 0..%d", durationMS, timing.MaxDurationMS)
 	}
+
 	return nil
 }
 

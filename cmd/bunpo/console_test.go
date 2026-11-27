@@ -23,6 +23,7 @@ func TestConsole(t *testing.T) {
 				"bunpo: assignment verified: 40 tests\n",
 			},
 		},
+
 		{
 			// Only the label is colored, so the message reads on any theme.
 			name:    "terminal colors",
@@ -34,6 +35,7 @@ func TestConsole(t *testing.T) {
 				"bunpo: \x1b[1;38;5;65massignment verified:\x1b[0m 40 tests\n",
 			},
 		},
+
 		{
 			name:    "GitHub Actions",
 			console: func(w *bytes.Buffer) *console { return &console{w: w, github: true} },
@@ -96,6 +98,7 @@ func TestCommandsInGitHubActions(t *testing.T) {
 		if k == "GITHUB_ACTIONS" {
 			return "true"
 		}
+
 		return ""
 	}
 

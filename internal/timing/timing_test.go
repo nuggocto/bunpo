@@ -41,6 +41,7 @@ func TestMedian(t *testing.T) {
 func TestMedianLeavesInputUnchanged(t *testing.T) {
 	values := []int64{3, 1, 2}
 	timing.Median(values)
+
 	if !slices.Equal(values, []int64{3, 1, 2}) {
 		t.Fatalf("Median reordered its input to %v", values)
 	}
@@ -62,6 +63,7 @@ func TestDecode(t *testing.T) {
 				"b.py": {LastSeen: 2},
 			}},
 		},
+
 		{
 			name: "no tests yet",
 			data: `{"version":1,"run":0,"tests":{}}`,
@@ -75,6 +77,7 @@ func TestDecode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			// Callers add to Tests, so it must never be nil.
 			if got.Tests == nil {
 				t.Fatal("Tests is nil; want a map")

@@ -21,6 +21,7 @@ func totals(r junit.Report) map[string]total {
 	for path, f := range r.Files {
 		out[path] = total{f.MS(), f.Cases, f.Skipped, f.Failed}
 	}
+
 	return out
 }
 
@@ -58,6 +59,7 @@ func TestRead(t *testing.T) {
 			src:  junit.FileAttribute,
 			want: map[string]total{"a.py": {1, 3, 0, false}, "b.py": {1500, 1, 0, false}},
 		},
+
 		{
 			// Rounding to nanoseconds first would make this 0.5 ms, then 1 ms.
 			name: "sub-nanosecond digits still round once",
@@ -65,6 +67,7 @@ func TestRead(t *testing.T) {
 			src:  junit.FileAttribute,
 			want: map[string]total{"a.py": {0, 1, 0, false}, "b.py": {1, 1, 0, false}},
 		},
+
 		{
 			name: "failure and error fail the file, skipped does not",
 			xml: `<testsuites><testsuite>
@@ -75,6 +78,7 @@ func TestRead(t *testing.T) {
 			src:  junit.FileAttribute,
 			want: map[string]total{"f.py": {1000, 1, 0, true}, "e.py": {1000, 1, 0, true}, "s.py": {1000, 1, 1, false}},
 		},
+
 		{
 			name: "mixed skipped and passed cases, and duplicate skipped elements in one case",
 			xml: `<testsuite>
@@ -86,6 +90,7 @@ func TestRead(t *testing.T) {
 			src:  junit.FileAttribute,
 			want: map[string]total{"mix.py": {500, 2, 1, false}, "all.py": {0, 2, 2, false}},
 		},
+
 		{
 			name: "a failure or skipped element deeper inside the case does not count",
 			xml: `<testsuite><testcase file="a.py" time="1">
@@ -94,6 +99,7 @@ func TestRead(t *testing.T) {
 			src:  junit.FileAttribute,
 			want: map[string]total{"a.py": {1000, 1, 0, false}},
 		},
+
 		{
 			name: "the nearest suite's file attribute stands in for the case's",
 			xml: `<testsuites><testsuite file="outer.js"><testsuite file="inner.js">
@@ -102,24 +108,28 @@ func TestRead(t *testing.T) {
 			src:  junit.FileAttribute,
 			want: map[string]total{"inner.js": {1000, 1, 0, false}, "outer.js": {2000, 1, 0, false}},
 		},
+
 		{
 			name: "classname",
 			xml:  `<testsuite name="ignored"><testcase classname="sub/a.spec.js" file="ignored" time="1"/></testsuite>`,
 			src:  junit.Classname,
 			want: map[string]total{"sub/a.spec.js": {1000, 1, 0, false}},
 		},
+
 		{
 			name: "suite name",
 			xml:  `<testsuites><testsuite name="a.spec.js"><testcase classname="ignored" time="1"/></testsuite></testsuites>`,
 			src:  junit.SuiteName,
 			want: map[string]total{"a.spec.js": {1000, 1, 0, false}},
 		},
+
 		{
 			name: "a skipped case with no time counts as zero",
 			xml:  `<testsuite><testcase classname="a.spec.js"><skipped/></testcase></testsuite>`,
 			src:  junit.Classname,
 			want: map[string]total{"a.spec.js": {0, 1, 1, false}},
 		},
+
 		{
 			name: "an empty suite, with a declaration, comments and whitespace",
 			xml:  "<?xml version=\"1.0\"?>\n<!-- run 1 -->\n<testsuites/>\n\n",
@@ -172,6 +182,7 @@ func TestReadRejects(t *testing.T) {
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("error = %v; want %v", err, tc.wantErr)
 			}
+
 			if !strings.Contains(err.Error(), tc.wantMsg) {
 				t.Fatalf("error %q does not mention %q", err, tc.wantMsg)
 			}

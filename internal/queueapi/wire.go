@@ -69,14 +69,17 @@ func ValidateTokens(writeToken, readToken string) error {
 	if len(writeToken) < MinTokenBytes {
 		return fmt.Errorf("BUNPO_QUEUE_TOKEN must be set and at least %d bytes", MinTokenBytes)
 	}
+
 	if len(readToken) < MinTokenBytes {
 		return fmt.Errorf("BUNPO_QUEUE_READ_TOKEN must be set and at least %d bytes", MinTokenBytes)
 	}
+
 	wh := sha256.Sum256([]byte(writeToken))
 	rh := sha256.Sum256([]byte(readToken))
 	if subtle.ConstantTimeCompare(wh[:], rh[:]) == 1 {
 		return errors.New("BUNPO_QUEUE_TOKEN and BUNPO_QUEUE_READ_TOKEN must not be equal")
 	}
+
 	return nil
 }
 
@@ -97,35 +100,44 @@ func (p *predictionsWire) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		if _, err := dec.ReadToken(); err != nil {
 			return err
 		}
+
 		*p = nil
 		return nil
 	}
+
 	tok, err := dec.ReadToken()
 	if err != nil {
 		return err
 	}
+
 	if tok.Kind() != '[' {
 		return fmt.Errorf("predictions_ms must be an array, got %s", tok.Kind())
 	}
+
 	out := make([]*int64, 0)
 	for dec.PeekKind() != ']' {
 		if dec.PeekKind() == 'n' {
 			if _, err := dec.ReadToken(); err != nil {
 				return err
 			}
+
 			out = append(out, nil)
 			continue
 		}
+
 		var v int64
 		if err := json.UnmarshalDecode(dec, &v); err != nil {
 			return err
 		}
+
 		cp := v
 		out = append(out, &cp)
 	}
+
 	if _, err := dec.ReadToken(); err != nil {
 		return err
 	}
+
 	*p = out
 	return nil
 }
@@ -180,13 +192,16 @@ func (o *optionalInt) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		if _, err := dec.ReadToken(); err != nil {
 			return err
 		}
+
 		o.Value = nil
 		return nil
 	}
+
 	var v int
 	if err := json.UnmarshalDecode(dec, &v); err != nil {
 		return err
 	}
+
 	o.Value = &v
 	return nil
 }
@@ -289,6 +304,7 @@ func readStrictJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, v an
 				Message:    fmt.Sprintf("request body exceeds %d byte limit", maxBytes),
 			}
 		}
+
 		return &APIError{
 			HTTPStatus: http.StatusBadRequest,
 			Code:       queue.ErrCodeInvalidRequest,
@@ -307,6 +323,7 @@ func readStrictJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, v an
 				Message:    fmt.Sprintf("unsupported protocol version %d; server expects version %d", *hdr.Version, queue.ProtocolVersion),
 			}
 		}
+
 		return &APIError{
 			HTTPStatus: http.StatusBadRequest,
 			Code:       queue.ErrCodeInvalidRequest,
@@ -322,6 +339,7 @@ func readStrictJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, v an
 			Message:    `missing required member "version"`,
 		}
 	}
+
 	if *ver != queue.ProtocolVersion {
 		return &APIError{
 			HTTPStatus: http.StatusBadRequest,
@@ -329,6 +347,7 @@ func readStrictJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, v an
 			Message:    fmt.Sprintf("unsupported protocol version %d; server expects version %d", *ver, queue.ProtocolVersion),
 		}
 	}
+
 	return nil
 }
 
@@ -340,5 +359,6 @@ func requireField(name string, present bool) *APIError {
 			Message:    fmt.Sprintf("missing required member %q", name),
 		}
 	}
+
 	return nil
 }

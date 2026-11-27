@@ -43,6 +43,7 @@ func TestMerge(t *testing.T) {
 				"b.py": {Samples: []int64{80}, LastSeen: 1},
 			}},
 		},
+
 		{
 			name: "a failed file keeps its history and is marked seen",
 			base: timing.File{Run: 1, Tests: map[string]timing.Entry{
@@ -53,6 +54,7 @@ func TestMerge(t *testing.T) {
 				"a.py": {Samples: []int64{100, 110}, LastSeen: 2},
 			}},
 		},
+
 		{
 			name:    "a failure on the first run is seen with no samples",
 			base:    emptyFile(),
@@ -61,6 +63,7 @@ func TestMerge(t *testing.T) {
 				"a.py": {LastSeen: 1},
 			}},
 		},
+
 		{
 			name: "an unseen test keeps its last-seen run",
 			base: timing.File{Run: 4, Tests: map[string]timing.Entry{
@@ -72,6 +75,7 @@ func TestMerge(t *testing.T) {
 				"b.py": {Samples: []int64{9}, LastSeen: 5},
 			}},
 		},
+
 		{
 			name:    "an empty report from an empty shard still counts as a run",
 			base:    emptyFile(),
@@ -102,6 +106,7 @@ func TestMergeRejects(t *testing.T) {
 			wantErr: timing.ErrInvalidReport,
 			wantMsg: "a.py",
 		},
+
 		{
 			name:    "a negative duration",
 			base:    emptyFile(),
@@ -109,6 +114,7 @@ func TestMergeRejects(t *testing.T) {
 			wantErr: timing.ErrInvalidReport,
 			wantMsg: "a.py",
 		},
+
 		{
 			name:    "a duration above the limit",
 			base:    emptyFile(),
@@ -116,12 +122,14 @@ func TestMergeRejects(t *testing.T) {
 			wantErr: timing.ErrInvalidReport,
 			wantMsg: "a.py",
 		},
+
 		{
 			name:    "no reports",
 			base:    emptyFile(),
 			reports: nil,
 			wantErr: timing.ErrInvalidReport,
 		},
+
 		{
 			name:    "a non-canonical identifier in a report",
 			base:    emptyFile(),
@@ -129,6 +137,7 @@ func TestMergeRejects(t *testing.T) {
 			wantErr: timing.ErrInvalidReport,
 			wantMsg: "../a.py",
 		},
+
 		{
 			name: "an invalid base file",
 			base: timing.File{Run: 1, Tests: map[string]timing.Entry{
@@ -212,6 +221,7 @@ func TestMergeLeavesBaseUnchanged(t *testing.T) {
 		"a.py": {Samples: samples, LastSeen: 1},
 	}}
 	mustMerge(t, base, timing.Report{"a.py": {Timed: true, MS: 6}, "b.py": {Timed: true, MS: 1}})
+
 	if base.Run != 1 || len(base.Tests) != 1 || !slices.Equal(samples, []int64{1, 2, 3, 4, 5}) {
 		t.Fatalf("base changed to %+v", base)
 	}

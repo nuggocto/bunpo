@@ -27,9 +27,11 @@ func TestStopProcessGroupKillsGrandchildIgnoringSIGTERM(t *testing.T) {
 		"BUNPO_PROC_READYFILE="+readyFile,
 	)
 	configureProcessGroup(cmd)
+
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start leader: %v", err)
 	}
+
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
@@ -40,20 +42,24 @@ func TestStopProcessGroupKillsGrandchildIgnoringSIGTERM(t *testing.T) {
 		if _, err := os.Stat(readyFile); err == nil {
 			break
 		}
+
 		time.Sleep(15 * time.Millisecond)
 	}
+
 	rawPID, err := os.ReadFile(pidFile)
 	if err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-done
 		t.Fatalf("grandchild pid file not ready: %v", err)
 	}
+
 	grandchildPID, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
 	if err != nil || grandchildPID <= 0 {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-done
 		t.Fatalf("invalid grandchild pid %q: %v", rawPID, err)
 	}
+
 	t.Cleanup(func() { _ = syscall.Kill(grandchildPID, syscall.SIGKILL) })
 
 	if err := syscall.Kill(grandchildPID, 0); err != nil {
@@ -64,6 +70,7 @@ func TestStopProcessGroupKillsGrandchildIgnoringSIGTERM(t *testing.T) {
 	// still SIGKILL the process group so the SIGTERM-ignoring grandchild dies.
 	start := time.Now()
 	_ = stopProcessGroup(cmd, done, 5*time.Second)
+
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("stopProcessGroup waited %v even though leader exited immediately", elapsed)
 	}
@@ -74,8 +81,10 @@ func TestStopProcessGroupKillsGrandchildIgnoringSIGTERM(t *testing.T) {
 		if err := syscall.Kill(grandchildPID, 0); err == syscall.ESRCH {
 			return
 		}
+
 		time.Sleep(15 * time.Millisecond)
 	}
+
 	t.Fatalf("grandchild %d survived stopProcessGroup after leader exited on SIGTERM", grandchildPID)
 }
 
@@ -84,6 +93,7 @@ func TestProcGroupHelper(t *testing.T) {
 	if role == "" {
 		return
 	}
+
 	pidFile := os.Getenv("BUNPO_PROC_PIDFILE")
 	readyFile := os.Getenv("BUNPO_PROC_READYFILE")
 
@@ -108,6 +118,7 @@ func TestProcGroupHelper(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(2)
 		}
+
 		// Wait for SIGTERM, then exit immediately without touching the grandchild.
 		<-sigCh
 		os.Exit(0)

@@ -35,6 +35,7 @@ func getListBuilds(t *testing.T, baseURL, token string, hc *http.Client) queueap
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -45,16 +46,20 @@ func getListBuilds(t *testing.T, baseURL, token string, hc *http.Client) queueap
 	if err != nil {
 		t.Fatalf("read /api/v1/builds: %v", err)
 	}
+
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /api/v1/builds status = %d: %s", resp.StatusCode, raw)
 	}
+
 	var out queueapi.ListBuildsResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("decode /api/v1/builds: %v", err)
 	}
+
 	if out.Version != queue.ProtocolVersion {
 		t.Fatalf("GET /api/v1/builds version = %d; want %d", out.Version, queue.ProtocolVersion)
 	}
+
 	return out
 }
 
@@ -70,14 +75,17 @@ func newProtocolEnv(t *testing.T) protocolEnv {
 		if writeTok == "" || readTok == "" {
 			t.Fatal("BUNPO_TEST_WRITE_TOKEN and BUNPO_TEST_READ_TOKEN must be set with BUNPO_TEST_SERVER_URL")
 		}
+
 		ttl := int64(10_000)
 		if raw := os.Getenv("BUNPO_TEST_TTL_MS"); raw != "" {
 			v, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil || v <= 0 {
 				t.Fatalf("invalid BUNPO_TEST_TTL_MS %q", raw)
 			}
+
 			ttl = v
 		}
+
 		return protocolEnv{
 			baseURL:    strings.TrimRight(base, "/"),
 			writeToken: writeTok,
@@ -99,6 +107,7 @@ func newProtocolEnv(t *testing.T) protocolEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
@@ -123,16 +132,20 @@ func (e protocolEnv) rawRequest(t *testing.T, method, path, token string, body [
 	if body != nil {
 		r = bytes.NewReader(body)
 	}
+
 	req, err := http.NewRequest(method, e.baseURL+path, r)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if body != nil {
 		req.Header.Set("Content-Type", queueapi.ContentTypeJSON)
 	}
+
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -142,6 +155,7 @@ func (e protocolEnv) rawRequest(t *testing.T, method, path, token string, body [
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return resp, data
 }
 
@@ -156,23 +170,29 @@ func (e protocolEnv) client(t *testing.T, token string) *queueapi.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return c
 }
 
 func assertErrorBody(t *testing.T, resp *http.Response, data []byte, wantStatus int, wantCode string) {
 	t.Helper()
+
 	if resp.StatusCode != wantStatus {
 		t.Fatalf("status = %d; want %d (body: %s)", resp.StatusCode, wantStatus, data)
 	}
+
 	if ct := resp.Header.Get("Content-Type"); ct != queueapi.ContentTypeJSON {
 		t.Fatalf("Content-Type = %q; want %q", ct, queueapi.ContentTypeJSON)
 	}
+
 	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
 		t.Fatalf("Cache-Control = %q; want no-store", cc)
 	}
+
 	if nosniff := resp.Header.Get("X-Content-Type-Options"); nosniff != "nosniff" {
 		t.Fatalf("X-Content-Type-Options = %q; want nosniff", nosniff)
 	}
+
 	var env struct {
 		Version int64 `json:"version"`
 		Error   struct {
@@ -183,6 +203,7 @@ func assertErrorBody(t *testing.T, resp *http.Response, data []byte, wantStatus 
 	if err := json.Unmarshal(data, &env); err != nil {
 		t.Fatalf("decode error envelope %q: %v", data, err)
 	}
+
 	if env.Version != queue.ProtocolVersion || env.Error.Code != wantCode || env.Error.Message == "" {
 		t.Fatalf("error envelope = %+v; want version=1 code=%q non-empty message", env, wantCode)
 	}
@@ -221,6 +242,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantCode:   queueapi.ErrCodeMethodNotAllowed,
 				wantAllow:  http.MethodGet,
 			},
+
 			{
 				name:       "unknown route returns 404",
 				method:     http.MethodGet,
@@ -228,6 +250,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantStatus: http.StatusNotFound,
 				wantCode:   queueapi.ErrCodeNotFound,
 			},
+
 			{
 				name:       "POST builds list returns 405 with Allow GET",
 				method:     http.MethodPost,
@@ -238,6 +261,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantCode:   queueapi.ErrCodeMethodNotAllowed,
 				wantAllow:  http.MethodGet,
 			},
+
 			{
 				name:       "GET build init returns 405 with Allow POST",
 				method:     http.MethodGet,
@@ -253,6 +277,7 @@ func TestProtocolBlackBox(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				resp, data := env.rawRequest(t, tc.method, tc.path, tc.token, tc.body)
 				assertErrorBody(t, resp, data, tc.wantStatus, tc.wantCode)
+
 				if tc.wantAllow != "" && resp.Header.Get("Allow") != tc.wantAllow {
 					t.Fatalf("Allow = %q; want %q", resp.Header.Get("Allow"), tc.wantAllow)
 				}
@@ -320,6 +345,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantStatus: http.StatusNotFound,
 				wantCode:   queue.ErrCodeBuildNotFound,
 			},
+
 			{
 				name:       "build ID at 129 bytes returns 400",
 				method:     http.MethodGet,
@@ -328,6 +354,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantStatus: http.StatusBadRequest,
 				wantCode:   queue.ErrCodeInvalidRequest,
 			},
+
 			{
 				name:       "build ID containing double dot returns 400",
 				method:     http.MethodGet,
@@ -336,6 +363,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantStatus: http.StatusBadRequest,
 				wantCode:   queue.ErrCodeInvalidRequest,
 			},
+
 			{
 				name:       "unknown JSON member returns 400",
 				method:     http.MethodPost,
@@ -345,6 +373,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantStatus: http.StatusBadRequest,
 				wantCode:   queue.ErrCodeInvalidRequest,
 			},
+
 			{
 				name:       "missing required JSON member returns 400",
 				method:     http.MethodPost,
@@ -354,6 +383,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantStatus: http.StatusBadRequest,
 				wantCode:   queue.ErrCodeInvalidRequest,
 			},
+
 			{
 				name:        "unsupported version names both versions even with unknown member",
 				method:      http.MethodPost,
@@ -364,6 +394,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantCode:    queueapi.ErrCodeUnsupportedVersion,
 				wantContain: []string{"99", "1"},
 			},
+
 			{
 				name:       "invalid UTF-8 returns 400",
 				method:     http.MethodPost,
@@ -373,6 +404,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantStatus: http.StatusBadRequest,
 				wantCode:   queue.ErrCodeInvalidRequest,
 			},
+
 			{
 				name:       "over 1 MiB on non-init POST returns 413",
 				method:     http.MethodPost,
@@ -382,6 +414,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantStatus: http.StatusRequestEntityTooLarge,
 				wantCode:   queueapi.ErrCodePayloadTooLarge,
 			},
+
 			{
 				name:       "over 4 MiB on init POST returns 413",
 				method:     http.MethodPost,
@@ -391,6 +424,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				wantStatus: http.StatusRequestEntityTooLarge,
 				wantCode:   queueapi.ErrCodePayloadTooLarge,
 			},
+
 			{
 				name:       "pagination limit 1001 returns 400",
 				method:     http.MethodGet,
@@ -405,6 +439,7 @@ func TestProtocolBlackBox(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				resp, data := env.rawRequest(t, tc.method, tc.path, tc.token, tc.body)
 				assertErrorBody(t, resp, data, tc.wantStatus, tc.wantCode)
+
 				for _, sub := range tc.wantContain {
 					if !strings.Contains(string(data), sub) {
 						t.Fatalf("body %q does not contain %q", data, sub)
@@ -439,6 +474,7 @@ func TestProtocolBlackBox(t *testing.T) {
 		if err != nil || !init1.Created || init1.TestCount != 3 || init1.Verdict != queue.VerdictRunning {
 			t.Fatalf("init1 = %+v, err=%v", init1, err)
 		}
+
 		init2, err := wc.Init(ctx, queue.InitCommand{
 			BuildID:       bid,
 			RunnerID:      "runner-2",
@@ -456,10 +492,12 @@ func TestProtocolBlackBox(t *testing.T) {
 		if err != nil || l1.Status != queue.LeaseGranted || len(l1.Attempts) != 1 {
 			t.Fatalf("l1 = %+v, err=%v", l1, err)
 		}
+
 		l1Dup, err := wc.Lease(ctx, bid, queue.LeaseCommand{RunnerID: "runner-1", MachineIndex: &idx0, RequestID: "r1-q1"})
 		if err != nil || l1Dup.LeaseID != l1.LeaseID {
 			t.Fatalf("l1Dup = %+v, err=%v", l1Dup, err)
 		}
+
 		if _, err := wc.Lease(ctx, bid, queue.LeaseCommand{RunnerID: "runner-1", MachineIndex: &idx0, RequestID: "r1-q2"}); err == nil {
 			t.Fatal("expected 409 lease_held")
 		} else {
@@ -483,6 +521,7 @@ func TestProtocolBlackBox(t *testing.T) {
 		if err != nil || hbDead.Held {
 			t.Fatalf("hbDead = %+v, err=%v; want held=false", hbDead, err)
 		}
+
 		if _, err := wc.Lease(ctx, bid, queue.LeaseCommand{RunnerID: "runner-1", MachineIndex: &idx0, RequestID: "r1-q1"}); err == nil {
 			t.Fatal("expected 409 stale_request")
 		} else {
@@ -505,10 +544,12 @@ func TestProtocolBlackBox(t *testing.T) {
 			if err != nil || l.Status != queue.LeaseGranted {
 				t.Fatalf("step %d lease = %+v, err=%v", step, l, err)
 			}
+
 			a := l.Attempts[0]
 			if a.Test != wantOrder[step] {
 				t.Fatalf("step %d leased %q; want %q", step, a.Test, wantOrder[step])
 			}
+
 			rep, err := wc.Report(ctx, bid, queue.ReportCommand{
 				RunnerID: "runner-2",
 				LeaseID:  l.LeaseID,
@@ -548,18 +589,22 @@ func TestProtocolBlackBox(t *testing.T) {
 		if err != nil || st.Verdict != queue.VerdictPassed || st.Counts.Passed != 3 {
 			t.Fatalf("status = %+v, err=%v", st, err)
 		}
+
 		p1, err := rc.ListTests(ctx, bid, queue.ListTestsCommand{Limit: 2})
 		if err != nil || len(p1.Tests) != 2 || p1.NextCursor == nil {
 			t.Fatalf("page1 = %+v, err=%v", p1, err)
 		}
+
 		p2, err := rc.ListTests(ctx, bid, queue.ListTestsCommand{Cursor: *p1.NextCursor, Limit: 2})
 		if err != nil || len(p2.Tests) != 1 || p2.NextCursor != nil {
 			t.Fatalf("page2 = %+v, err=%v", p2, err)
 		}
+
 		retried, err := rc.ListTests(ctx, bid, queue.ListTestsCommand{Retried: true})
 		if err != nil || len(retried.Tests) != 1 || retried.Tests[0].TestIndex != l1.Attempts[0].TestIndex {
 			t.Fatalf("retried = %+v, err=%v", retried, err)
 		}
+
 		builds := getListBuilds(t, env.baseURL, env.readToken, env.httpClient)
 		found := false
 		for _, b := range builds.Builds {
@@ -567,6 +612,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				found = true
 			}
 		}
+
 		if !found {
 			t.Fatalf("build %q not listed in %+v", bid, builds.Builds)
 		}
@@ -584,6 +630,7 @@ func TestProtocolBlackBox(t *testing.T) {
 		if !errors.As(err, &apiErr) || apiErr.HTTPStatus != 409 || apiErr.Code != queue.ErrCodeInitConflict {
 			t.Fatalf("post-pass conflict err = %v; want 409 init_conflict", err)
 		}
+
 		stAfter, err := rc.Status(ctx, bid)
 		if err != nil || stAfter.Verdict != queue.VerdictUnresolved || len(stAfter.Conflicts) != 1 {
 			t.Fatalf("status after conflict = %+v, err=%v", stAfter, err)
@@ -603,6 +650,7 @@ func TestProtocolBlackBox(t *testing.T) {
 			v := int64((i%7 + 1) * 100)
 			preds[i] = &v
 		}
+
 		cfg := queue.Config{
 			Machines:       numRunners,
 			LeaseTTLMS:     max(env.ttlMS, 2000),
@@ -617,6 +665,7 @@ func TestProtocolBlackBox(t *testing.T) {
 
 		for r := range numRunners {
 			wg.Add(1)
+
 			go func(idx int) {
 				defer wg.Done()
 				runnerID := fmt.Sprintf("conc-runner-%02d", idx)
@@ -643,6 +692,7 @@ func TestProtocolBlackBox(t *testing.T) {
 						errCh <- fmt.Errorf("%s lease: %w", runnerID, err)
 						return
 					}
+
 					switch l.Status {
 					case queue.LeaseDone:
 						return
@@ -657,6 +707,7 @@ func TestProtocolBlackBox(t *testing.T) {
 							errCh <- fmt.Errorf("%s heartbeat: %w", runnerID, err)
 							return
 						}
+
 						results := make([]queue.ReportResult, len(l.Attempts))
 						for i, a := range l.Attempts {
 							results[i] = queue.ReportResult{
@@ -668,6 +719,7 @@ func TestProtocolBlackBox(t *testing.T) {
 								DurationMS: 25,
 							}
 						}
+
 						rep, err := wc.Report(ctx, bid, queue.ReportCommand{
 							RunnerID: runnerID,
 							LeaseID:  l.LeaseID,
@@ -677,6 +729,7 @@ func TestProtocolBlackBox(t *testing.T) {
 							errCh <- fmt.Errorf("%s report: %w", runnerID, err)
 							return
 						}
+
 						for _, d := range rep.Results {
 							if d.Disposition == queue.DispositionAccepted {
 								accepted[d.TestIndex].Add(1)
@@ -686,8 +739,10 @@ func TestProtocolBlackBox(t *testing.T) {
 				}
 			}(r)
 		}
+
 		wg.Wait()
 		close(errCh)
+
 		for err := range errCh {
 			t.Fatal(err)
 		}
@@ -697,6 +752,7 @@ func TestProtocolBlackBox(t *testing.T) {
 				t.Fatalf("test %d accepted %d times; want 1", i, got)
 			}
 		}
+
 		st, err := rc.Status(ctx, bid)
 		if err != nil || st.Verdict != queue.VerdictPassed || st.Counts.Passed != numTests {
 			t.Fatalf("final status = %+v, err=%v", st, err)

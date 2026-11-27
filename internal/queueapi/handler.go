@@ -98,21 +98,27 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if err := ValidateTokens(cfg.WriteToken, cfg.ReadToken); err != nil {
 		return nil, err
 	}
+
 	if cfg.Clock == nil {
 		cfg.Clock = func() int64 { return time.Now().UnixMilli() }
 	}
+
 	if cfg.MaxBuilds <= 0 {
 		cfg.MaxBuilds = DefaultMaxBuilds
 	}
+
 	if cfg.MaxRunning <= 0 {
 		cfg.MaxRunning = DefaultMaxRunning
 	}
+
 	if cfg.RetentionMS <= 0 {
 		cfg.RetentionMS = DefaultRetentionMS
 	}
+
 	if cfg.Log == nil {
 		cfg.Log = NopEventLog{}
 	}
+
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -133,9 +139,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	for _, name := range cfg.InitialDamaged {
 		h.damaged[name] = true
 	}
+
 	if len(cfg.InitialBuilds) > 0 {
 		h.loadInitialBuilds(cfg.InitialBuilds, h.clock())
 	}
+
 	return h, nil
 }
 
@@ -147,6 +155,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
+
 		writeJSON(w, http.StatusOK, HealthResponse{OK: true})
 		return
 	}
@@ -170,6 +179,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
+
 		h.handleListBuilds(w, r)
 		return
 	}
@@ -191,9 +201,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
+
 		if !requireBuildID(w, buildID) {
 			return
 		}
+
 		h.handleStatus(w, r, buildID)
 		return
 	}
@@ -204,9 +216,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
+
 		if !requireBuildID(w, buildID) {
 			return
 		}
+
 		h.handleListTests(w, r, buildID)
 		return
 
@@ -215,17 +229,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeMethodNotAllowed(w, http.MethodPost)
 			return
 		}
+
 		if role != roleWrite {
 			writeAPIError(w, &APIError{HTTPStatus: http.StatusForbidden, Code: ErrCodeForbidden, Message: "write token required"})
 			return
 		}
+
 		if err := checkJSONContentType(r); err != nil {
 			writeAPIError(w, err)
 			return
 		}
+
 		if !requireBuildID(w, buildID) {
 			return
 		}
+
 		switch action {
 		case "init":
 			h.handleInit(w, r, buildID)
@@ -236,6 +254,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "report":
 			h.handleReport(w, r, buildID)
 		}
+
 		return
 
 	default:
@@ -253,6 +272,7 @@ func requireBuildID(w http.ResponseWriter, buildID string) bool {
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusBadRequest, Code: queue.ErrCodeInvalidRequest, Message: "invalid build ID"})
 		return false
 	}
+
 	return true
 }
 
@@ -262,15 +282,19 @@ func (h *Handler) authenticate(r *http.Request) authRole {
 	if !ok || token == "" {
 		return roleNone
 	}
+
 	digest := sha256.Sum256([]byte(token))
 	isWrite := subtle.ConstantTimeCompare(digest[:], h.writeDigest[:]) == 1
 	isRead := subtle.ConstantTimeCompare(digest[:], h.readDigest[:]) == 1
+
 	if isWrite {
 		return roleWrite
 	}
+
 	if isRead {
 		return roleRead
 	}
+
 	return roleNone
 }
 
@@ -279,6 +303,7 @@ func checkJSONContentType(r *http.Request) *APIError {
 	if ct == "" {
 		return nil
 	}
+
 	mediaType, _, err := mime.ParseMediaType(ct)
 	if err != nil || mediaType != "application/json" {
 		return &APIError{
@@ -287,6 +312,7 @@ func checkJSONContentType(r *http.Request) *APIError {
 			Message:    "Content-Type must be application/json",
 		}
 	}
+
 	return nil
 }
 
@@ -296,6 +322,7 @@ func (h *Handler) handleInit(w http.ResponseWriter, r *http.Request, buildID str
 		writeAPIError(w, apiErr)
 		return
 	}
+
 	if apiErr := firstErr(
 		requireField("runner_id", raw.RunnerID != nil),
 		requireField("machine_index", raw.MachineIndex.Present),
@@ -306,6 +333,7 @@ func (h *Handler) handleInit(w http.ResponseWriter, r *http.Request, buildID str
 		writeAPIError(w, apiErr)
 		return
 	}
+
 	if apiErr := firstErr(
 		requireField("config.machines", raw.Config.Machines != nil),
 		requireField("config.lease_ttl_ms", raw.Config.LeaseTTLMS != nil),
@@ -343,6 +371,7 @@ func (h *Handler) handleInit(w http.ResponseWriter, r *http.Request, buildID str
 		writeAPIError(w, apiErr)
 		return
 	}
+
 	if entry.broken {
 		entry.mu.Unlock()
 		writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "build state is inconsistent"})
@@ -357,22 +386,27 @@ func (h *Handler) handleInit(w http.ResponseWriter, r *http.Request, buildID str
 			entry.failedCreate = true
 			entry.mu.Unlock()
 			h.mu.Lock()
+
 			if h.builds[buildID] == entry {
 				delete(h.builds, buildID)
 			}
+
 			h.mu.Unlock()
 		} else {
 			entry.mu.Unlock()
 		}
+
 		writeAPIError(w, persistErr)
 		return
 	}
+
 	entry.mu.Unlock()
 
 	if err != nil {
 		writeQueueError(w, err)
 		return
 	}
+
 	writeJSON(w, http.StatusOK, InitResponse{Version: queue.ProtocolVersion, InitResponse: resp})
 }
 
@@ -382,6 +416,7 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request, buildID st
 		writeAPIError(w, apiErr)
 		return
 	}
+
 	if apiErr := firstErr(
 		requireField("runner_id", raw.RunnerID != nil),
 		requireField("machine_index", raw.MachineIndex.Present),
@@ -409,16 +444,19 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request, buildID st
 	if persistErr == nil && err == nil && resp.Status == queue.LeaseGranted {
 		entry.state.ExtendLease(resp.LeaseID, resp.DeadlineMS)
 	}
+
 	entry.mu.Unlock()
 
 	if persistErr != nil {
 		writeAPIError(w, persistErr)
 		return
 	}
+
 	if err != nil {
 		writeQueueError(w, err)
 		return
 	}
+
 	writeJSON(w, http.StatusOK, LeaseResponse{Version: queue.ProtocolVersion, LeaseResponse: resp})
 }
 
@@ -428,6 +466,7 @@ func (h *Handler) handleHeartbeat(w http.ResponseWriter, r *http.Request, buildI
 		writeAPIError(w, apiErr)
 		return
 	}
+
 	if apiErr := firstErr(
 		requireField("runner_id", raw.RunnerID != nil),
 		requireField("lease_id", raw.LeaseID != nil),
@@ -453,16 +492,19 @@ func (h *Handler) handleHeartbeat(w http.ResponseWriter, r *http.Request, buildI
 	if persistErr == nil && err == nil && resp.Held {
 		entry.state.ExtendLease(cmd.LeaseID, resp.DeadlineMS)
 	}
+
 	entry.mu.Unlock()
 
 	if persistErr != nil {
 		writeAPIError(w, persistErr)
 		return
 	}
+
 	if err != nil {
 		writeQueueError(w, err)
 		return
 	}
+
 	writeJSON(w, http.StatusOK, HeartbeatResponse{Version: queue.ProtocolVersion, HeartbeatResponse: resp})
 }
 
@@ -472,6 +514,7 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request, buildID s
 		writeAPIError(w, apiErr)
 		return
 	}
+
 	if apiErr := firstErr(
 		requireField("runner_id", raw.RunnerID != nil),
 		requireField("lease_id", raw.LeaseID != nil),
@@ -494,6 +537,7 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request, buildID s
 			writeAPIError(w, apiErr)
 			return
 		}
+
 		results[i] = queue.ReportResult{
 			AttemptID:  *rr.AttemptID,
 			TestIndex:  *rr.TestIndex,
@@ -525,10 +569,12 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request, buildID s
 		writeAPIError(w, persistErr)
 		return
 	}
+
 	if err != nil {
 		writeQueueError(w, err)
 		return
 	}
+
 	writeJSON(w, http.StatusOK, ReportResponse{Version: queue.ProtocolVersion, ReportResponse: resp})
 }
 
@@ -547,10 +593,12 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request, buildID s
 		writeAPIError(w, persistErr)
 		return
 	}
+
 	if err != nil {
 		writeQueueError(w, err)
 		return
 	}
+
 	writeJSON(w, http.StatusOK, StatusResponse{Version: queue.ProtocolVersion, StatusResponse: resp})
 }
 
@@ -561,31 +609,48 @@ func (h *Handler) handleListTests(w http.ResponseWriter, r *http.Request, buildI
 	if rawCursor := q.Get("cursor"); rawCursor != "" {
 		c, err := strconv.Atoi(rawCursor)
 		if err != nil || c < 0 {
-			writeAPIError(w, &APIError{HTTPStatus: http.StatusBadRequest, Code: queue.ErrCodeInvalidRequest, Message: "cursor must be a non-negative integer"})
+			writeAPIError(w, &APIError{
+				HTTPStatus: http.StatusBadRequest,
+				Code:       queue.ErrCodeInvalidRequest,
+				Message:    "cursor must be a non-negative integer",
+			})
 			return
 		}
+
 		cmd.Cursor = c
 	}
+
 	if rawLimit := q.Get("limit"); rawLimit != "" {
 		l, err := strconv.Atoi(rawLimit)
 		if err != nil || l < 1 || l > queue.MaxTestsPageLimit {
-			writeAPIError(w, &APIError{HTTPStatus: http.StatusBadRequest, Code: queue.ErrCodeInvalidRequest, Message: fmt.Sprintf("limit must be 1..%d", queue.MaxTestsPageLimit)})
+			writeAPIError(w, &APIError{
+				HTTPStatus: http.StatusBadRequest,
+				Code:       queue.ErrCodeInvalidRequest,
+				Message:    fmt.Sprintf("limit must be 1..%d", queue.MaxTestsPageLimit),
+			})
 			return
 		}
+
 		cmd.Limit = l
 	}
+
 	if rawState := q.Get("state"); rawState != "" {
 		for part := range strings.SplitSeq(rawState, ",") {
 			cmd.States = append(cmd.States, queue.TestStatus(part))
 		}
 	}
+
 	if rawRetried := q.Get("retried"); rawRetried != "" {
 		switch rawRetried {
 		case "true":
 			cmd.Retried = true
 		case "false":
 		default:
-			writeAPIError(w, &APIError{HTTPStatus: http.StatusBadRequest, Code: queue.ErrCodeInvalidRequest, Message: "retried must be true or false"})
+			writeAPIError(w, &APIError{
+				HTTPStatus: http.StatusBadRequest,
+				Code:       queue.ErrCodeInvalidRequest,
+				Message:    "retried must be true or false",
+			})
 			return
 		}
 	}
@@ -604,10 +669,12 @@ func (h *Handler) handleListTests(w http.ResponseWriter, r *http.Request, buildI
 		writeAPIError(w, persistErr)
 		return
 	}
+
 	if err != nil {
 		writeQueueError(w, err)
 		return
 	}
+
 	writeJSON(w, http.StatusOK, ListTestsResponse{Version: queue.ProtocolVersion, ListTestsResponse: resp})
 }
 
@@ -623,7 +690,9 @@ func (h *Handler) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 	for id, e := range h.builds {
 		entries = append(entries, namedEntry{id: id, entry: e})
 	}
+
 	h.mu.Unlock()
+
 	// Sort by build ID before touching EventLog so deadline finalization order
 	// is independent of Go's randomized map iteration.
 	slices.SortFunc(entries, func(a, b namedEntry) int {
@@ -634,30 +703,37 @@ func (h *Handler) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 	for _, ne := range entries {
 		e := ne.entry
 		e.mu.Lock()
+
 		if e.evicted || !e.state.Initialized || e.broken {
 			e.mu.Unlock()
 			continue
 		}
+
 		if e.state.Verdict() == queue.VerdictRunning && now >= e.state.DeadlineMS {
 			events, _, err := queue.DecideStatus(e.state, now)
 			if err == nil {
 				_ = h.persistAndApply(r.Context(), e.state.BuildID, e, events)
 			}
+
 			if e.broken {
 				e.mu.Unlock()
 				continue
 			}
 		}
+
 		v := e.state.Verdict()
+
 		if isExpired(e.state, now, h.retentionMS) {
 			h.evictLocked(r.Context(), ne.id, e, nil)
 			continue
 		}
+
 		var fin *int64
 		if e.state.FinishedAtMS > 0 {
 			t := e.state.FinishedAtMS
 			fin = &t
 		}
+
 		summaries = append(summaries, BuildSummary{
 			BuildID:         e.state.BuildID,
 			Verdict:         v,
@@ -674,6 +750,7 @@ func (h *Handler) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 	slices.SortFunc(summaries, func(a, b BuildSummary) int {
 		return cmp.Or(cmp.Compare(b.CreatedAtMS, a.CreatedAtMS), cmp.Compare(a.BuildID, b.BuildID))
 	})
+
 	if len(summaries) > h.maxBuilds {
 		summaries = summaries[:h.maxBuilds]
 	}
@@ -688,6 +765,7 @@ func (h *Handler) persistAndApply(ctx context.Context, buildID string, entry *bu
 	if len(events) == 0 {
 		return nil
 	}
+
 	// Detach from request cancellation so a client disconnect mid-write cannot
 	// leave an in-progress journal append half-written.
 	persistCtx := context.WithoutCancel(ctx)
@@ -700,6 +778,7 @@ func (h *Handler) persistAndApply(ctx context.Context, buildID string, entry *bu
 				Message:    "failed to persist queue events",
 			}
 		}
+
 		entry.broken = true
 		h.logger.Error("event append failed with uncertain write state; marking build broken", "build_id", buildID, "events", len(events), "err", err)
 		return &APIError{
@@ -708,6 +787,7 @@ func (h *Handler) persistAndApply(ctx context.Context, buildID string, entry *bu
 			Message:    "build state is inconsistent after storage error",
 		}
 	}
+
 	for _, ev := range events {
 		if err := entry.state.Apply(ev); err != nil {
 			entry.broken = true
@@ -719,6 +799,7 @@ func (h *Handler) persistAndApply(ctx context.Context, buildID string, entry *bu
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -747,6 +828,7 @@ func (h *Handler) evictLocked(ctx context.Context, buildID string, entry *buildE
 		entry.mu.Unlock()
 		return evictDone
 	}
+
 	if expected != nil {
 		cur := entryToEvictItem(buildID, entry, false)
 		if cur.kind != expected.kind || cur.lastActivityMS != expected.lastActivityMS {
@@ -754,6 +836,7 @@ func (h *Handler) evictLocked(ctx context.Context, buildID string, entry *buildE
 			return evictSkipped
 		}
 	}
+
 	broken := entry.broken
 	if !broken {
 		if err := h.log.Remove(context.WithoutCancel(ctx), buildID); err != nil {
@@ -762,16 +845,20 @@ func (h *Handler) evictLocked(ctx context.Context, buildID string, entry *buildE
 			return evictRemoveFailed
 		}
 	}
+
 	entry.evicted = true
 	entry.mu.Unlock()
 
 	h.mu.Lock()
+
 	if h.builds[buildID] == entry {
 		delete(h.builds, buildID)
 	}
+
 	if broken {
 		h.damaged[BuildFileName(buildID)] = true
 	}
+
 	h.mu.Unlock()
 	return evictDone
 }
@@ -810,9 +897,11 @@ func planEviction(items []evictItem, now, retentionMS int64, maxRunning, maxBuil
 		if it.kind == kindBusy || it.kind == kindRunning {
 			running++
 		}
+
 		if it.skipEvict {
 			continue
 		}
+
 		switch it.kind {
 		case kindBroken:
 			broken = append(broken, it)
@@ -832,13 +921,16 @@ func planEviction(items []evictItem, now, retentionMS int64, maxRunning, maxBuil
 	cmpID := func(a, b evictItem) int { return cmp.Compare(a.id, b.id) }
 	slices.SortFunc(expired, cmpID)
 	slices.SortFunc(broken, cmpID)
+
 	slices.SortFunc(finished, func(a, b evictItem) int {
 		return cmp.Or(cmp.Compare(a.finishedAtMS, b.finishedAtMS), cmp.Compare(a.createdAtMS, b.createdAtMS), cmp.Compare(a.id, b.id))
 	})
+
 	slices.SortFunc(idleRunning, func(a, b evictItem) int {
 		if slots == 0 {
 			return cmp.Or(cmp.Compare(a.createdAtMS, b.createdAtMS), cmp.Compare(a.id, b.id))
 		}
+
 		return cmp.Or(cmp.Compare(a.lastActivityMS, b.lastActivityMS), cmp.Compare(a.id, b.id))
 	})
 
@@ -846,12 +938,14 @@ func planEviction(items []evictItem, now, retentionMS int64, maxRunning, maxBuil
 	for _, it := range expired {
 		toEvict = append(toEvict, it.id)
 	}
+
 	evictedIdle := 0
 	for running+slots > maxRunning && evictedIdle < len(idleRunning) {
 		toEvict = append(toEvict, idleRunning[evictedIdle].id)
 		running--
 		evictedIdle++
 	}
+
 	if running+slots > maxRunning {
 		return toEvict, &APIError{
 			HTTPStatus: http.StatusServiceUnavailable,
@@ -867,6 +961,7 @@ func planEviction(items []evictItem, now, retentionMS int64, maxRunning, maxBuil
 			rem--
 		}
 	}
+
 	if rem+slots > maxBuilds {
 		return toEvict, &APIError{
 			HTTPStatus: http.StatusServiceUnavailable,
@@ -874,6 +969,7 @@ func planEviction(items []evictItem, now, retentionMS int64, maxRunning, maxBuil
 			Message:    fmt.Sprintf("server at build capacity (%d)", maxBuilds),
 		}
 	}
+
 	return toEvict, nil
 }
 
@@ -887,9 +983,11 @@ func (h *Handler) loadInitialBuilds(states []*queue.State, now int64) {
 		if !st.Initialized || st.BuildID == "" {
 			continue
 		}
+
 		if st.Verdict() == queue.VerdictRunning {
 			st.ResetActiveLeaseDeadlines(now)
 		}
+
 		e := &buildEntry{state: st, lastActivityMS: now}
 		h.builds[st.BuildID] = e
 		if st.Verdict() == queue.VerdictRunning && now >= st.DeadlineMS {
@@ -897,6 +995,7 @@ func (h *Handler) loadInitialBuilds(states []*queue.State, now int64) {
 				_ = h.persistAndApply(ctx, st.BuildID, e, evs)
 			}
 		}
+
 		items = append(items, entryToEvictItem(st.BuildID, e, false))
 	}
 
@@ -925,6 +1024,7 @@ func entryToEvictItem(id string, e *buildEntry, skip bool) evictItem {
 		it.createdAtMS = e.state.CreatedAtMS
 		it.finishedAtMS = e.state.FinishedAtMS
 	}
+
 	return it
 }
 
@@ -938,30 +1038,37 @@ func (h *Handler) lookupBuildLocked(ctx context.Context, buildID string) (*build
 		damaged := h.damaged[fileName]
 		entry := h.builds[buildID]
 		h.mu.Unlock()
+
 		if damaged {
 			return nil, errBuildBroken
 		}
+
 		if entry == nil {
 			return nil, notFound
 		}
 
 		entry.mu.Lock()
+
 		if entry.failedCreate || entry.evicted {
 			entry.mu.Unlock()
 			continue
 		}
+
 		if entry.broken {
 			entry.mu.Unlock()
 			return nil, errBuildBroken
 		}
+
 		if !entry.state.Initialized {
 			entry.mu.Unlock()
 			return nil, notFound
 		}
+
 		if isExpired(entry.state, now, h.retentionMS) {
 			h.evictLocked(ctx, buildID, entry, nil)
 			return nil, notFound
 		}
+
 		return entry, nil
 	}
 }
@@ -981,17 +1088,21 @@ func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*
 	for {
 		now := h.clock()
 		h.mu.Lock()
+
 		if h.damaged[fileName] {
 			h.mu.Unlock()
 			return nil, false, errBuildBroken
 		}
+
 		if existing, ok := h.builds[buildID]; ok {
 			h.mu.Unlock()
 			existing.mu.Lock()
+
 			if existing.failedCreate || existing.evicted {
 				existing.mu.Unlock()
 				continue
 			}
+
 			if !existing.broken && isExpired(existing.state, now, h.retentionMS) {
 				if h.evictLocked(ctx, buildID, existing, nil) != evictDone {
 					return nil, false, &APIError{
@@ -1000,8 +1111,10 @@ func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*
 						Message:    "failed to remove expired build log",
 					}
 				}
+
 				continue
 			}
+
 			return existing, false, nil
 		}
 
@@ -1015,6 +1128,7 @@ func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*
 				itemByID[id] = it
 				continue
 			}
+
 			if !e.broken && e.state.Initialized && e.state.Verdict() == queue.VerdictRunning && now >= e.state.DeadlineMS {
 				pastDeadline = append(pastDeadline, cand{id: id, entry: e})
 				it := evictItem{id: id, kind: kindBusy}
@@ -1025,6 +1139,7 @@ func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*
 				items = append(items, it)
 				itemByID[id] = it
 			}
+
 			e.mu.Unlock()
 		}
 
@@ -1032,15 +1147,20 @@ func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*
 			finalizedDeadline = true
 			h.mu.Unlock()
 			slices.SortFunc(pastDeadline, func(a, b cand) int { return cmp.Compare(a.id, b.id) })
+
 			for _, dc := range pastDeadline {
 				dc.entry.mu.Lock()
-				if !dc.entry.evicted && !dc.entry.broken && dc.entry.state.Initialized && dc.entry.state.Verdict() == queue.VerdictRunning && now >= dc.entry.state.DeadlineMS {
+
+				if !dc.entry.evicted && !dc.entry.broken && dc.entry.state.Initialized &&
+					dc.entry.state.Verdict() == queue.VerdictRunning && now >= dc.entry.state.DeadlineMS {
 					if events, _, err := queue.DecideStatus(dc.entry.state, now); err == nil {
 						_ = h.persistAndApply(ctx, dc.id, dc.entry, events)
 					}
 				}
+
 				dc.entry.mu.Unlock()
 			}
+
 			continue
 		}
 
@@ -1049,20 +1169,25 @@ func (h *Handler) getOrCreateBuildLocked(ctx context.Context, buildID string) (*
 			h.mu.Unlock()
 			return nil, false, refuse
 		}
+
 		if len(toEvict) > 0 {
 			cands := make([]cand, len(toEvict))
 			for i, id := range toEvict {
 				cands[i] = cand{id: id, entry: h.builds[id], planned: itemByID[id]}
 			}
+
 			h.mu.Unlock()
+
 			for _, c := range cands {
 				if c.entry != nil {
 					c.entry.mu.Lock()
+
 					if h.evictLocked(ctx, c.id, c.entry, &c.planned) == evictRemoveFailed {
 						failedEvict[c.id] = true
 					}
 				}
 			}
+
 			continue
 		}
 
@@ -1084,6 +1209,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 		_, _ = w.Write([]byte(`{"version":1,"error":{"code":"internal_error","message":"failed to encode response"}}`))
 		return
 	}
+
 	w.Header().Set("Content-Type", ContentTypeJSON)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -1104,6 +1230,7 @@ func writeQueueError(w http.ResponseWriter, err error) {
 		writeAPIError(w, &APIError{HTTPStatus: qe.HTTPStatus, Code: qe.Code, Message: qe.Message})
 		return
 	}
+
 	writeAPIError(w, &APIError{HTTPStatus: http.StatusInternalServerError, Code: ErrCodeInternalError, Message: "internal error"})
 }
 
@@ -1113,5 +1240,6 @@ func firstErr(errs ...*APIError) *APIError {
 			return e
 		}
 	}
+
 	return nil
 }

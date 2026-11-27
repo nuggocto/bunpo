@@ -25,6 +25,7 @@ func TestExportHostileCommands(t *testing.T) {
 	if dir == "" {
 		t.Skip("BUNPO_SIM_HOSTILE_DIR not set")
 	}
+
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +38,7 @@ func TestExportHostileCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal hostile seed %d: %v", seed, err)
 		}
+
 		if err := os.WriteFile(filepath.Join(dir, tr.Name+".json"), data, 0o644); err != nil {
 			t.Fatalf("write hostile seed %d: %v", seed, err)
 		}
@@ -55,6 +57,7 @@ func (h *hostileRunner) step(nowMS int64, cmd any, events []queue.Event, resp an
 	if mErr != nil {
 		h.t.Fatalf("marshal command: %v", mErr)
 	}
+
 	status := 200
 	errCode := ""
 	var respJSON jsontext.Value
@@ -63,6 +66,7 @@ func (h *hostileRunner) step(nowMS int64, cmd any, events []queue.Event, resp an
 		if !errors.As(err, &qe) {
 			h.t.Fatalf("non-queue error: %v", err)
 		}
+
 		status = qe.HTTPStatus
 		errCode = qe.Code
 	} else {
@@ -71,15 +75,18 @@ func (h *hostileRunner) step(nowMS int64, cmd any, events []queue.Event, resp an
 			h.t.Fatalf("marshal response: %v", mErr)
 		}
 	}
+
 	evs := events
 	if evs == nil {
 		evs = []queue.Event{}
 	}
+
 	for _, ev := range evs {
 		if aErr := h.st.Apply(ev); aErr != nil {
 			h.t.Fatalf("apply %s: %v", ev.Type, aErr)
 		}
 	}
+
 	if status == 200 {
 		switch r := resp.(type) {
 		case queue.HeartbeatResponse:
@@ -97,6 +104,7 @@ func (h *hostileRunner) step(nowMS int64, cmd any, events []queue.Event, resp an
 			}
 		}
 	}
+
 	h.steps = append(h.steps, exportedStep{
 		Kind:            "command",
 		NowMS:           nowMS,
@@ -165,9 +173,10 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 	lim := queue.DefaultLimits()
 	lim.MinLeaseTTLMS = 1000
 	if variant%5 == 4 {
-		// Small runner cap so we deterministically hit 429 too_many_runners.
+		// A small runner cap, so 429 too_many_runners is always reached.
 		lim.MaxRunners = 3
 	}
+
 	if variant%5 == 3 {
 		lim.MaxTests = 35
 	}
@@ -178,6 +187,7 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		// Exact lower-bound timestamp now_ms == 0.
 		now = 0
 	}
+
 	bid := fmt.Sprintf("hostile-%d", seed)
 
 	// 1. Pre-init reads and writes must all answer 404 build_not_found (or 400 on bad args).
@@ -207,6 +217,7 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		mutate(&c)
 		return c
 	}
+
 	badInits := []struct {
 		at  int64
 		cmd queue.InitCommand
@@ -224,29 +235,36 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		{now, mkInit(func(c *queue.InitCommand) { c.Config.Machines = 0 })},
 		{now, mkInit(func(c *queue.InitCommand) { c.Config.Machines = queue.MaxMachines + 1 })},
 		{now, mkInit(func(c *queue.InitCommand) { c.Config.LeaseTTLMS = lim.MinLeaseTTLMS - 1 })},
+
 		{now, mkInit(func(c *queue.InitCommand) {
 			c.Config.LeaseTTLMS = queue.MaxLeaseTTLMS + 1
 			c.Config.BuildTimeoutMS = queue.MaxLeaseTTLMS + 1
 		})},
+
 		{now, mkInit(func(c *queue.InitCommand) { c.Config.BuildTimeoutMS = c.Config.LeaseTTLMS - 1 })},
 		{now, mkInit(func(c *queue.InitCommand) { c.Config.BuildTimeoutMS = queue.MaxBuildTimeoutMS + 1 })},
 		{now, mkInit(func(c *queue.InitCommand) { c.Config.MaxAttempts = 0 })},
 		{now, mkInit(func(c *queue.InitCommand) { c.Config.MaxAttempts = queue.MaxAttemptsLimit + 1 })},
 		{now, mkInit(func(c *queue.InitCommand) { c.Config.MaxBatch = 0 })},
 		{now, mkInit(func(c *queue.InitCommand) { c.Config.MaxBatch = queue.MaxBatchLimit + 1 })},
+
 		{now, mkInit(func(c *queue.InitCommand) {
 			c.Tests = []string{}
 			c.PredictionsMS = []*int64{}
 		})},
+
 		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{"a.py", "b.py"} })},
+
 		{now, mkInit(func(c *queue.InitCommand) {
 			c.Tests = []string{"b.py", "a.py"}
 			c.PredictionsMS = []*int64{nil, nil}
 		})},
+
 		{now, mkInit(func(c *queue.InitCommand) {
 			c.Tests = []string{"a.py", "a.py"}
 			c.PredictionsMS = []*int64{nil, nil}
 		})},
+
 		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{"./a.py"} })},
 		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{"a/../b.py"} })},
 		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{"/abs.py"} })},
@@ -257,12 +275,14 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		{now, mkInit(func(c *queue.InitCommand) { c.Tests = []string{strings.Repeat("😀", 1024) + "a"} })},
 		{now, mkInit(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{int64Ptr(-1)} })},
 		{now, mkInit(func(c *queue.InitCommand) { c.PredictionsMS = []*int64{int64Ptr(timing.MaxDurationMS + 1)} })},
+
 		// UTF-8 vs UTF-16 ordering trap: U+FF01 (0xEF 0xBC 0x81) sorts before U+1F600 (0xF0 0x9F 0x98 0x80).
 		{now, mkInit(func(c *queue.InitCommand) {
 			c.Tests = []string{"t/\U0001F600.py", "t/\uFF01.py"}
 			c.PredictionsMS = []*int64{nil, nil}
 		})},
 	}
+
 	for _, b := range badInits {
 		h.initCmd(b.at, b.cmd)
 	}
@@ -271,10 +291,11 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 	// non-ASCII + supplementary Unicode paths in exact UTF-8 byte order, and exact 4096-byte test path).
 	numTests := 24 + rng.IntN(6)
 	if variant%5 == 2 {
-		numTests = 55 // exercises MaxStatusProblems = 50 cap!
+		numTests = 55 // exercises the MaxStatusProblems = 50 cap
 	} else if variant%5 == 3 {
 		numTests = lim.MaxTests
 	}
+
 	tests := make([]string, 0, numTests)
 	tests = append(tests,
 		"t/日本語/alpha.py",
@@ -287,6 +308,7 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 	for len(tests) < numTests {
 		tests = append(tests, fmt.Sprintf("tests/file_%03d.py", len(tests)))
 	}
+
 	slices.Sort(tests)
 	preds := make([]*int64, len(tests))
 	for i := range preds {
@@ -295,24 +317,35 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 			if i == 0 && variant%5 == 0 {
 				v = timing.MaxDurationMS // exact upper bound
 			}
+
 			preds[i] = &v
 		}
 	}
 
 	initCfg := goodCfg
 	if variant%5 == 1 {
-		// Finish cleanly with skipped tests (no conflicts, no failures) to cover counts.skipped++ and verdict passed!
+		// Finish cleanly with skipped tests (no conflicts, no failures) to cover counts.skipped++ and a passed verdict.
 		initCfg.MaxBatch = 6
 		initCfg.MaxAttempts = 1
 	}
+
 	if variant%5 == 3 {
 		// Exact maxTests boundary rejected before valid init.
 		overTests := make([]string, lim.MaxTests+1)
 		overPreds := make([]*int64, lim.MaxTests+1)
+
 		for i := range overTests {
 			overTests[i] = fmt.Sprintf("z/%04d.py", i)
 		}
-		h.initCmd(now, queue.InitCommand{BuildID: bid, RunnerID: "r0", MachineIndex: intPtr(0), Config: initCfg, Tests: overTests, PredictionsMS: overPreds})
+
+		h.initCmd(now, queue.InitCommand{
+			BuildID:       bid,
+			RunnerID:      "r0",
+			MachineIndex:  intPtr(0),
+			Config:        initCfg,
+			Tests:         overTests,
+			PredictionsMS: overPreds,
+		})
 	}
 
 	h.initCmd(now, queue.InitCommand{
@@ -363,6 +396,7 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		h.reportCmd(now+5, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: nil})
 
 		a0 := l1.Attempts[0]
+
 		makeBase := func() []queue.ReportResult {
 			out := make([]queue.ReportResult, len(l1.Attempts))
 			for i, a := range l1.Attempts {
@@ -375,42 +409,54 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 					DurationMS: 100 + int64(i),
 				}
 			}
+
 			return out
 		}
+
 		// Out-of-range test_index, out-of-range generation, mismatched attempt_id, invalid outcome/timed/duration, duplicate test_index, wrong test_index.
 		bad1 := makeBase()
 		bad1[0].TestIndex = -1
 		h.reportCmd(now+6, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: bad1})
+
 		bad2 := makeBase()
 		bad2[0].TestIndex = len(tests)
 		h.reportCmd(now+6, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: bad2})
+
 		bad3 := makeBase()
 		bad3[0].Generation = 0
 		h.reportCmd(now+6, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: bad3})
+
 		bad4 := makeBase()
 		bad4[0].Generation = a0.Generation + 1
 		h.reportCmd(now+6, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: bad4})
+
 		bad5 := makeBase()
 		bad5[0].AttemptID = "999.9"
 		h.reportCmd(now+6, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: bad5})
+
 		bad6 := makeBase()
 		bad6[0].Outcome = "bogus"
 		h.reportCmd(now+6, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: bad6})
+
 		bad7 := makeBase()
 		bad7[0].Timed = false
 		bad7[0].DurationMS = 5
 		h.reportCmd(now+6, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: bad7})
+
 		bad8 := makeBase()
 		bad8[0].Outcome = queue.OutcomeFailed
 		bad8[0].Timed = true
 		bad8[0].DurationMS = 5
 		h.reportCmd(now+6, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: bad8})
+
 		bad9 := makeBase()
 		bad9[0].DurationMS = -1
 		h.reportCmd(now+6, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: bad9})
+
 		bad10 := makeBase()
 		bad10[0].DurationMS = timing.MaxDurationMS + 1
 		h.reportCmd(now+6, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: bad10})
+
 		if len(l1.Attempts) >= 2 {
 			badDup := makeBase()
 			badDup[1] = badDup[0]
@@ -439,11 +485,12 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 				res[i].DurationMS = int64(50 + rng.IntN(5000))
 			}
 		}
+
 		h.reportCmd(now+20, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: res})
 		// Duplicate report -> 0 events.
 		h.reportCmd(now+21, queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: res})
 
-		// Flood > 8 distinct conflicting reports on l1 to trigger MaxTestHistory=8 & history_truncated + dedupe!
+		// Flood > 8 distinct conflicting reports on l1 to reach MaxTestHistory=8, history_truncated and deduplication.
 		if variant%5 == 0 {
 			for k := 1; k <= 10; k++ {
 				conf := makeBase()
@@ -452,7 +499,9 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 					conf[i].Timed = true
 					conf[i].DurationMS = int64(1000 + k*7)
 				}
+
 				h.reportCmd(now+22+int64(k), queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: conf})
+
 				// Repeat exact same conflict to hit deduplication path.
 				if k == 2 || k == 9 {
 					h.reportCmd(now+22+int64(k), queue.ReportCommand{RunnerID: "r0", LeaseID: l1.LeaseID, Results: conf})
@@ -461,7 +510,7 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		}
 	}
 
-	// 5b. Exercise > 8 distinct STALE reports (after lease expiry) on variant%5 == 1.
+	// 5b. Exercise > 8 distinct stale reports (after lease expiry) on variant%5 == 1.
 	if variant%5 == 1 {
 		now += 50
 		lStale := h.leaseCmd(now, queue.LeaseCommand{RunnerID: "r-stale", MachineIndex: intPtr(1), RequestID: "req-stale-1"})
@@ -479,7 +528,9 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 						DurationMS: int64(200 + k*11),
 					}
 				}
+
 				h.reportCmd(now+int64(k), queue.ReportCommand{RunnerID: "r-stale", LeaseID: lStale.LeaseID, Results: staleRes})
+
 				if k == 2 || k == 9 {
 					h.reportCmd(now+int64(k), queue.ReportCommand{RunnerID: "r-stale", LeaseID: lStale.LeaseID, Results: staleRes})
 				}
@@ -495,14 +546,14 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		}
 	}
 
-	// 7. Drain remaining tests OR stop before deadline so we test finalizing overlay on status & list_tests!
+	// 7. Drain the remaining tests or stop before the deadline, to test the finalizing overlay on status and list_tests.
 	stopAtDeadline := variant%5 == 3 || variant%5 == 4
 	reqCounter := 2
 	for step := 0; step < 80; step++ {
 		now += 15
 		if stopAtDeadline && step == 4 {
-			// Lease one more batch and leave it ACTIVE (unreported) so reads at/after
-			// deadline exercise the leased -> unresolved + attempt expired overlay!
+			// Lease one more batch and leave it active (unreported) so reads at/after
+			// deadline exercise the leased -> unresolved and attempt-expired overlay.
 			h.leaseCmd(now, queue.LeaseCommand{
 				RunnerID:     "r0",
 				MachineIndex: intPtr(0),
@@ -510,15 +561,18 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 			})
 			break
 		}
+
 		l := h.leaseCmd(now, queue.LeaseCommand{
 			RunnerID:     "r0",
 			MachineIndex: intPtr(0),
 			RequestID:    fmt.Sprintf("req-loop-%d", reqCounter),
 		})
 		reqCounter++
+
 		if l.Status != queue.LeaseGranted {
 			break
 		}
+
 		res := make([]queue.ReportResult, len(l.Attempts))
 		for i, a := range l.Attempts {
 			if variant%5 == 1 && (a.TestIndex%3 == 0) {
@@ -544,6 +598,7 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 				} else if a.TestIndex%2 == 0 {
 					dur = int64(1000 + rng.IntN(2000))
 				}
+
 				res[i] = queue.ReportResult{
 					AttemptID:  a.AttemptID,
 					TestIndex:  a.TestIndex,
@@ -554,6 +609,7 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 				}
 			}
 		}
+
 		now += 10
 		h.reportCmd(now, queue.ReportCommand{RunnerID: "r0", LeaseID: l.LeaseID, Results: res})
 	}
@@ -577,14 +633,14 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 	h.listTestsCmd(now, queue.ListTestsCommand{Cursor: 0, Limit: 100, States: []queue.TestStatus{queue.StatusSkipped}})
 	h.listTestsCmd(now, queue.ListTestsCommand{Cursor: 0, Limit: 100, Retried: true})
 
-	// 9. Reads AT and AFTER deadline to exercise finalizing overlay in DecideStatus and DecideListTests!
+	// 9. Reads at and after the deadline exercise the finalizing overlay in DecideStatus and DecideListTests.
 	if stopAtDeadline {
 		deadline := h.st.DeadlineMS
 		if variant%5 == 3 {
-			// Exact deadline on ListTests (exercises leased -> unresolved + attempt marked expired in overlay!)
+			// Exact deadline on ListTests (exercises leased -> unresolved and an attempt marked expired in the overlay).
 			h.listTestsCmd(deadline, queue.ListTestsCommand{Cursor: 0, Limit: 100})
 		} else {
-			// Past deadline on Status (exercises verdictChanged overlay!)
+			// Past deadline on Status (exercises the verdictChanged overlay).
 			h.statusCmd(deadline + 500)
 		}
 	}
@@ -599,7 +655,8 @@ func generateHostileSeed(t *testing.T, seed int64, variant int) exportedSeed {
 		h.initCmd(now+101, queue.InitCommand{BuildID: bid, RunnerID: "conf-cfg", Config: badCfg, Tests: tests, PredictionsMS: preds})
 		// Length diff conflict.
 		h.initCmd(now+102, queue.InitCommand{BuildID: bid, RunnerID: "conf-len", Config: initCfg, Tests: tests[:1], PredictionsMS: preds[:1]})
-		// Same-length path diff conflicts until > 8!
+
+		// Same-length path diff conflicts until there are more than 8.
 		for k := 0; k < 9; k++ {
 			modTests := slices.Clone(tests)
 			modTests[len(modTests)-1] = fmt.Sprintf("zzz/conflict_%02d.py", k)

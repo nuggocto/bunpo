@@ -208,16 +208,19 @@ func evaluateExpiry(s *State, nowMS int64) expiryOverlay {
 		if lease.DeadlineMS > now {
 			continue
 		}
+
 		if ov.expiredLeases == nil {
 			ov.expiredLeases = make(map[int64]bool)
 			ov.expiredTests = make(map[int]TestStatus)
 		}
+
 		ov.expiredLeases[leaseID] = true
 		for _, a := range lease.Attempts {
 			t := &s.Tests[a.TestIndex]
 			if t.Status != StatusLeased || t.ActiveLeaseID != leaseID {
 				continue
 			}
+
 			ov.counts.Leased--
 			if t.Generation >= s.Config.MaxAttempts {
 				ov.expiredTests[a.TestIndex] = StatusUnresolved
@@ -227,12 +230,14 @@ func evaluateExpiry(s *State, nowMS int64) expiryOverlay {
 				ov.counts.Pending++
 			}
 		}
+
 		ov.events = append(ov.events, Event{
 			Type:    EventExpired,
 			AtMS:    now,
 			Expired: &ExpiredData{LeaseID: leaseID},
 		})
 	}
+
 	return ov
 }
 
@@ -242,11 +247,14 @@ func (ov *expiryOverlay) testStatus(s *State, idx int) TestStatus {
 		if st == StatusPending || st == StatusLeased {
 			return StatusUnresolved
 		}
+
 		return st
 	}
+
 	if st, ok := ov.expiredTests[idx]; ok {
 		return st
 	}
+
 	return s.Tests[idx].Status
 }
 
@@ -254,12 +262,15 @@ func (ov *expiryOverlay) leaseActive(s *State, leaseID int64) bool {
 	if leaseID < 1 || leaseID > int64(len(s.Leases)) {
 		return false
 	}
+
 	if s.Leases[leaseID-1].Status != LeaseActive {
 		return false
 	}
+
 	if ov.finalized || ov.expiredLeases[leaseID] {
 		return false
 	}
+
 	return true
 }
 
@@ -277,18 +288,23 @@ func DecideInit(s *State, nowMS int64, cmd InitCommand) ([]Event, InitResponse, 
 	if nowMS < 0 {
 		return nil, InitResponse{}, errInvalid("now_ms must not be negative")
 	}
+
 	if !ValidBuildID(cmd.BuildID) {
 		return nil, InitResponse{}, errInvalid("invalid build_id %q", cmd.BuildID)
 	}
+
 	if !ValidRunnerID(cmd.RunnerID) {
 		return nil, InitResponse{}, errInvalid("invalid runner_id %q", cmd.RunnerID)
 	}
+
 	if err := validateMachineIndex(cmd.MachineIndex); err != nil {
 		return nil, InitResponse{}, err
 	}
+
 	if err := cmd.Config.validate(s.Limits); err != nil {
 		return nil, InitResponse{}, err
 	}
+
 	if err := validateTestList(cmd.Tests, cmd.PredictionsMS, s.Limits.effective().MaxTests); err != nil {
 		return nil, InitResponse{}, err
 	}
@@ -300,6 +316,7 @@ func DecideInit(s *State, nowMS int64, cmd InitCommand) ([]Event, InitResponse, 
 		for i, p := range cmd.PredictionsMS {
 			preds[i] = cloneInt64Ptr(p)
 		}
+
 		deadlineMS := nowMS + cmd.Config.BuildTimeoutMS
 		ev := Event{
 			Type: EventInitialized,
@@ -369,14 +386,17 @@ func describeInitDiff(s *State, cmd InitCommand) string {
 			cmd.Config.Machines, cmd.Config.LeaseTTLMS, cmd.Config.BuildTimeoutMS, cmd.Config.MaxAttempts, cmd.Config.MaxBatch,
 			s.Config.Machines, s.Config.LeaseTTLMS, s.Config.BuildTimeoutMS, s.Config.MaxAttempts, s.Config.MaxBatch)
 	}
+
 	if len(cmd.Tests) != len(s.Tests) {
 		return fmt.Sprintf("test list differs: got %d tests, initialized build has %d", len(cmd.Tests), len(s.Tests))
 	}
+
 	for i, path := range cmd.Tests {
 		if path != s.Tests[i].Path {
 			return fmt.Sprintf("test list differs at index %d: got %q, initialized build has %q", i, path, s.Tests[i].Path)
 		}
 	}
+
 	return "init digest differs from initialized build"
 }
 
@@ -389,12 +409,15 @@ func DecideLease(s *State, nowMS int64, cmd LeaseCommand) ([]Event, LeaseRespons
 	if !s.Initialized {
 		return nil, LeaseResponse{}, &Error{HTTPStatus: 404, Code: ErrCodeBuildNotFound, Message: "build not initialized"}
 	}
+
 	if !ValidRunnerID(cmd.RunnerID) {
 		return nil, LeaseResponse{}, errInvalid("invalid runner_id %q", cmd.RunnerID)
 	}
+
 	if !ValidRequestID(cmd.RequestID) {
 		return nil, LeaseResponse{}, errInvalid("invalid request_id %q", cmd.RequestID)
 	}
+
 	if err := validateMachineIndex(cmd.MachineIndex); err != nil {
 		return nil, LeaseResponse{}, err
 	}
@@ -410,12 +433,14 @@ func DecideLease(s *State, nowMS int64, cmd LeaseCommand) ([]Event, LeaseRespons
 				newDeadline := max(lease.DeadlineMS, now+s.Config.LeaseTTLMS)
 				return ov.events, leaseResponseFromLease(s, lease, newDeadline), nil
 			}
+
 			return ov.events, LeaseResponse{}, &Error{
 				HTTPStatus: 409,
 				Code:       ErrCodeStaleRequest,
 				Message:    fmt.Sprintf("request_id %q refers to lease %d, which is no longer active", cmd.RequestID, r.LastLeaseID),
 			}
 		}
+
 		if r.ActiveLeaseID > 0 && ov.leaseActive(s, r.ActiveLeaseID) {
 			return ov.events, LeaseResponse{}, &Error{
 				HTTPStatus: 409,
@@ -491,6 +516,7 @@ func leaseResponseFromLease(s *State, lease *Lease, deadlineMS int64) LeaseRespo
 			Test:       s.Tests[a.TestIndex].Path,
 		}
 	}
+
 	return LeaseResponse{
 		Status:     LeaseGranted,
 		LeaseID:    lease.LeaseID,
@@ -509,8 +535,10 @@ func selectBatch(s *State, ov *expiryOverlay) []int {
 		if ov.testStatus(s, idx) != StatusPending {
 			continue
 		}
+
 		totalPending++
 		remainingMS += s.Tests[idx].EffectiveMS
+
 		if s.Tests[idx].Generation == 0 {
 			firstPending = append(firstPending, idx)
 		} else if firstRetry == -1 {
@@ -542,6 +570,7 @@ func selectBatch(s *State, ov *expiryOverlay) []int {
 			break
 		}
 	}
+
 	return batch
 }
 
@@ -553,27 +582,34 @@ func computeWaitMS(s *State, ov *expiryOverlay, now int64) int64 {
 		if !ov.leaseActive(s, id) {
 			continue
 		}
+
 		l := &s.Leases[id-1]
 		expectedEnd := l.LeasedAtMS
 		for _, a := range l.Attempts {
 			expectedEnd += s.Tests[a.TestIndex].EffectiveMS
 		}
+
 		if !found || l.DeadlineMS < earliestDeadline {
 			earliestDeadline = l.DeadlineMS
 		}
+
 		if !found || expectedEnd > latestExpectedEnd {
 			latestExpectedEnd = expectedEnd
 		}
+
 		found = true
 	}
+
 	maxWait := min(s.Config.LeaseTTLMS/2, MaxWaitMS)
 	if maxWait < 1 {
 		maxWait = 1
 	}
+
 	minWait := min(MinWaitMS, maxWait)
 	if !found {
 		return minWait
 	}
+
 	var wait int64
 	if now < latestExpectedEnd {
 		wait = latestExpectedEnd - now
@@ -582,6 +618,7 @@ func computeWaitMS(s *State, ov *expiryOverlay, now int64) int64 {
 		// idle machines do not hammer the server on a long overdue test.
 		wait = (now - latestExpectedEnd) / 4
 	}
+
 	wait = min(wait, earliestDeadline-now)
 	return max(minWait, min(wait, maxWait))
 }
@@ -594,15 +631,22 @@ func DecideHeartbeat(s *State, nowMS int64, cmd HeartbeatCommand) ([]Event, Hear
 	if !s.Initialized {
 		return nil, HeartbeatResponse{}, &Error{HTTPStatus: 404, Code: ErrCodeBuildNotFound, Message: "build not initialized"}
 	}
+
 	if !ValidRunnerID(cmd.RunnerID) {
 		return nil, HeartbeatResponse{}, errInvalid("invalid runner_id %q", cmd.RunnerID)
 	}
+
 	if cmd.LeaseID < 1 || cmd.LeaseID > int64(len(s.Leases)) {
 		return nil, HeartbeatResponse{}, &Error{HTTPStatus: 400, Code: ErrCodeUnknownLease, Message: fmt.Sprintf("unknown lease_id %d", cmd.LeaseID)}
 	}
+
 	lease := &s.Leases[cmd.LeaseID-1]
 	if lease.RunnerID != cmd.RunnerID {
-		return nil, HeartbeatResponse{}, &Error{HTTPStatus: 400, Code: ErrCodeRunnerMismatch, Message: fmt.Sprintf("lease %d belongs to another runner", cmd.LeaseID)}
+		return nil, HeartbeatResponse{}, &Error{
+			HTTPStatus: 400,
+			Code:       ErrCodeRunnerMismatch,
+			Message:    fmt.Sprintf("lease %d belongs to another runner", cmd.LeaseID),
+		}
 	}
 
 	now := max(nowMS, s.LastSeenMS)
@@ -632,16 +676,24 @@ func DecideReport(s *State, nowMS int64, cmd ReportCommand) ([]Event, ReportResp
 	if !s.Initialized {
 		return nil, ReportResponse{}, &Error{HTTPStatus: 404, Code: ErrCodeBuildNotFound, Message: "build not initialized"}
 	}
+
 	if !ValidRunnerID(cmd.RunnerID) {
 		return nil, ReportResponse{}, errInvalid("invalid runner_id %q", cmd.RunnerID)
 	}
+
 	if cmd.LeaseID < 1 || cmd.LeaseID > int64(len(s.Leases)) {
 		return nil, ReportResponse{}, &Error{HTTPStatus: 400, Code: ErrCodeUnknownLease, Message: fmt.Sprintf("unknown lease_id %d", cmd.LeaseID)}
 	}
+
 	lease := &s.Leases[cmd.LeaseID-1]
 	if lease.RunnerID != cmd.RunnerID {
-		return nil, ReportResponse{}, &Error{HTTPStatus: 400, Code: ErrCodeRunnerMismatch, Message: fmt.Sprintf("lease %d belongs to another runner", cmd.LeaseID)}
+		return nil, ReportResponse{}, &Error{
+			HTTPStatus: 400,
+			Code:       ErrCodeRunnerMismatch,
+			Message:    fmt.Sprintf("lease %d belongs to another runner", cmd.LeaseID),
+		}
 	}
+
 	if len(cmd.Results) != len(lease.Attempts) {
 		return nil, ReportResponse{}, errInvalid("report has %d results, lease %d has %d attempts", len(cmd.Results), cmd.LeaseID, len(lease.Attempts))
 	}
@@ -652,20 +704,25 @@ func DecideReport(s *State, nowMS int64, cmd ReportCommand) ([]Event, ReportResp
 		if res.TestIndex < 0 || res.TestIndex >= len(s.Tests) {
 			return nil, ReportResponse{}, errInvalid("test_index %d out of range", res.TestIndex)
 		}
+
 		t := &s.Tests[res.TestIndex]
 		if res.Generation < 1 || res.Generation > t.Generation {
 			return nil, ReportResponse{}, errInvalid("test %d generation %d outside 1..%d", res.TestIndex, res.Generation, t.Generation)
 		}
+
 		wantAttemptID := FormatAttemptID(res.TestIndex, res.Generation)
 		if res.AttemptID != "" && res.AttemptID != wantAttemptID {
 			return nil, ReportResponse{}, errInvalid("attempt_id %q does not match %q", res.AttemptID, wantAttemptID)
 		}
+
 		if err := validateReportValues(res.Outcome, res.Timed, res.DurationMS); err != nil {
 			return nil, ReportResponse{}, err
 		}
+
 		if _, dup := byIndex[res.TestIndex]; dup {
 			return nil, ReportResponse{}, errInvalid("duplicate result for test_index %d", res.TestIndex)
 		}
+
 		byIndex[res.TestIndex] = res
 	}
 
@@ -675,6 +732,7 @@ func DecideReport(s *State, nowMS int64, cmd ReportCommand) ([]Event, ReportResp
 		if !ok || got.Generation != want.Generation {
 			return nil, ReportResponse{}, errInvalid("report must contain attempt %s of lease %d", FormatAttemptID(want.TestIndex, want.Generation), cmd.LeaseID)
 		}
+
 		ordered[i] = got
 	}
 
@@ -715,6 +773,7 @@ func DecideReport(s *State, nowMS int64, cmd ReportCommand) ([]Event, ReportResp
 					persist = true
 				}
 			}
+
 			allAccepted = false
 
 		case leaseActive && res.Generation == t.Generation && ov.testStatus(s, res.TestIndex) == StatusLeased && t.ActiveLeaseID == cmd.LeaseID:
@@ -751,6 +810,7 @@ func DecideReport(s *State, nowMS int64, cmd ReportCommand) ([]Event, ReportResp
 			if len(t.History) < MaxTestHistory && !hasHistoryRecord(t.History, rec) {
 				persist = true
 			}
+
 			allAccepted = false
 		}
 
@@ -764,6 +824,7 @@ func DecideReport(s *State, nowMS int64, cmd ReportCommand) ([]Event, ReportResp
 				Disposition: disp,
 			})
 		}
+
 		disps[i] = ReportDisposition{
 			AttemptID:   FormatAttemptID(res.TestIndex, res.Generation),
 			TestIndex:   res.TestIndex,
@@ -820,6 +881,7 @@ func DecideStatus(s *State, nowMS int64) ([]Event, StatusResponse, error) {
 		v := s.FinishedAtMS
 		finishedAt = &v
 	}
+
 	if useOverlay {
 		counts = ov.counts
 		verdict = ov.verdict(s)
@@ -842,6 +904,7 @@ func DecideStatus(s *State, nowMS int64) ([]Event, StatusResponse, error) {
 		if useOverlay && activeID > 0 && !ov.leaseActive(s, activeID) {
 			activeID = 0
 		}
+
 		runners = append(runners, RunnerSummary{
 			RunnerID:      r.RunnerID,
 			MachineIndex:  cloneIntPtr(r.MachineIndex),
@@ -860,6 +923,7 @@ func DecideStatus(s *State, nowMS int64) ([]Event, StatusResponse, error) {
 		if useOverlay {
 			st = ov.testStatus(s, i)
 		}
+
 		if st == StatusPassed && t.Timed {
 			slowest = append(slowest, SlowestTest{
 				TestIndex:  t.Index,
@@ -867,6 +931,7 @@ func DecideStatus(s *State, nowMS int64) ([]Event, StatusResponse, error) {
 				DurationMS: t.DurationMS,
 			})
 		}
+
 		switch st {
 		case StatusFailed:
 			failedProblems = append(failedProblems, ProblemTest{
@@ -888,9 +953,11 @@ func DecideStatus(s *State, nowMS int64) ([]Event, StatusResponse, error) {
 	slices.SortFunc(slowest, func(a, b SlowestTest) int {
 		return cmp.Or(cmp.Compare(b.DurationMS, a.DurationMS), cmp.Compare(a.TestIndex, b.TestIndex))
 	})
+
 	if len(slowest) > MaxStatusSlowest {
 		slowest = slowest[:MaxStatusSlowest]
 	}
+
 	if slowest == nil {
 		slowest = []SlowestTest{}
 	}
@@ -901,12 +968,15 @@ func DecideStatus(s *State, nowMS int64) ([]Event, StatusResponse, error) {
 		if len(problems) >= MaxStatusProblems {
 			break
 		}
+
 		problems = append(problems, p)
 	}
+
 	for _, p := range unresolvedProblems {
 		if len(problems) >= MaxStatusProblems {
 			break
 		}
+
 		problems = append(problems, p)
 	}
 
@@ -937,16 +1007,20 @@ func DecideListTests(s *State, nowMS int64, cmd ListTestsCommand) ([]Event, List
 	if !s.Initialized {
 		return nil, ListTestsResponse{}, &Error{HTTPStatus: 404, Code: ErrCodeBuildNotFound, Message: "build not initialized"}
 	}
+
 	if cmd.Cursor < 0 {
 		return nil, ListTestsResponse{}, errInvalid("cursor %d must not be negative", cmd.Cursor)
 	}
+
 	limit := cmd.Limit
 	if limit == 0 {
 		limit = DefaultTestsPageLimit
 	}
+
 	if limit < 1 || limit > MaxTestsPageLimit {
 		return nil, ListTestsResponse{}, errInvalid("limit %d is outside 1..%d", limit, MaxTestsPageLimit)
 	}
+
 	var stateFilter map[TestStatus]bool
 	if len(cmd.States) > 0 {
 		stateFilter = make(map[TestStatus]bool, len(cmd.States))
@@ -978,12 +1052,15 @@ func DecideListTests(s *State, nowMS int64, cmd ListTestsCommand) ([]Event, List
 		if useOverlay {
 			st = ov.testStatus(s, i)
 		}
+
 		if stateFilter != nil && !stateFilter[st] {
 			continue
 		}
+
 		if cmd.Retried && t.Generation <= 1 && len(t.History) == 0 && !t.HistoryTruncated {
 			continue
 		}
+
 		if len(tests) == limit {
 			c := i
 			nextCursor = &c
@@ -994,6 +1071,7 @@ func DecideListTests(s *State, nowMS int64, cmd ListTestsCommand) ([]Event, List
 		if attempts == nil {
 			attempts = []AttemptRecord{}
 		}
+
 		if useOverlay && t.Status == StatusLeased && st == StatusUnresolved && len(attempts) > 0 {
 			last := &attempts[len(attempts)-1]
 			if last.Status == AttemptLeased {
@@ -1001,10 +1079,12 @@ func DecideListTests(s *State, nowMS int64, cmd ListTestsCommand) ([]Event, List
 				last.FinishedAtMS = ov.nowMS
 			}
 		}
+
 		history := slices.Clone(t.History)
 		if history == nil {
 			history = []HistoryRecord{}
 		}
+
 		tests = append(tests, TestView{
 			TestIndex:        t.Index,
 			Test:             t.Path,

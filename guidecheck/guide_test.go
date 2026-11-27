@@ -34,6 +34,7 @@ func TestGuidesParseAndShellSyntax(t *testing.T) {
 				if strings.TrimSpace(sc.body) == "" {
 					t.Fatalf("%s guide missing %s script", r.name, sc.name)
 				}
+
 				cmd := exec.Command("bash", "-n")
 				cmd.Stdin = strings.NewReader(sc.body)
 				if out, err := cmd.CombinedOutput(); err != nil {

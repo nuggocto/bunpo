@@ -14,10 +14,12 @@ func cloneState(t testing.TB, s *queue.State) *queue.State {
 	if err != nil {
 		t.Fatalf("marshal state: %v", err)
 	}
+
 	var out queue.State
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("unmarshal state: %v", err)
 	}
+
 	return &out
 }
 
@@ -34,9 +36,11 @@ func normalizeEmptySlices(s *queue.State) {
 	nilEmpty(&s.Tests)
 	nilEmpty(&s.Leases)
 	nilEmpty(&s.DealOrder)
+
 	if len(s.Runners) == 0 {
 		s.Runners = nil
 	}
+
 	for i := range s.Tests {
 		nilEmpty(&s.Tests[i].Attempts)
 		nilEmpty(&s.Tests[i].History)
@@ -48,14 +52,17 @@ func equalStates(t testing.TB, a, b *queue.State, ignoreDeadlines bool) bool {
 	ca, cb := cloneState(t, a), cloneState(t, b)
 	normalizeEmptySlices(ca)
 	normalizeEmptySlices(cb)
+
 	if ignoreDeadlines {
 		for i := range ca.Leases {
 			ca.Leases[i].DeadlineMS = 0
 		}
+
 		for i := range cb.Leases {
 			cb.Leases[i].DeadlineMS = 0
 		}
 	}
+
 	return reflect.DeepEqual(ca, cb)
 }
 

@@ -65,6 +65,7 @@ func Split(inv Inventory, durations map[string]int64, machines int) (Plan, error
 	for m := range shards {
 		shards[m] = make([]string, 0, counts[m])
 	}
+
 	// The inventory is in byte order, so every shard is too.
 	for i, id := range inv.ids {
 		shards[owner[i]] = append(shards[owner[i]], id)

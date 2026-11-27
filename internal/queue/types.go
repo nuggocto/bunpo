@@ -98,12 +98,15 @@ func (l Limits) effective() Limits {
 	if l.MinLeaseTTLMS <= 0 {
 		l.MinLeaseTTLMS = MinLeaseTTLMS
 	}
+
 	if l.MaxTests <= 0 {
 		l.MaxTests = MaxTests
 	}
+
 	if l.MaxRunners <= 0 {
 		l.MaxRunners = MaxRunners
 	}
+
 	return l
 }
 
@@ -198,21 +201,27 @@ type Config struct {
 
 func (c Config) validate(lim Limits) error {
 	lim = lim.effective()
+
 	if c.Machines < 1 || c.Machines > MaxMachines {
 		return errInvalid("machines %d is outside 1..%d", c.Machines, MaxMachines)
 	}
+
 	if c.LeaseTTLMS < lim.MinLeaseTTLMS || c.LeaseTTLMS > MaxLeaseTTLMS {
 		return errInvalid("lease_ttl_ms %d is outside %d..%d", c.LeaseTTLMS, lim.MinLeaseTTLMS, MaxLeaseTTLMS)
 	}
+
 	if c.BuildTimeoutMS < c.LeaseTTLMS || c.BuildTimeoutMS > MaxBuildTimeoutMS {
 		return errInvalid("build_timeout_ms %d is outside %d..%d", c.BuildTimeoutMS, c.LeaseTTLMS, MaxBuildTimeoutMS)
 	}
+
 	if c.MaxAttempts < 1 || c.MaxAttempts > MaxAttemptsLimit {
 		return errInvalid("max_attempts %d is outside 1..%d", c.MaxAttempts, MaxAttemptsLimit)
 	}
+
 	if c.MaxBatch < 1 || c.MaxBatch > MaxBatchLimit {
 		return errInvalid("max_batch %d is outside 1..%d", c.MaxBatch, MaxBatchLimit)
 	}
+
 	return nil
 }
 
@@ -347,6 +356,7 @@ func (s *State) Verdict() Verdict {
 	if !s.Initialized {
 		return VerdictRunning
 	}
+
 	return computeVerdict(s.Counts, len(s.Conflicts) > 0)
 }
 
@@ -354,12 +364,15 @@ func computeVerdict(c Counts, hasConflict bool) Verdict {
 	if c.Pending > 0 || c.Leased > 0 {
 		return VerdictRunning
 	}
+
 	if c.Failed > 0 {
 		return VerdictFailed
 	}
+
 	if c.Unresolved > 0 || hasConflict {
 		return VerdictUnresolved
 	}
+
 	return VerdictPassed
 }
 
@@ -374,15 +387,18 @@ func ValidBuildID(id string) bool {
 	if len(id) == 0 || len(id) > 128 {
 		return false
 	}
+
 	if !isAlnum(id[0]) {
 		return false
 	}
+
 	for i := range len(id) {
 		c := id[i]
 		if !isAlnum(c) && c != '.' && c != '_' && c != '-' {
 			return false
 		}
 	}
+
 	return !strings.Contains(id, "..")
 }
 
@@ -400,12 +416,14 @@ func validToken(s string, maxLen int) bool {
 	if len(s) == 0 || len(s) > maxLen {
 		return false
 	}
+
 	for i := range len(s) {
 		c := s[i]
 		if !isAlnum(c) && c != '.' && c != '_' && c != '-' {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -418,6 +436,7 @@ func ValidTestID(id string) bool {
 	if len(id) == 0 || len(id) > MaxTestIDBytes {
 		return false
 	}
+
 	c, err := split.Canonical(id, split.POSIX)
 	return err == nil && c == id
 }
@@ -426,9 +445,11 @@ func validateMachineIndex(idx *int) error {
 	if idx == nil {
 		return nil
 	}
+
 	if *idx < 0 || *idx >= MaxMachines {
 		return errInvalid("machine_index %d is outside 0..%d", *idx, MaxMachines-1)
 	}
+
 	return nil
 }
 
@@ -436,25 +457,31 @@ func validateTestList(tests []string, predictions []*int64, maxTests int) error 
 	if len(tests) == 0 {
 		return errInvalid("tests must not be empty")
 	}
+
 	if len(tests) > maxTests {
 		return errInvalid("tests has %d entries, over limit %d", len(tests), maxTests)
 	}
+
 	if len(predictions) != len(tests) {
 		return errInvalid("predictions_ms length %d does not match tests length %d", len(predictions), len(tests))
 	}
+
 	for i, id := range tests {
 		if !ValidTestID(id) {
 			return errInvalid("test %d (%q) is not a canonical test identifier", i, id)
 		}
+
 		if i > 0 && tests[i-1] >= id {
 			return errInvalid("tests must be unique and sorted in byte order (%q after %q)", id, tests[i-1])
 		}
+
 		if p := predictions[i]; p != nil {
 			if *p < 0 || *p > timing.MaxDurationMS {
 				return errInvalid("predictions_ms[%d] = %d is outside 0..%d", i, *p, timing.MaxDurationMS)
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -466,10 +493,12 @@ func configDigest(cfg Config, tests []string) string {
 		"bunpo queue %d\nmachines %d\nlease_ttl_ms %d\nbuild_timeout_ms %d\nmax_attempts %d\nmax_batch %d\n",
 		ProtocolVersion, cfg.Machines, cfg.LeaseTTLMS, cfg.BuildTimeoutMS, cfg.MaxAttempts, cfg.MaxBatch,
 	)
+
 	for _, id := range tests {
 		_, _ = h.Write([]byte(id))
 		_, _ = h.Write([]byte{'\n'})
 	}
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -480,6 +509,7 @@ func computeEffectivePredictions(predictions []*int64) []int64 {
 			known = append(known, *p)
 		}
 	}
+
 	fill, _ := timing.Median(known)
 	eff := make([]int64, len(predictions))
 	for i, p := range predictions {
@@ -489,6 +519,7 @@ func computeEffectivePredictions(predictions []*int64) []int64 {
 			eff[i] = fill
 		}
 	}
+
 	return eff
 }
 
@@ -496,6 +527,7 @@ func cloneIntPtr(p *int) *int {
 	if p == nil {
 		return nil
 	}
+
 	v := *p
 	return &v
 }
@@ -504,6 +536,7 @@ func cloneInt64Ptr(p *int64) *int64 {
 	if p == nil {
 		return nil
 	}
+
 	v := *p
 	return &v
 }

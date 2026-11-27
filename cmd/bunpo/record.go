@@ -233,6 +233,7 @@ func readReports(paths []string, opts reportOptions) (map[string]junit.File, err
 			if !ok {
 				return nil, fmt.Errorf("%s adds up to more than %d ms across the reports", id, timing.MaxDurationMS)
 			}
+
 			files[id] = sum
 		}
 	}

@@ -58,12 +58,15 @@ func (c RetryConfig) normalized() RetryConfig {
 	if c.BudgetMS <= 0 {
 		c.BudgetMS = DefaultRetryBudgetMS
 	}
+
 	if c.BaseMS <= 0 {
 		c.BaseMS = DefaultRetryBaseMS
 	}
+
 	if c.MaxWaitMS <= 0 {
 		c.MaxWaitMS = DefaultRetryMaxWaitMS
 	}
+
 	return c
 }
 
@@ -85,19 +88,24 @@ func (r *retryState) nextDelay(nowMS int64, cfg RetryConfig, ent Entropy) (int64
 		r.deadlineMS = nowMS + cfg.BudgetMS
 		r.backoffMS = cfg.BaseMS
 	}
+
 	if nowMS >= r.deadlineMS {
 		return 0, false
 	}
+
 	wait := min(r.backoffMS, cfg.MaxWaitMS)
 	if jitterMax := wait / 4; jitterMax > 0 {
 		wait += ent.Int64N(jitterMax + 1)
 	}
+
 	if rem := r.deadlineMS - nowMS; wait > rem {
 		wait = rem
 	}
+
 	if r.backoffMS < cfg.MaxWaitMS {
 		r.backoffMS = min(r.backoffMS*2, cfg.MaxWaitMS)
 	}
+
 	return wait, true
 }
 
@@ -113,6 +121,7 @@ func (e *ExtraFilesError) Error() string {
 	if len(e.Extra) > 5 {
 		shown += fmt.Sprintf(", and %d more", len(e.Extra)-5)
 	}
+
 	return fmt.Sprintf("%d file(s) in the reports were not in the leased batch: %s", len(e.Extra), shown)
 }
 
@@ -283,10 +292,12 @@ func NewMachine(cfg WorkerConfig) (*Machine, error) {
 	if cfg.Format != "junit" && cfg.Format != "lines" {
 		return nil, fmt.Errorf("invalid format %q", cfg.Format)
 	}
+
 	ent := cfg.Entropy
 	if ent == nil {
 		ent = cryptoEntropy{}
 	}
+
 	hbInterval := max(cfg.Config.LeaseTTLMS/3, MinHeartbeatTickMS)
 	hbRetry := max(min(hbInterval/2, 1000), 15)
 	return &Machine{
@@ -318,6 +329,7 @@ func (m *Machine) Step(nowMS int64, ev Event) []Action {
 		if m.phase != phaseNew {
 			return nil
 		}
+
 		m.buildStartMS = nowMS
 		m.phase = phaseInit
 		return []Action{m.sendInit()}
@@ -329,12 +341,15 @@ func (m *Machine) Step(nowMS int64, ev Event) []Action {
 		if ev.OpID == 0 {
 			return nil
 		}
+
 		if ev.OpID == m.hbOpID {
 			return m.handleHeartbeatResponse(nowMS, ev.Resp)
 		}
+
 		if ev.OpID == m.fgOpID {
 			return m.handleForegroundResponse(nowMS, ev.Resp)
 		}
+
 		// Late or duplicated response from an earlier op: discard.
 		return nil
 
@@ -342,6 +357,7 @@ func (m *Machine) Step(nowMS int64, ev Event) []Action {
 		if ev.LeaseID != m.curLease.LeaseID {
 			return nil
 		}
+
 		switch m.phase {
 		case phaseRunningCmd:
 			m.cmdExitCode = ev.ExitCode
@@ -361,12 +377,14 @@ func (m *Machine) Step(nowMS int64, ev Event) []Action {
 			m.phase = phaseDone
 			return []Action{{Kind: ActDone, Err: context.Canceled}}
 		}
+
 		return nil
 
 	case EvReportsRead:
 		if m.phase != phaseReadingReports || ev.LeaseID != m.curLease.LeaseID {
 			return nil
 		}
+
 		var actions []Action
 		if ev.ReadErr != nil {
 			actions = append(actions, Action{
@@ -374,6 +392,7 @@ func (m *Machine) Step(nowMS int64, ev Event) []Action {
 				Message: fmt.Sprintf("lease %d report unreadable (%v); reporting batch as error", m.curLease.LeaseID, ev.ReadErr),
 			})
 		}
+
 		results, extraErr := mapOutcomes(m.curLease.Attempts, m.cmdExitCode, m.cmdSignaled, m.cfg.Format, ev.Files, ev.ReadErr)
 		m.curResults = results
 		m.curExtraErr = extraErr
@@ -398,11 +417,12 @@ func (m *Machine) handleSignal() []Action {
 		// Command stop was already requested; wait for it to exit then finish cancelled.
 		m.phase = phaseStoppingSignal
 	case phaseStoppingSignal:
-		// Already stopping.
+		// Already stopping, so there is nothing more to do.
 	default:
 		m.phase = phaseDone
 		actions = append(actions, Action{Kind: ActDone, Err: context.Canceled})
 	}
+
 	return actions
 }
 
@@ -411,15 +431,19 @@ func (m *Machine) handleTimer(nowMS int64, ev Event) []Action {
 		if ev.TimerGen != m.hbTimerGen {
 			return nil
 		}
+
 		if m.phase != phaseRunningCmd && m.phase != phaseReadingReports && m.phase != phaseReporting {
 			return nil
 		}
+
 		return []Action{m.sendHeartbeat()}
 	}
+
 	if ev.TimerKind == TimerForeground {
 		if ev.TimerGen != m.fgTimerGen {
 			return nil
 		}
+
 		switch m.phase {
 		case phaseInit:
 			return []Action{m.sendInit()}
@@ -431,6 +455,7 @@ func (m *Machine) handleTimer(nowMS int64, ev Event) []Action {
 			return []Action{m.sendReport()}
 		}
 	}
+
 	return nil
 }
 
@@ -439,6 +464,7 @@ func (m *Machine) handleHeartbeatResponse(nowMS int64, resp Response) []Action {
 	if m.phase != phaseRunningCmd && m.phase != phaseReadingReports && m.phase != phaseReporting {
 		return nil
 	}
+
 	if resp.Err != nil {
 		if queueapi.IsTransientError(resp.Err) {
 			return []Action{
@@ -446,6 +472,7 @@ func (m *Machine) handleHeartbeatResponse(nowMS int64, resp Response) []Action {
 				m.setHeartbeatTimer(nowMS + m.hbRetryMS),
 			}
 		}
+
 		// Permanent 4xx (400/401/403/404) or protocol error can never succeed:
 		// treat as lost lease so the child stops and the next lease call reports it.
 		actions := []Action{
@@ -454,9 +481,11 @@ func (m *Machine) handleHeartbeatResponse(nowMS int64, resp Response) []Action {
 		actions = append(actions, m.onLeaseLost()...)
 		return actions
 	}
+
 	if resp.Heartbeat == nil || !resp.Heartbeat.Held {
 		return m.onLeaseLost()
 	}
+
 	return []Action{m.setHeartbeatTimer(nowMS + m.hbIntervalMS)}
 }
 
@@ -466,6 +495,7 @@ func (m *Machine) onLeaseLost() []Action {
 		m.phase = phaseStoppingLost
 		actions = append(actions, Action{Kind: ActStopCommand, LeaseID: m.curLease.LeaseID})
 	}
+
 	return actions
 }
 
@@ -476,6 +506,7 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 		if resp.Err != nil {
 			return m.handleTransientOrFail(nowMS, resp.Err)
 		}
+
 		m.fgRetry.reset()
 		initResp := resp.Init
 		var msg string
@@ -484,6 +515,7 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 		} else {
 			msg = fmt.Sprintf("joined build %s (%d tests, verdict %s)", m.cfg.BuildID, initResp.TestCount, initResp.Verdict)
 		}
+
 		actions := []Action{{Kind: ActLogInfo, Message: msg}}
 		actions = append(actions, m.startFreshLease()...)
 		return actions
@@ -497,6 +529,7 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 					actions = append(actions, m.startFreshLease()...)
 					return actions
 				}
+
 				if apiErr.Code == queue.ErrCodeLeaseHeld {
 					// A delayed duplicate lease request can grant an orphan lease on the
 					// server after this runner moved on; wait one heartbeat interval for
@@ -505,6 +538,7 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 					if m.cfg.Config.BuildTimeoutMS > 0 && nowMS >= m.buildStartMS+m.cfg.Config.BuildTimeoutMS {
 						return m.fail(resp.Err)
 					}
+
 					m.fgRetry.reset()
 					m.phase = phaseWaiting
 					return []Action{
@@ -513,8 +547,10 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 					}
 				}
 			}
+
 			return m.handleTransientOrFail(nowMS, resp.Err)
 		}
+
 		m.fgRetry.reset()
 		lease := *resp.Lease
 		switch lease.Status {
@@ -531,10 +567,12 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 			if lease.RetryAfterMS <= 0 {
 				return m.fail(fmt.Errorf("invalid wait retry_after_ms %d", lease.RetryAfterMS))
 			}
+
 			wait := lease.RetryAfterMS
 			if jitterMax := wait / 4; jitterMax > 0 {
 				wait += m.ent.Int64N(jitterMax + 1)
 			}
+
 			m.phase = phaseWaiting
 			return []Action{m.setForegroundTimer(nowMS + wait)}
 
@@ -556,6 +594,7 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 		if resp.Err != nil {
 			return m.handleTransientOrFail(nowMS, resp.Err)
 		}
+
 		actions := m.cancelHeartbeat()
 		m.fgRetry.reset()
 		rep := *resp.Report
@@ -564,6 +603,7 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 			actions = append(actions, Action{Kind: ActDone, Verdict: rep.Verdict, Err: m.curExtraErr})
 			return actions
 		}
+
 		for _, d := range rep.Results {
 			if d.Disposition == queue.DispositionStale {
 				actions = append(actions, Action{
@@ -572,6 +612,7 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 				})
 			}
 		}
+
 		m.curLease = queueapi.LeaseResponse{}
 		m.curResults = nil
 		switch rep.Verdict {
@@ -588,6 +629,7 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 			return actions
 		}
 	}
+
 	return nil
 }
 
@@ -597,6 +639,7 @@ func (m *Machine) handleTransientOrFail(nowMS int64, err error) []Action {
 			return []Action{m.setForegroundTimer(nowMS + delay)}
 		}
 	}
+
 	return m.fail(err)
 }
 
@@ -741,6 +784,7 @@ func NewStatusMachine(cfg StatusMachineConfig) *StatusMachine {
 	if ent == nil {
 		ent = cryptoEntropy{}
 	}
+
 	return &StatusMachine{
 		buildID:  cfg.BuildID,
 		retryCfg: cfg.Retry.normalized(),
@@ -753,6 +797,7 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 	if s.phase == statusPhaseDone {
 		return nil
 	}
+
 	if ev.Kind == EvSignal {
 		s.fgOpID = 0
 		s.fgTimerGen++
@@ -768,6 +813,7 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 		if s.phase != statusPhaseNew {
 			return nil
 		}
+
 		s.phase = statusPhaseFetching
 		return []Action{s.sendStatus()}
 
@@ -775,9 +821,11 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 		if ev.TimerKind != TimerForeground || ev.TimerGen != s.fgTimerGen {
 			return nil
 		}
+
 		if s.phase == statusPhaseFetching {
 			return []Action{s.sendStatus()}
 		}
+
 		if s.phase == statusPhasePaging {
 			return []Action{s.sendListTests()}
 		}
@@ -786,6 +834,7 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 		if ev.OpID == 0 || ev.OpID != s.fgOpID {
 			return nil
 		}
+
 		s.fgOpID = 0
 		if ev.Resp.Err != nil {
 			if queueapi.IsTransientError(ev.Resp.Err) {
@@ -794,9 +843,11 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 					return []Action{{Kind: ActSetTimer, TimerKind: TimerForeground, TimerGen: s.fgTimerGen, AtMS: nowMS + delay}}
 				}
 			}
+
 			s.phase = statusPhaseDone
 			return []Action{{Kind: ActDone, Err: ev.Resp.Err}}
 		}
+
 		s.fgRetry.reset()
 
 		if s.phase == statusPhaseFetching {
@@ -806,6 +857,7 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 				s.phase = statusPhaseDone
 				return []Action{{Kind: ActDone, Verdict: st.Verdict, Status: &st, HasReport: false}}
 			}
+
 			s.report = manifest.RunReport{
 				Index:    0,
 				Machines: 1,
@@ -825,6 +877,7 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 				s.phase = statusPhaseFetching
 				return []Action{s.sendStatus()}
 			}
+
 			for _, tv := range page.Tests {
 				if tv.State == queue.StatusPassed && tv.Timed {
 					s.report.Tests[tv.Test] = timing.Observation{Timed: true, MS: tv.DurationMS}
@@ -832,24 +885,33 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 					s.report.Tests[tv.Test] = timing.Observation{Timed: false, MS: 0}
 				}
 			}
+
 			if page.NextCursor == nil {
 				if len(s.report.Tests) != s.status.Counts.Total {
 					s.phase = statusPhaseDone
-					return []Action{{Kind: ActDone, Err: fmt.Errorf("incomplete test list from server: got %d tests, status reported %d", len(s.report.Tests), s.status.Counts.Total)}}
+					return []Action{{
+						Kind: ActDone,
+						Err: fmt.Errorf("incomplete test list from server: got %d tests, status reported %d",
+							len(s.report.Tests), s.status.Counts.Total),
+					}}
 				}
+
 				st := s.status
 				rep := s.report
 				s.phase = statusPhaseDone
 				return []Action{{Kind: ActDone, Verdict: st.Verdict, Status: &st, Report: &rep, HasReport: true}}
 			}
+
 			if *page.NextCursor <= s.cursor {
 				s.phase = statusPhaseDone
 				return []Action{{Kind: ActDone, Err: fmt.Errorf("list tests cursor did not advance (%d -> %d)", s.cursor, *page.NextCursor)}}
 			}
+
 			s.cursor = *page.NextCursor
 			return []Action{s.sendListTests()}
 		}
 	}
+
 	return nil
 }
 
@@ -896,6 +958,7 @@ func mapOutcomes(
 				DurationMS: 0,
 			}
 		}
+
 		return out
 	}
 
@@ -914,6 +977,7 @@ func mapOutcomes(
 			extra = append(extra, path)
 		}
 	}
+
 	if len(extra) > 0 {
 		slices.Sort(extra)
 		return errorAll(), &ExtraFilesError{Extra: extra, Total: len(files)}
@@ -971,5 +1035,6 @@ func mapOutcomes(
 			DurationMS: dur,
 		}
 	}
+
 	return results, nil
 }

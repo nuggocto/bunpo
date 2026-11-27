@@ -44,12 +44,15 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	addr := fs.String("addr", defaultAddr, "TCP address to listen on")
 	dataDir := fs.String("data", "", "directory for persistent build logs (omit for in-memory only)")
+
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+
 		return 2
 	}
+
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "bunpo-server: unexpected argument %q\n", fs.Arg(0))
 		return 2
@@ -80,12 +83,20 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			loaded, err = diskLog.Load(queue.DefaultLimits())
 			eventLog = diskLog
 		}
+
 		if err != nil {
 			_ = ln.Close()
 			fmt.Fprintf(stderr, "bunpo-server: data dir: %v\n", err)
 			return 1
 		}
-		logger.Info("loaded build logs", "data_dir", *dataDir, "builds", len(loaded.Builds), "damaged", len(loaded.Damaged), "truncated", loaded.Truncated, "removed", loaded.Removed)
+
+		logger.Info("loaded build logs",
+			"data_dir", *dataDir,
+			"builds", len(loaded.Builds),
+			"damaged", len(loaded.Damaged),
+			"truncated", loaded.Truncated,
+			"removed", loaded.Removed,
+		)
 	} else {
 		logger.Info("running in memory only; pass --data DIR to persist builds across restarts")
 	}
@@ -124,17 +135,20 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			logger.Error("server stopped with error", "err", err)
 			return 1
 		}
+
 		return 0
 
 	case <-ctx.Done():
 		logger.Info("shutting down")
 		shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
+
 		if err := srv.Shutdown(shutCtx); err != nil {
 			logger.Error("shutdown failed", "err", err)
 			_ = srv.Close()
 			return 1
 		}
+
 		<-serveErr
 		return 0
 	}

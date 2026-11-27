@@ -160,13 +160,16 @@ func canonicalize(original string, style PathStyle) (string, error) {
 
 	var b strings.Builder
 	b.Grow(len(p))
+
 	for part := range strings.SplitSeq(p, "/") {
 		if part == "" || part == "." {
 			continue
 		}
+
 		if b.Len() > 0 {
 			b.WriteByte('/')
 		}
+
 		b.WriteString(part)
 	}
 

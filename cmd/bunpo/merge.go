@@ -132,6 +132,7 @@ func printMergeSummary(con *console, base, merged timing.File, reports []timing.
 	for _, r := range reports {
 		for _, o := range r {
 			seen++
+
 			if o.Timed {
 				timed++
 			}

@@ -32,35 +32,44 @@ func TestQueueHelperProcess(t *testing.T) {
 	if mode == "" {
 		return
 	}
+
 	if os.Getenv("BUNPO_QUEUE_TOKEN") != "" || os.Getenv("BUNPO_QUEUE_READ_TOKEN") != "" {
 		os.Exit(99)
 	}
+
 	raw, err := os.ReadFile(os.Getenv("BUNPO_TESTS_FILE"))
 	if err != nil {
 		os.Exit(98)
 	}
+
 	var batch []string
 	for line := range strings.Lines(string(raw)) {
 		if line = strings.TrimSpace(line); line != "" {
 			batch = append(batch, line)
 		}
 	}
+
 	writeMarker := func(name string) {
 		if dir := os.Getenv("BUNPO_E2E_MARKER_DIR"); dir != "" {
 			_ = os.WriteFile(filepath.Join(dir, name), []byte(fmt.Sprintf("%d", os.Getpid())), 0o644)
 		}
 	}
+
 	writeJUnit := func() {
 		var b strings.Builder
 		b.WriteString(`<testsuites><testsuite name="e2e">`)
+
 		for _, f := range batch {
 			fmt.Fprintf(&b, `<testcase file="%s" name="ok" time="0.100"/>`, f)
 		}
+
 		b.WriteString(`</testsuite></testsuites>`)
+
 		if err := os.WriteFile(os.Getenv("BUNPO_E2E_REPORT"), []byte(b.String()), 0o644); err != nil {
 			os.Exit(97)
 		}
 	}
+
 	tag := os.Getenv("BUNPO_E2E_RUNNER_TAG")
 	switch mode {
 	case "pass":
@@ -73,9 +82,11 @@ func TestQueueHelperProcess(t *testing.T) {
 			writeMarker("leased-before-exec")
 			time.Sleep(30 * time.Second)
 		}
+
 		writeJUnit()
 	case "kill-after-exec-before-report":
 		writeJUnit()
+
 		if tag == "victim" {
 			writeMarker("executed-before-report")
 			time.Sleep(30 * time.Second)
@@ -83,6 +94,7 @@ func TestQueueHelperProcess(t *testing.T) {
 	default:
 		os.Exit(96)
 	}
+
 	os.Exit(0)
 }
 
@@ -94,6 +106,7 @@ func startQueueProcess(t *testing.T, stdin string, env []string, args ...string)
 	if err := p.cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+
 	return p
 }
 
@@ -103,6 +116,7 @@ func startQueueWorker(t *testing.T, url, build, idx, dir, rep, ttl, list string,
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	env := append([]string{"BUNPO_QUEUE_TOKEN=" + e2eWriteTok, "BUNPO_E2E_REPORT=" + rep}, extraEnv...)
 	return startQueueProcess(t, list, env,
 		"--queue", url, "--build", build, "--index", idx, "--total", "2",
@@ -123,6 +137,7 @@ func TestQueueE2EKillBeforeAndAfterExec(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			srv := httptest.NewServer(h)
 			t.Cleanup(srv.Close)
 			rc, _ := queueapi.NewClient(queueapi.ClientConfig{BaseURL: srv.URL, Token: e2eReadTok, HTTPClient: srv.Client()})
@@ -140,13 +155,17 @@ func TestQueueE2EKillBeforeAndAfterExec(t *testing.T) {
 					_, _ = fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &childPID)
 				}
 			}
+
 			if childPID == 0 {
 				t.Fatalf("timed out waiting for marker %s", markerPath)
 			}
+
 			_ = p0.cmd.Process.Kill()
+
 			if proc, err := os.FindProcess(childPID); err == nil {
 				_ = proc.Kill()
 			}
+
 			_ = p0.cmd.Wait()
 
 			p1 := startQueueWorker(t, srv.URL, tc.build, "1", filepath.Join(work, "d1"), filepath.Join(work, "r1.xml"), "300ms", list,
@@ -154,6 +173,7 @@ func TestQueueE2EKillBeforeAndAfterExec(t *testing.T) {
 			if code := p1.wait(t); code != 0 {
 				t.Fatalf("survivor exited %d: %s", code, p1.stderr.String())
 			}
+
 			if st, err := rc.Status(context.Background(), tc.build); err != nil || st.Verdict != queue.VerdictPassed || st.Counts.Passed != 2 {
 				t.Fatalf("build %s status = (%+v, %v); want passed (2)", tc.build, st, err)
 			}
@@ -167,13 +187,16 @@ func TestQueueE2ERealServerCrashRestartAndSIGTERM(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		srvBin += ".exe"
 	}
+
 	if out, err := exec.Command("go", "build", "-o", srvBin, "../bunpo-server").CombinedOutput(); err != nil {
 		t.Fatalf("build bunpo-server: %v\n%s", err, out)
 	}
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	addr := ln.Addr().String()
 	_ = ln.Close()
 	baseURL := "http://" + addr
@@ -186,11 +209,13 @@ func TestQueueE2ERealServerCrashRestartAndSIGTERM(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
+
 		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 			if resp, err := http.Get(baseURL + "/healthz"); err == nil && resp.StatusCode == http.StatusOK {
 				resp.Body.Close()
 				return cmd, &stderr
 			}
+
 			if time.Now().After(deadline) {
 				_ = cmd.Process.Kill()
 				t.Fatalf("bunpo-server did not become healthy: %s", stderr.String())
@@ -208,11 +233,13 @@ func TestQueueE2ERealServerCrashRestartAndSIGTERM(t *testing.T) {
 		if st, err := rc.Status(context.Background(), "crash-1"); err == nil && st.Counts.Passed >= 1 {
 			break
 		}
+
 		if time.Now().After(deadline) {
 			_ = srv1.Process.Kill()
 			t.Fatal("timed out waiting for mid-build progress before SIGKILL")
 		}
 	}
+
 	_ = srv1.Process.Kill()
 	_ = srv1.Wait()
 
@@ -224,18 +251,22 @@ func TestQueueE2ERealServerCrashRestartAndSIGTERM(t *testing.T) {
 			_ = srv2.Wait()
 		}
 	})
+
 	for _, p := range []*process{p0, p1} {
 		if c := p.wait(t); c != 0 {
 			t.Fatalf("worker exited %d: %s", c, p.stderr.String())
 		}
 	}
+
 	if st, err := rc.Status(context.Background(), "crash-1"); err != nil || st.Verdict != queue.VerdictPassed || st.Counts.Passed != 6 {
 		t.Fatalf("post-crash status = (%+v, %v); want passed (6)", st, err)
 	}
+
 	lt, err := rc.ListTests(context.Background(), "crash-1", queue.ListTestsCommand{Limit: 100})
 	if err != nil || len(lt.Tests) != 6 {
 		t.Fatalf("list tests = (%d, %v)", len(lt.Tests), err)
 	}
+
 	for _, tv := range lt.Tests {
 		accepted := 0
 		for _, a := range tv.Attempts {
@@ -243,22 +274,29 @@ func TestQueueE2ERealServerCrashRestartAndSIGTERM(t *testing.T) {
 				accepted++
 			}
 		}
+
 		if tv.State != queue.StatusPassed || accepted != 1 {
 			t.Fatalf("test %s state=%s accepted=%d; want passed/1", tv.Test, tv.State, accepted)
 		}
 	}
+
 	stDir := filepath.Join(work, "st")
-	if pSt := startQueueProcess(t, "", []string{"BUNPO_QUEUE_READ_TOKEN=" + e2eReadTok}, "--queue", baseURL, "--build", "crash-1", "--status", "--dir", stDir); pSt.wait(t) != 0 {
+	if pSt := startQueueProcess(t, "", []string{"BUNPO_QUEUE_READ_TOKEN=" + e2eReadTok},
+		"--queue", baseURL, "--build", "crash-1", "--status", "--dir", stDir); pSt.wait(t) != 0 {
 		t.Fatalf("status failed: %s", pSt.stderr.String())
 	}
+
 	if code, _, stderr := exe(t, "", "merge", "--dir", stDir); code != 0 {
 		t.Fatalf("merge exited %d: %s", code, stderr)
 	}
+
 	if runtime.GOOS != "windows" {
 		_ = srv2.Process.Signal(syscall.SIGTERM)
+
 		if err := srv2.Wait(); err != nil {
 			t.Fatalf("bunpo-server SIGTERM exit error: %v (%s)", err, srv2Err.String())
 		}
+
 		stopped = true
 	}
 }

@@ -31,16 +31,19 @@ func TestVerify(t *testing.T) {
 			},
 			input: input,
 		},
+
 		{
 			name:      "clean split with an empty shard",
 			manifests: []manifest.Manifest{m(0, 2, digestA, "a.py"), m(1, 2, digestA)},
 			input:     []string{"a.py"},
 		},
+
 		{
 			name:  "no manifests",
 			input: input,
 			want:  []string{"no manifests found"},
 		},
+
 		{
 			name: "one machine used stale timings",
 			manifests: []manifest.Manifest{
@@ -52,36 +55,42 @@ func TestVerify(t *testing.T) {
 				"1 test assigned to more than one machine: c.py (machines 1, 2)",
 			},
 		},
+
 		{
 			name:      "digests differ with no majority",
 			manifests: []manifest.Manifest{m(0, 2, digestA, "a.py", "b.py"), m(1, 2, digestB, "c.py", "d.py")},
 			input:     input,
 			want:      []string{"machines split different inputs or used different timings"},
 		},
+
 		{
 			name:      "a machine is missing",
 			manifests: []manifest.Manifest{m(0, 3, digestA, "a.py", "d.py"), m(2, 3, digestA, "c.py")},
 			input:     input,
 			want:      []string{"no manifest from machine 1 of 3", "1 test in the input but assigned to no machine: b.py"},
 		},
+
 		{
 			name:      "a machine reported twice",
 			manifests: []manifest.Manifest{m(0, 2, digestA, "a.py", "b.py"), m(0, 2, digestA, "a.py", "b.py"), m(1, 2, digestA, "c.py", "d.py")},
 			input:     input,
 			want:      []string{"2 manifests from machine 0", "2 tests assigned to more than one machine: a.py (machines 0, 0), b.py (machines 0, 0)"},
 		},
+
 		{
 			name:      "machines disagree on the count",
 			manifests: []manifest.Manifest{m(0, 2, digestA, "a.py", "b.py"), m(1, 2, digestA, "c.py", "d.py"), m(2, 3, digestA)},
 			input:     input,
 			want:      []string{"machines disagree on the machine count: 2 on machines 0, 1; 3 on machine 2"},
 		},
+
 		{
 			name:      "manifest index out of range",
 			manifests: []manifest.Manifest{m(0, 2, digestA, "a.py", "b.py"), m(1, 2, digestA, "c.py", "d.py"), m(5, 2, digestA)},
 			input:     input,
 			want:      []string{"manifest index 5 is out of range for 2 machines"},
 		},
+
 		{
 			name:      "assigned tests outside the input",
 			manifests: []manifest.Manifest{m(0, 1, digestA, "a.py", "b.py", "c.py", "d.py", "gone.py")},
@@ -127,6 +136,7 @@ func TestVerifyDoesNotDependOnOrder(t *testing.T) {
 	}
 	want := manifest.Verify(ms, []string{"a.py", "b.py", "c.py", "x.py", "y.py"})
 	slices.Reverse(ms)
+
 	if got := manifest.Verify(ms, []string{"y.py", "x.py", "c.py", "b.py", "a.py"}); !slices.Equal(got, want) {
 		t.Fatalf("reordered input gave %q; want %q", got, want)
 	}

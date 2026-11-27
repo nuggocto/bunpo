@@ -75,6 +75,7 @@ func startQueueServer(work, serverBin string) (*queueServer, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start bunpo-server: %w", err)
 	}
@@ -98,6 +99,7 @@ func startQueueServer(work, serverBin string) (*queueServer, error) {
 				return
 			}
 		}
+
 		errCh <- fmt.Errorf("bunpo-server exited before listening:\n%s", logs.String())
 	}()
 
@@ -118,9 +120,11 @@ func (s *queueServer) stop() {
 	if s == nil || s.cmd == nil || s.cmd.Process == nil {
 		return
 	}
+
 	_ = s.cmd.Process.Signal(syscall.SIGTERM)
 	done := make(chan error, 1)
 	go func() { done <- s.cmd.Wait() }()
+
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
@@ -139,11 +143,13 @@ func checkQueue(dir string, r runner, g guide, qs queueScenario, path, fixtures,
 		if err := prepareQueueSuite(m, r, g, qs, fixtures); err != nil {
 			return err
 		}
+
 		env := queueEnv(path, serverURL, 0, 1, fmt.Sprintf("gc-%s-notests", r.name))
 		code, output := shell(m, g.queueMachineScript, "", env)
 		if code == 0 {
 			return fmt.Errorf("queue run passed with no test files to find\n%s", output)
 		}
+
 		return nil
 	}
 
@@ -152,10 +158,12 @@ func checkQueue(dir string, r runner, g guide, qs queueScenario, path, fixtures,
 	if err := prepareQueueSuite(probe, r, g, qs, fixtures); err != nil {
 		return err
 	}
+
 	expected, err := discoverFiles(probe, g.listCommand, path)
 	if err != nil {
 		return err
 	}
+
 	if qs.playwrightSetup && slices.Contains(expected, "tests/auth.setup.js") {
 		return fmt.Errorf("setup file tests/auth.setup.js leaked into discovery: %v", expected)
 	}
@@ -175,12 +183,14 @@ func checkQueue(dir string, r runner, g guide, qs queueScenario, path, fixtures,
 		if err := prepareQueueSuite(m, r, g, qs, fixtures); err != nil {
 			return err
 		}
+
 		if qs.playwrightSetup {
 			code, out := shell(m, "npx playwright test --project=setup --no-deps --reporter=list", "", map[string]string{"PATH": path})
 			if code != 0 {
 				return fmt.Errorf("machine %d setup project exited %d\n%s", i, code, out)
 			}
 		}
+
 		machineDirs[i] = m
 	}
 
@@ -194,18 +204,21 @@ func checkQueue(dir string, r runner, g guide, qs queueScenario, path, fixtures,
 		var wg sync.WaitGroup
 		for i := range qs.machines {
 			wg.Add(1)
+
 			go func(idx int) {
 				defer wg.Done()
 				env := queueEnv(path, serverURL, idx, qs.machines, buildRunID)
 				codes[idx], outs[idx] = shell(machineDirs[idx], machineScript, "", env)
 			}(i)
 		}
+
 		wg.Wait()
 
 		wantCode := 0
 		if qs.keepFailing || qs.killerFile {
 			wantCode = 1
 		}
+
 		for i := range qs.machines {
 			if codes[i] != wantCode {
 				return fmt.Errorf("machine %d exited %d, want %d\n%s", i, codes[i], wantCode, outs[i])
@@ -218,6 +231,7 @@ func checkQueue(dir string, r runner, g guide, qs queueScenario, path, fixtures,
 	if err := os.MkdirAll(filepath.Join(final, ".bunpo"), 0o755); err != nil {
 		return err
 	}
+
 	statusEnv := map[string]string{
 		"PATH":                   path,
 		"BUNPO_QUEUE_URL":        serverURL,
@@ -230,6 +244,7 @@ func checkQueue(dir string, r runner, g guide, qs queueScenario, path, fixtures,
 	if qs.keepFailing || qs.killerFile {
 		wantStatus = 1
 	}
+
 	if statusCode != wantStatus {
 		return fmt.Errorf("status exited %d, want %d\n%s", statusCode, wantStatus, statusOut)
 	}
@@ -244,6 +259,7 @@ func checkQueue(dir string, r runner, g guide, qs queueScenario, path, fixtures,
 		if _, err := os.Stat(reportPath); !errors.Is(err, fs.ErrNotExist) {
 			return errors.New("unresolved build should not write report-0.json")
 		}
+
 		return nil
 	}
 
@@ -251,6 +267,7 @@ func checkQueue(dir string, r runner, g guide, qs queueScenario, path, fixtures,
 	if err != nil {
 		return fmt.Errorf("status report: %v\n%s", err, statusOut)
 	}
+
 	if !slices.Equal(reported, expected) {
 		return fmt.Errorf("report-0.json reported %q, want %q\n%s", reported, expected, statusOut)
 	}
@@ -258,6 +275,7 @@ func checkQueue(dir string, r runner, g guide, qs queueScenario, path, fixtures,
 	if code, out := shell(final, g.queueMergeScript, "", map[string]string{"PATH": path}); code != 0 {
 		return fmt.Errorf("merge exited %d\n%s", code, out)
 	}
+
 	return nil
 }
 
@@ -271,6 +289,7 @@ func checkQueueEmpty(dir string, r runner, g guide, path, fixtures, serverURL st
 	if err := os.WriteFile(emptyFile, nil, 0o644); err != nil {
 		return err
 	}
+
 	code, out := shell(m, "bash run-batch.sh", "", map[string]string{
 		"PATH":             path,
 		"BUNPO_TESTS_FILE": emptyFile,
@@ -278,6 +297,7 @@ func checkQueueEmpty(dir string, r runner, g guide, path, fixtures, serverURL st
 	if code != 0 {
 		return fmt.Errorf("run-batch.sh with empty file exited %d\n%s", code, out)
 	}
+
 	if _, err := os.Stat(filepath.Join(m, r.reportFile)); !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("run-batch.sh wrote %s on an empty BUNPO_TESTS_FILE", r.reportFile)
 	}
@@ -288,14 +308,17 @@ func checkQueueEmpty(dir string, r runner, g guide, path, fixtures, serverURL st
 	if idx < 0 {
 		return errors.New("cannot locate bunpo --queue invocation in guide script")
 	}
+
 	emptyCmd := g.queueMachineScript[idx:]
 	code, out = shell(m, emptyCmd, "", env)
 	if code == 0 {
 		return fmt.Errorf("bunpo --queue with empty stdin succeeded\n%s", out)
 	}
+
 	if _, err := os.Stat(filepath.Join(m, r.reportFile)); !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("bunpo --queue wrote %s on empty stdin", r.reportFile)
 	}
+
 	return nil
 }
 
@@ -324,12 +347,14 @@ func runKilledMachineScenario(dir string, machineDirs []string, script, path, se
 			started = true
 			break
 		}
+
 		select {
 		case err := <-done0:
 			return fmt.Errorf("machine 0 exited before starting held batch: %v\n%s", err, out0.String())
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+
 	if !started {
 		_ = syscall.Kill(-cmd0.Process.Pid, syscall.SIGKILL)
 		<-done0
@@ -345,6 +370,7 @@ func runKilledMachineScenario(dir string, machineDirs []string, script, path, se
 	if code1 != 0 {
 		return fmt.Errorf("surviving machine 1 exited %d\n%s", code1, out1)
 	}
+
 	return nil
 }
 
@@ -353,27 +379,33 @@ func prepareQueueSuite(dir string, r runner, g guide, qs queueScenario, fixtures
 	if err := prepareSuite(dir, r, g, baseScenario, fixtures); err != nil {
 		return err
 	}
+
 	if err := os.WriteFile(filepath.Join(dir, "run-batch.sh"), []byte(g.queueBatchScript), 0o755); err != nil {
 		return err
 	}
+
 	if qs.noTests {
 		return nil
 	}
+
 	if !qs.keepFailing {
 		_ = os.Remove(filepath.Join(dir, filepath.FromSlash(r.failing)))
 	}
+
 	if qs.killMachine0 {
 		p := filepath.Join(dir, filepath.FromSlash(r.holdPath))
 		if err := os.WriteFile(p, []byte(r.holdBody), 0o644); err != nil {
 			return err
 		}
 	}
+
 	if qs.killerFile {
 		p := filepath.Join(dir, filepath.FromSlash(r.killPath))
 		if err := os.WriteFile(p, []byte(r.killBody), 0o644); err != nil {
 			return err
 		}
 	}
+
 	if qs.playwrightSetup {
 		cfg := `const { defineConfig } = require("@playwright/test");
 module.exports = defineConfig({
@@ -398,16 +430,20 @@ test("uses saved auth state", async () => {
   expect(data.ok).toBe(true);
 });
 `
+
 		if err := os.WriteFile(filepath.Join(dir, "playwright.config.js"), []byte(cfg), 0o644); err != nil {
 			return err
 		}
+
 		if err := os.WriteFile(filepath.Join(dir, "tests", "auth.setup.js"), []byte(setupTest), 0o644); err != nil {
 			return err
 		}
+
 		if err := os.WriteFile(filepath.Join(dir, "tests", "uses_auth.spec.js"), []byte(usesAuth), 0o644); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -421,6 +457,7 @@ func discoverFiles(dir, listCommand, path string) ([]string, error) {
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("discovery failed: %v\n%s%s", err, stdout.String(), stderr.String())
 	}
+
 	var files []string
 	for line := range strings.Lines(stdout.String()) {
 		p := strings.TrimSpace(line)
@@ -429,6 +466,7 @@ func discoverFiles(dir, listCommand, path string) ([]string, error) {
 			files = append(files, p)
 		}
 	}
+
 	slices.Sort(files)
 	files = slices.Compact(files)
 	return files, nil
@@ -441,6 +479,7 @@ func verifyQueueAccepted(serverURL, buildID string, expected []string, r runner,
 	if err != nil {
 		return err
 	}
+
 	req.Header.Set("Authorization", "Bearer "+queueReadToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -451,6 +490,7 @@ func verifyQueueAccepted(serverURL, buildID string, expected []string, r runner,
 	if err != nil {
 		return err
 	}
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET /tests returned %d: %s", resp.StatusCode, body)
 	}
@@ -478,6 +518,7 @@ func verifyQueueAccepted(serverURL, buildID string, expected []string, r runner,
 				accepted++
 			}
 		}
+
 		switch {
 		case qs.killerFile && tv.Test == r.killPath:
 			if tv.State != "unresolved" || accepted != 0 || tv.Generation != 2 {
@@ -495,15 +536,19 @@ func verifyQueueAccepted(serverURL, buildID string, expected []string, r runner,
 					tv.Test, tv.State, accepted)
 			}
 		}
+
 		if qs.killMachine0 && tv.Test == r.holdPath && tv.Generation < 2 {
 			return fmt.Errorf("held file %s had generation %d; expected retry (>=2) after machine 0 kill",
 				tv.Test, tv.Generation)
 		}
 	}
+
 	slices.Sort(gotPaths)
+
 	if !slices.Equal(gotPaths, expected) {
 		return fmt.Errorf("server tests = %q, want %q", gotPaths, expected)
 	}
+
 	return nil
 }
 
@@ -528,5 +573,6 @@ func mergeEnv(overrides map[string]string) []string {
 	for k, v := range overrides {
 		env = append(env, k+"="+v)
 	}
+
 	return env
 }

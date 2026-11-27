@@ -47,6 +47,7 @@ func newSimExporter(dir, name string, seed int64, minLeaseTTLMS int64) *simExpor
 	if dir == "" {
 		return nil
 	}
+
 	return &simExporter{
 		dir:           dir,
 		name:          name,
@@ -59,6 +60,7 @@ func (e *simExporter) recordCommand(nowMS int64, req queuerunner.Request, status
 	if e == nil || e.stopped {
 		return nil
 	}
+
 	if status >= 500 {
 		return nil
 	}
@@ -84,6 +86,7 @@ func (e *simExporter) recordCommand(nowMS int64, req queuerunner.Request, status
 		if uErr := json.Unmarshal(body, &env); uErr != nil {
 			return fmt.Errorf("decode error envelope: %w", uErr)
 		}
+
 		errCode = env.Error.Code
 	}
 
@@ -91,6 +94,7 @@ func (e *simExporter) recordCommand(nowMS int64, req queuerunner.Request, status
 	if evs == nil {
 		evs = []queue.Event{}
 	}
+
 	e.appliedEvents = append(e.appliedEvents, evs...)
 
 	e.steps = append(e.steps, exportedStep{
@@ -109,6 +113,7 @@ func (e *simExporter) recordRestart(nowMS int64, broken bool, diskBytes []byte) 
 	if e == nil || e.stopped {
 		return nil
 	}
+
 	if broken {
 		e.stopped = true
 		return nil
@@ -118,12 +123,14 @@ func (e *simExporter) recordRestart(nowMS int64, broken bool, diskBytes []byte) 
 	if reloaded == nil {
 		reloaded = []queue.Event{}
 	}
+
 	synced := len(reloaded) == len(e.appliedEvents)
 	if synced {
 		a, errA := json.Marshal(reloaded, json.Deterministic(true))
 		b, errB := json.Marshal(e.appliedEvents, json.Deterministic(true))
 		synced = errA == nil && errB == nil && string(a) == string(b)
 	}
+
 	e.appliedEvents = append([]queue.Event(nil), reloaded...)
 
 	e.steps = append(e.steps, exportedStep{
@@ -145,9 +152,11 @@ func (e *simExporter) flush() error {
 	if e == nil || len(e.steps) == 0 {
 		return nil
 	}
+
 	if err := os.MkdirAll(e.dir, 0o755); err != nil {
 		return err
 	}
+
 	out := exportedSeed{
 		Seed:          e.seed,
 		Name:          e.name,
@@ -158,6 +167,7 @@ func (e *simExporter) flush() error {
 	if err != nil {
 		return err
 	}
+
 	path := filepath.Join(e.dir, e.name+".json")
 	return os.WriteFile(path, data, 0o644)
 }
@@ -203,36 +213,42 @@ func extractCoreResponse(kind queuerunner.RequestKind, body []byte) (jsontext.Va
 		if err := json.Unmarshal(body, &r); err != nil {
 			return nil, err
 		}
+
 		return json.Marshal(r.InitResponse, json.Deterministic(true))
 	case queuerunner.ReqLease:
 		var r queueapi.LeaseResponse
 		if err := json.Unmarshal(body, &r); err != nil {
 			return nil, err
 		}
+
 		return json.Marshal(r.LeaseResponse, json.Deterministic(true))
 	case queuerunner.ReqHeartbeat:
 		var r queueapi.HeartbeatResponse
 		if err := json.Unmarshal(body, &r); err != nil {
 			return nil, err
 		}
+
 		return json.Marshal(r.HeartbeatResponse, json.Deterministic(true))
 	case queuerunner.ReqReport:
 		var r queueapi.ReportResponse
 		if err := json.Unmarshal(body, &r); err != nil {
 			return nil, err
 		}
+
 		return json.Marshal(r.ReportResponse, json.Deterministic(true))
 	case queuerunner.ReqStatus:
 		var r queueapi.StatusResponse
 		if err := json.Unmarshal(body, &r); err != nil {
 			return nil, err
 		}
+
 		return json.Marshal(r.StatusResponse, json.Deterministic(true))
 	case queuerunner.ReqListTests:
 		var r queueapi.ListTestsResponse
 		if err := json.Unmarshal(body, &r); err != nil {
 			return nil, err
 		}
+
 		return json.Marshal(r.ListTestsResponse, json.Deterministic(true))
 	default:
 		return nil, fmt.Errorf("unknown request kind %q", kind)

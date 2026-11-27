@@ -71,6 +71,7 @@ func (f File) MS() int64 {
 	if r.Lsh(r, 1).Cmp(ms.Denom()) >= 0 {
 		q.Add(q, big.NewInt(1))
 	}
+
 	return q.Int64()
 }
 
@@ -87,6 +88,7 @@ func (f File) Add(g File) (File, bool) {
 	if sum.Cmp(maxSeconds) > 0 {
 		return File{}, false
 	}
+
 	return File{Seconds: sum, Cases: f.Cases + g.Cases, Skipped: f.Skipped + g.Skipped, Failed: f.Failed || g.Failed}, true
 }
 
@@ -108,6 +110,7 @@ func read(r io.Reader, src Source, maxBytes int64) (Report, error) {
 		if err == io.EOF {
 			break
 		}
+
 		if err != nil {
 			return Report{}, fmt.Errorf("%w: %v", ErrInvalidReport, err)
 		}
@@ -134,6 +137,7 @@ func read(r io.Reader, src Source, maxBytes int64) (Report, error) {
 	if !p.sawRoot {
 		return Report{}, fmt.Errorf("%w: no root element; the runner may have failed before writing it", ErrInvalidReport)
 	}
+
 	return p.report, nil
 }
 
@@ -187,6 +191,7 @@ func (p *parser) start(t xml.StartElement) error {
 				p.skipped = true
 			}
 		}
+
 		return nil
 	}
 
@@ -197,6 +202,7 @@ func (p *parser) start(t xml.StartElement) error {
 	case "testcase":
 		return p.startCase(t)
 	}
+
 	return nil
 }
 
@@ -230,6 +236,7 @@ func (p *parser) caseFile(t xml.StartElement) string {
 		if len(p.suites) == 0 {
 			return ""
 		}
+
 		return p.suites[len(p.suites)-1].name
 
 	default:
@@ -237,6 +244,7 @@ func (p *parser) caseFile(t xml.StartElement) string {
 		for i := len(p.suites) - 1; file == "" && i >= 0; i-- {
 			file = p.suites[i].file
 		}
+
 		return file
 	}
 }
@@ -250,6 +258,7 @@ func (p *parser) end() error {
 		if p.skipped {
 			skipped = 1
 		}
+
 		if err := p.report.add(p.file, File{Seconds: p.seconds, Cases: 1, Skipped: skipped, Failed: p.failed}); err != nil {
 			return err
 		}
@@ -258,6 +267,7 @@ func (p *parser) end() error {
 	if n := len(p.suites); n > 0 && p.suites[n-1].depth == p.depth {
 		p.suites = p.suites[:n-1]
 	}
+
 	return nil
 }
 
@@ -297,6 +307,7 @@ func readLines(r io.Reader, maxBytes int64, maxLines int) (Report, error) {
 			if err := report.add(path, File{Cases: 1, Failed: true}); err != nil {
 				return Report{}, err
 			}
+
 			continue
 		}
 
@@ -313,6 +324,7 @@ func readLines(r io.Reader, maxBytes int64, maxLines int) (Report, error) {
 	if err := sc.Err(); err != nil {
 		return Report{}, fmt.Errorf("%w: %v", ErrInvalidReport, err)
 	}
+
 	return report, nil
 }
 
@@ -334,6 +346,7 @@ func parseSeconds(s string) (*big.Rat, error) {
 	if s == "" {
 		return new(big.Rat), nil
 	}
+
 	if len(s) > 40 {
 		return nil, fmt.Errorf("time %q is too long", s)
 	}
@@ -344,6 +357,7 @@ func parseSeconds(s string) (*big.Rat, error) {
 		if err != nil || e < -40 || e > 40 {
 			return nil, fmt.Errorf("time %q has an invalid exponent", s)
 		}
+
 		mantissa, exp = s[:i], e
 	}
 
@@ -366,6 +380,7 @@ func parseSeconds(s string) (*big.Rat, error) {
 	if value.Cmp(maxSeconds) > 0 {
 		return nil, fmt.Errorf("time %q is longer than %d ms", s, timing.MaxDurationMS)
 	}
+
 	return value, nil
 }
 
@@ -383,6 +398,7 @@ func allDigits(s string) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -392,6 +408,7 @@ func attr(t xml.StartElement, name string) string {
 			return a.Value
 		}
 	}
+
 	return ""
 }
 
@@ -410,6 +427,7 @@ func (l *limitReader) Read(p []byte) (int, error) {
 	if rem < 0 {
 		return 0, fmt.Errorf("%w of %d bytes", errTooLarge, l.max)
 	}
+
 	if int64(len(p)) > rem+1 {
 		p = p[:rem+1]
 	}
@@ -420,5 +438,6 @@ func (l *limitReader) Read(p []byte) (int, error) {
 	if l.n > l.max {
 		return 0, fmt.Errorf("%w of %d bytes", errTooLarge, l.max)
 	}
+
 	return n, err
 }

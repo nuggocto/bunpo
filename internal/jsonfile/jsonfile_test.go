@@ -21,6 +21,7 @@ func TestDecode(t *testing.T) {
 	if err := jsonfile.Decode("sample", data, 1024, 1, &got); err != nil {
 		t.Fatal(err)
 	}
+
 	if got.Version != 1 || got.Values["a"] != "1" || got.Values["b"] != "2" {
 		t.Fatalf("got = %+v", got)
 	}
@@ -51,6 +52,7 @@ func TestDecodeRejects(t *testing.T) {
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("error = %v; want %v", err, tc.wantErr)
 			}
+
 			if !strings.Contains(err.Error(), tc.wantMsg) {
 				t.Fatalf("error %q does not mention %q", err, tc.wantMsg)
 			}

@@ -14,6 +14,7 @@ func stopProcessGroup(cmd *exec.Cmd, done <-chan error, _ time.Duration) error {
 	if cmd.Process != nil {
 		_ = cmd.Process.Kill()
 	}
+
 	return <-done
 }
 

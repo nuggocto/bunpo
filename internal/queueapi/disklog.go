@@ -56,10 +56,12 @@ func OpenOSLogFS(dir string) (*OSLogFS, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir %q: %w", dir, err)
 	}
+
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, fmt.Errorf("open data dir %q: %w", dir, err)
 	}
+
 	return &OSLogFS{root: root}, nil
 }
 
@@ -71,6 +73,7 @@ func (o *OSLogFS) OpenFile(name string, flag int, perm os.FileMode) (LogFile, er
 	if err != nil {
 		return nil, err
 	}
+
 	return osLogFile{f}, nil
 }
 
@@ -87,10 +90,12 @@ func (o *OSLogFS) SyncDir() error {
 	if runtime.GOOS == "windows" {
 		return nil // Windows rejects FlushFileBuffers on directory handles.
 	}
+
 	d, err := o.root.Open(".")
 	if err != nil {
 		return err
 	}
+
 	return errors.Join(d.Sync(), d.Close())
 }
 
@@ -101,6 +106,7 @@ func (o osLogFile) StatSize() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	return fi.Size(), nil
 }
 
@@ -131,6 +137,7 @@ func NewDiskLog(fs LogFS, logger *slog.Logger) *DiskLog {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+
 	return &DiskLog{
 		fs:     fs,
 		logger: logger,
@@ -143,9 +150,11 @@ func encodeLogRecord(events []queue.Event) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode log record: %w", err)
 	}
+
 	if bytes.IndexByte(payload, '\n') >= 0 {
 		return nil, errors.New("encode log record: payload contains newline")
 	}
+
 	crc := crc32.Checksum(payload, crc32cTable)
 	rec := make([]byte, 0, 10+len(payload))
 	rec = fmt.Appendf(rec, "%08x ", crc)
@@ -154,6 +163,7 @@ func encodeLogRecord(events []queue.Event) ([]byte, error) {
 	if len(rec) > MaxLogRecordBytes {
 		return nil, fmt.Errorf("log record size %d exceeds %d", len(rec), MaxLogRecordBytes)
 	}
+
 	return rec, nil
 }
 
@@ -161,22 +171,27 @@ func decodeLogRecord(line []byte) ([]queue.Event, error) {
 	if len(line) < 11 || line[len(line)-1] != '\n' || line[8] != ' ' {
 		return nil, errors.New("malformed record framing")
 	}
+
 	payload := line[9 : len(line)-1]
 	wantCRC, err := strconv.ParseUint(string(line[:8]), 16, 32)
 	if err != nil || uint64(crc32.Checksum(payload, crc32cTable)) != wantCRC {
 		return nil, errors.New("crc32c mismatch")
 	}
+
 	var events []queue.Event
 	if err := json.Unmarshal(payload, &events, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("decode events: %w", err)
 	}
+
 	if len(events) == 0 {
 		return nil, errors.New("empty event record")
 	}
+
 	reencoded, err := json.Marshal(events, json.Deterministic(true))
 	if err != nil || !bytes.Equal(reencoded, payload) {
 		return nil, errors.New("record failed strict round-trip check")
 	}
+
 	return events, nil
 }
 
@@ -185,10 +200,12 @@ func (l *DiskLog) Append(_ context.Context, buildID string, events []queue.Event
 	if len(events) == 0 {
 		return nil
 	}
+
 	rec, err := encodeLogRecord(events)
 	if err != nil {
 		return fmt.Errorf("%w (%w)", err, ErrAppendUnwritten)
 	}
+
 	name := BuildFileName(buildID)
 	l.mu.Lock()
 	expectedSize, exists := l.sizes[buildID]
@@ -211,14 +228,17 @@ func (l *DiskLog) Append(_ context.Context, buildID string, events []queue.Event
 		if (!exists && errors.Is(err, os.ErrExist)) || (exists && errors.Is(err, os.ErrNotExist)) {
 			return fmt.Errorf("unexpected build log state %s: %w", name, err)
 		}
+
 		return fmt.Errorf("open build log: %w (%w)", err, ErrAppendUnwritten)
 	}
+
 	if exists {
 		sz, sErr := f.StatSize()
 		if sErr != nil {
 			_ = f.Close()
 			return fmt.Errorf("stat build log: %w (%w)", sErr, ErrAppendUnwritten)
 		}
+
 		if sz != expectedSize {
 			_ = f.Close()
 			return fmt.Errorf("build log %s size %d != expected %d", name, sz, expectedSize)
@@ -232,9 +252,11 @@ func (l *DiskLog) Append(_ context.Context, buildID string, events []queue.Event
 		} else {
 			rollbackErr = errors.Join(f.Truncate(expectedSize), f.Sync(), f.Close())
 		}
+
 		if rollbackErr == nil {
 			return fmt.Errorf("write build log: %w (%w)", err, ErrAppendUnwritten)
 		}
+
 		return fmt.Errorf("write build log and rollback failed: %w", err)
 	}
 
@@ -242,9 +264,11 @@ func (l *DiskLog) Append(_ context.Context, buildID string, events []queue.Event
 	if !exists {
 		syncErr = errors.Join(syncErr, l.fs.SyncDir())
 	}
+
 	if syncErr != nil {
 		return fmt.Errorf("sync build log: %w", syncErr)
 	}
+
 	l.mu.Lock()
 	l.sizes[buildID] = expectedSize + int64(len(payload))
 	l.mu.Unlock()
@@ -256,6 +280,7 @@ func (l *DiskLog) Remove(_ context.Context, buildID string) error {
 	if err := l.removeAndSync(BuildFileName(buildID)); err != nil {
 		return err
 	}
+
 	l.mu.Lock()
 	delete(l.sizes, buildID)
 	l.mu.Unlock()
@@ -270,6 +295,7 @@ func (l *DiskLog) Load(lim queue.Limits) (LoadResult, error) {
 	if err != nil {
 		return LoadResult{}, fmt.Errorf("read data dir: %w", err)
 	}
+
 	slices.Sort(names)
 
 	var res LoadResult
@@ -278,6 +304,7 @@ func (l *DiskLog) Load(lim queue.Limits) (LoadResult, error) {
 			l.logger.Warn("ignoring non-build entry in data dir", "name", name)
 			continue
 		}
+
 		st, validOff, tornErr, dmgErr := l.readBuildFile(name, lim)
 		if dmgErr == nil && st == nil {
 			if err := l.removeAndSync(name); err != nil {
@@ -287,8 +314,10 @@ func (l *DiskLog) Load(lim queue.Limits) (LoadResult, error) {
 				continue
 			}
 		}
+
 		if dmgErr == nil && tornErr != nil {
 			l.logger.Warn("truncating torn tail record in build log", "file", name, "offset", validOff, "err", tornErr)
+
 			if err := l.truncateAndSync(name, validOff); err != nil {
 				dmgErr = fmt.Errorf("truncate torn tail: %w", err)
 			} else {
@@ -302,11 +331,13 @@ func (l *DiskLog) Load(lim queue.Limits) (LoadResult, error) {
 				dmgErr = fmt.Errorf("fsync loaded build log: %w", err)
 			}
 		}
+
 		if dmgErr != nil {
 			l.logger.Error("build log damaged; leaving file untouched", "file", name, "err", dmgErr)
 			res.Damaged = append(res.Damaged, name)
 			continue
 		}
+
 		l.mu.Lock()
 		l.sizes[st.BuildID] = validOff
 		l.mu.Unlock()
@@ -316,6 +347,7 @@ func (l *DiskLog) Load(lim queue.Limits) (LoadResult, error) {
 	if err := l.fs.SyncDir(); err != nil {
 		return LoadResult{}, fmt.Errorf("sync data dir after load: %w", err)
 	}
+
 	return res, nil
 }
 
@@ -331,12 +363,15 @@ func (l *DiskLog) readBuildFile(name string, lim queue.Limits) (st *queue.State,
 	if hdrIOErr != nil {
 		return nil, 0, nil, fmt.Errorf("read header: %w", hdrIOErr)
 	}
+
 	if tooLargeHdr {
 		return nil, 0, nil, errors.New("header exceeds maximum length")
 	}
+
 	if !moreHdr && strings.HasPrefix(logHeader, string(hdr)) && string(hdr) != logHeader {
 		return nil, 0, nil, nil
 	}
+
 	if string(hdr) != logHeader {
 		return nil, 0, nil, fmt.Errorf("invalid header %q", string(hdr))
 	}
@@ -349,10 +384,12 @@ func (l *DiskLog) readBuildFile(name string, lim queue.Limits) (st *queue.State,
 		if ioErr != nil {
 			return nil, 0, nil, fmt.Errorf("read record: %w", ioErr)
 		}
+
 		if len(line) == 0 && !complete {
 			if records == 0 {
 				return nil, 0, nil, nil
 			}
+
 			return st, validOff, nil, nil
 		}
 
@@ -368,13 +405,16 @@ func (l *DiskLog) readBuildFile(name string, lim queue.Limits) (st *queue.State,
 		default:
 			events, decErr = decodeLogRecord(line)
 		}
+
 		if decErr != nil {
 			if more {
 				return nil, 0, nil, fmt.Errorf("corrupt record before EOF: %w", decErr)
 			}
+
 			if records == 0 {
 				return nil, 0, nil, nil
 			}
+
 			return st, validOff, decErr, nil
 		}
 
@@ -383,11 +423,13 @@ func (l *DiskLog) readBuildFile(name string, lim queue.Limits) (st *queue.State,
 				return nil, 0, nil, errors.New("first event does not initialize matching build ID")
 			}
 		}
+
 		for _, ev := range events {
 			if err := st.Apply(ev); err != nil {
 				return nil, 0, nil, fmt.Errorf("apply %s: %w", ev.Type, err)
 			}
 		}
+
 		records++
 		validOff += int64(len(line))
 	}
@@ -398,6 +440,7 @@ func (l *DiskLog) syncFile(name string) error {
 	if err != nil {
 		return err
 	}
+
 	return errors.Join(f.Sync(), f.Close())
 }
 
@@ -406,9 +449,11 @@ func (l *DiskLog) truncateAndSync(name string, size int64) error {
 	if err != nil {
 		return err
 	}
+
 	if err := f.Truncate(size); err != nil {
 		return errors.Join(err, f.Close())
 	}
+
 	return errors.Join(f.Sync(), f.Close())
 }
 
@@ -416,6 +461,7 @@ func (l *DiskLog) removeAndSync(name string) error {
 	if err := l.fs.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+
 	return l.fs.SyncDir()
 }
 
@@ -429,9 +475,11 @@ func readBoundedLine(br *bufio.Reader, maxBytes int) (line []byte, complete, mor
 			for errors.Is(rErr, bufio.ErrBufferFull) {
 				_, rErr = br.ReadSlice('\n')
 			}
+
 			if rErr != nil && !errors.Is(rErr, io.EOF) {
 				return nil, false, false, false, rErr
 			}
+
 			if rErr == nil {
 				if _, pErr := br.Peek(1); pErr == nil {
 					moreData = true
@@ -439,22 +487,28 @@ func readBoundedLine(br *bufio.Reader, maxBytes int) (line []byte, complete, mor
 					return nil, false, false, false, pErr
 				}
 			}
+
 			return line, false, moreData, true, nil
 		}
+
 		line = append(line, frag...)
 		if rErr == nil {
 			_, pErr := br.Peek(1)
 			if pErr == nil {
 				return line, true, true, false, nil
 			}
+
 			if errors.Is(pErr, io.EOF) {
 				return line, true, false, false, nil
 			}
+
 			return nil, false, false, false, pErr
 		}
+
 		if errors.Is(rErr, io.EOF) {
 			return line, false, false, false, nil
 		}
+
 		if !errors.Is(rErr, bufio.ErrBufferFull) {
 			return nil, false, false, false, rErr
 		}

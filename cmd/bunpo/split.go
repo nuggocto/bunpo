@@ -46,8 +46,8 @@ func cmdSplit(args []string, stdin io.Reader, stdout io.Writer, con *console) er
 	defer root.Close()
 
 	// Files from an earlier attempt on this machine go first, so a failure
-	// anywhere below leaves nothing that verify or merge would take for this
-	// attempt's.
+	// anywhere below leaves nothing that verify or merge could mistake for
+	// this attempt's files.
 	for _, name := range []string{manifestName(*index), reportName(*index)} {
 		if err := removeFile(root, name); err != nil {
 			return err
@@ -60,6 +60,7 @@ func cmdSplit(args []string, stdin io.Reader, stdout io.Writer, con *console) er
 	} else {
 		m, err = shareFromList(root, *dir, stdin, *index, *total, con)
 	}
+
 	if err != nil {
 		return err
 	}
@@ -93,6 +94,7 @@ func printTests(stdout io.Writer, ids []string) error {
 		if _, err := w.WriteString(id); err != nil {
 			return err
 		}
+
 		if err := w.WriteByte('\n'); err != nil {
 			return err
 		}

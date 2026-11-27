@@ -24,6 +24,7 @@ func TestRunConfigAndPortInUse(t *testing.T) {
 	}
 
 	noEnv := func(string) string { return "" }
+
 	validEnv := func(k string) string {
 		switch k {
 		case "BUNPO_QUEUE_TOKEN":
@@ -64,11 +65,13 @@ func TestServerDocFlagsMatchHelp(t *testing.T) {
 	if code := run([]string{"-h"}, func(string) string { return "" }, &stderr); code != 0 {
 		t.Fatalf("run(-h) = %d; want 0", code)
 	}
+
 	helpFlagRe := regexp.MustCompile(`(?m)^\s*-([a-z][a-z0-9-]*)\b`)
 	var helpFlags []string
 	for _, m := range helpFlagRe.FindAllStringSubmatch(stderr.String(), -1) {
 		helpFlags = append(helpFlags, m[1])
 	}
+
 	slices.Sort(helpFlags)
 	helpFlags = slices.Compact(helpFlags)
 
@@ -76,12 +79,14 @@ func TestServerDocFlagsMatchHelp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	doc := string(docBytes)
 	const heading = "### `bunpo-server`"
 	idx := strings.Index(doc, heading+"\n")
 	if idx < 0 {
 		t.Fatalf("docs/cli.md missing %q", heading)
 	}
+
 	sec := doc[idx+len(heading)+1:]
 	if next := strings.Index(sec, "\n##"); next >= 0 {
 		sec = sec[:next]
@@ -92,6 +97,7 @@ func TestServerDocFlagsMatchHelp(t *testing.T) {
 	for _, m := range docFlagRe.FindAllStringSubmatch(sec, -1) {
 		docFlags = append(docFlags, m[1])
 	}
+
 	slices.Sort(docFlags)
 	docFlags = slices.Compact(docFlags)
 

@@ -53,7 +53,9 @@ func TestSharedVectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	slices.Sort(paths)
+
 	if len(paths) < 15 {
 		t.Fatalf("found only %d vector files; want at least 15", len(paths))
 	}
@@ -63,6 +65,7 @@ func TestSharedVectors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		var vec vectorFile
 		if err := json.Unmarshal(data, &vec, json.RejectUnknownMembers(true)); err != nil {
 			t.Fatalf("%s: decode vector: %v", path, err)
@@ -81,6 +84,7 @@ func runVector(t *testing.T, vec vectorFile) {
 	if vec.MinLeaseTTLMS > 0 {
 		lim.MinLeaseTTLMS = vec.MinLeaseTTLMS
 	}
+
 	st := queue.NewState(lim)
 	var log []queue.Event
 
@@ -99,6 +103,7 @@ func runVector(t *testing.T, vec vectorFile) {
 
 		before := cloneState(t, st)
 		events, respVal, err := runVectorCommand(st, step.NowMS, hdr.Type, step.Command)
+
 		if !equalExact(t, st, before) {
 			t.Fatalf("step %d (%s): Decide mutated State", i, hdr.Type)
 		}
@@ -110,6 +115,7 @@ func runVector(t *testing.T, vec vectorFile) {
 			if !errors.As(err, &qe) {
 				t.Fatalf("step %d (%s): unexpected non-queue error %v", i, hdr.Type, err)
 			}
+
 			gotStatus = qe.HTTPStatus
 			gotCode = qe.Code
 		}
@@ -117,6 +123,7 @@ func runVector(t *testing.T, vec vectorFile) {
 		if gotStatus != step.ExpectStatus {
 			t.Fatalf("step %d (%s): status = %d (err=%v); want %d", i, hdr.Type, gotStatus, err, step.ExpectStatus)
 		}
+
 		if gotCode != step.ExpectErrorCode {
 			t.Fatalf("step %d (%s): error code = %q; want %q", i, hdr.Type, gotCode, step.ExpectErrorCode)
 		}
@@ -125,10 +132,12 @@ func runVector(t *testing.T, vec vectorFile) {
 		for j, ev := range events {
 			gotTypes[j] = ev.Type
 		}
+
 		wantTypes := step.ExpectEvents
 		if wantTypes == nil {
 			wantTypes = []queue.EventType{}
 		}
+
 		if !slices.Equal(gotTypes, wantTypes) {
 			t.Fatalf("step %d (%s): events = %v; want %v", i, hdr.Type, gotTypes, wantTypes)
 		}
@@ -139,13 +148,16 @@ func runVector(t *testing.T, vec vectorFile) {
 			if encErr != nil {
 				t.Fatalf("step %d: encode event: %v", i, encErr)
 			}
+
 			decoded, decErr := queue.DecodeEvent(raw)
 			if decErr != nil {
 				t.Fatalf("step %d: decode event: %v", i, decErr)
 			}
+
 			if applyErr := st.Apply(decoded); applyErr != nil {
 				t.Fatalf("step %d: apply %s: %v", i, ev.Type, applyErr)
 			}
+
 			log = append(log, decoded)
 		}
 
@@ -173,15 +185,19 @@ func runVector(t *testing.T, vec vectorFile) {
 	if st.Verdict() != vec.ExpectFinal.Verdict {
 		t.Fatalf("final verdict = %q; want %q", st.Verdict(), vec.ExpectFinal.Verdict)
 	}
+
 	if st.Counts != vec.ExpectFinal.Counts {
 		t.Fatalf("final counts = %+v; want %+v", st.Counts, vec.ExpectFinal.Counts)
 	}
+
 	if len(st.Conflicts) != vec.ExpectFinal.ConflictsLen {
 		t.Fatalf("final conflicts len = %d; want %d", len(st.Conflicts), vec.ExpectFinal.ConflictsLen)
 	}
+
 	if st.ConflictsTruncated != vec.ExpectFinal.ConflictsTruncated {
 		t.Fatalf("final conflicts_truncated = %t; want %t", st.ConflictsTruncated, vec.ExpectFinal.ConflictsTruncated)
 	}
+
 	for _, wt := range vec.ExpectFinal.Tests {
 		gt := st.Tests[wt.TestIndex]
 		if gt.Status != wt.State ||
@@ -202,6 +218,7 @@ func runVector(t *testing.T, vec vectorFile) {
 			t.Fatalf("replay event %d (%s): %v", i, ev.Type, err)
 		}
 	}
+
 	if !equalPersistent(t, st, replayed) {
 		t.Fatalf("replayed state differs from live persistent state")
 	}
@@ -217,6 +234,7 @@ func runVectorCommand(st *queue.State, nowMS int64, typ string, raw jsontext.Val
 		if err := json.Unmarshal(raw, &cmd, json.RejectUnknownMembers(true)); err != nil {
 			return nil, nil, err
 		}
+
 		return queue.DecideInit(st, nowMS, cmd.InitCommand)
 
 	case "lease":
@@ -227,6 +245,7 @@ func runVectorCommand(st *queue.State, nowMS int64, typ string, raw jsontext.Val
 		if err := json.Unmarshal(raw, &cmd, json.RejectUnknownMembers(true)); err != nil {
 			return nil, nil, err
 		}
+
 		return queue.DecideLease(st, nowMS, cmd.LeaseCommand)
 
 	case "heartbeat":
@@ -237,6 +256,7 @@ func runVectorCommand(st *queue.State, nowMS int64, typ string, raw jsontext.Val
 		if err := json.Unmarshal(raw, &cmd, json.RejectUnknownMembers(true)); err != nil {
 			return nil, nil, err
 		}
+
 		return queue.DecideHeartbeat(st, nowMS, cmd.HeartbeatCommand)
 
 	case "report":
@@ -247,6 +267,7 @@ func runVectorCommand(st *queue.State, nowMS int64, typ string, raw jsontext.Val
 		if err := json.Unmarshal(raw, &cmd, json.RejectUnknownMembers(true)); err != nil {
 			return nil, nil, err
 		}
+
 		return queue.DecideReport(st, nowMS, cmd.ReportCommand)
 
 	case "status":
@@ -260,6 +281,7 @@ func runVectorCommand(st *queue.State, nowMS int64, typ string, raw jsontext.Val
 		if err := json.Unmarshal(raw, &cmd, json.RejectUnknownMembers(true)); err != nil {
 			return nil, nil, err
 		}
+
 		return queue.DecideListTests(st, nowMS, cmd.ListTestsCommand)
 
 	default:
@@ -274,19 +296,23 @@ func assertPartialJSON(t *testing.T, step int, gotVal any, wantRaw jsontext.Valu
 	if err != nil {
 		t.Fatalf("step %d: marshal response: %v", step, err)
 	}
+
 	var gotMap map[string]any
 	if err := json.Unmarshal(gotBytes, &gotMap); err != nil {
 		t.Fatalf("step %d: unmarshal response: %v", step, err)
 	}
+
 	var wantMap map[string]any
 	if err := json.Unmarshal(wantRaw, &wantMap); err != nil {
 		t.Fatalf("step %d: unmarshal expect_response: %v", step, err)
 	}
+
 	for k, wv := range wantMap {
 		gv, ok := gotMap[k]
 		if !ok {
 			t.Fatalf("step %d: response missing key %q (got %s)", step, k, gotBytes)
 		}
+
 		if !reflect.DeepEqual(gv, wv) {
 			t.Fatalf("step %d: response[%q] = %#v; want %#v (full: %s)", step, k, gv, wv, gotBytes)
 		}

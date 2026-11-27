@@ -159,6 +159,7 @@ func TestEndToEndEightMachines(t *testing.T) {
 	for i := range 40 {
 		id := fmt.Sprintf("tests/test_%02d.py", i)
 		ids = append(ids, id)
+
 		if i%7 != 0 {
 			durations[id] = samples(int64((i*37)%50+1) * 100)
 		}
@@ -204,6 +205,7 @@ func TestEndToEndEightMachines(t *testing.T) {
 			if tc.staleOn < 0 {
 				all := slices.Concat(shares...)
 				slices.Sort(all)
+
 				if !slices.Equal(all, ids) {
 					t.Fatalf("the shares together are %q; want every test exactly once", all)
 				}

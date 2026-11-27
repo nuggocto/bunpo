@@ -15,6 +15,7 @@ func FuzzDecode(f *testing.F) {
 	f.Add([]byte(`{"version":2}`))
 	f.Add([]byte(`{"version":1,"run":1,"tests":{"a":{"samples":[1,2,3,4,5,6],"last_seen":1}}}`))
 	f.Add([]byte(`[]`))
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > 1<<16 {
 			t.Skip("bounded input keeps each case fast")

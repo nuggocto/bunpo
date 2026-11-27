@@ -27,6 +27,7 @@ func Verify(manifests []Manifest, input []string) []string {
 	for _, m := range manifests {
 		byDigest[m.Digest] = append(byDigest[m.Digest], m.Index)
 	}
+
 	if len(byDigest) > 1 {
 		problems = append(problems, digestProblem(byDigest))
 	}
@@ -49,6 +50,7 @@ func machineProblems(manifests []Manifest) []string {
 			badIndex = append(badIndex, fmt.Sprintf("manifest index %d is out of range for %d machines", m.Index, m.Machines))
 		}
 	}
+
 	slices.Sort(badIndex)
 	problems = append(problems, badIndex...)
 
@@ -57,6 +59,7 @@ func machineProblems(manifests []Manifest) []string {
 		for _, n := range slices.Sorted(maps.Keys(byCount)) {
 			parts = append(parts, fmt.Sprintf("%d on %s", n, machineList(byCount[n])))
 		}
+
 		problems = append(problems, "machines disagree on the machine count: "+strings.Join(parts, "; "))
 	}
 
@@ -92,17 +95,20 @@ func coverageProblems(manifests []Manifest, input []string) []string {
 		if inInput[id] {
 			continue
 		}
+
 		inInput[id] = true
 		if owners[id] == nil {
 			missing = append(missing, id)
 		}
 	}
+
 	slices.Sort(missing)
 
 	for _, id := range slices.Sorted(maps.Keys(owners)) {
 		if len(owners[id]) > 1 {
 			twice = append(twice, fmt.Sprintf("%s (%s)", id, machineList(owners[id])))
 		}
+
 		if !inInput[id] {
 			extra = append(extra, id)
 		}
@@ -112,9 +118,11 @@ func coverageProblems(manifests []Manifest, input []string) []string {
 	if len(twice) > 0 {
 		problems = append(problems, listProblem("assigned to more than one machine", twice))
 	}
+
 	if len(missing) > 0 {
 		problems = append(problems, listProblem("in the input but assigned to no machine", missing))
 	}
+
 	if len(extra) > 0 {
 		problems = append(problems, listProblem("assigned but not in the input", extra))
 	}
@@ -128,6 +136,7 @@ func digestProblem(byDigest map[string][]int) string {
 	digests := slices.SortedFunc(maps.Keys(byDigest), func(a, b string) int {
 		return cmp.Or(cmp.Compare(len(byDigest[b]), len(byDigest[a])), cmp.Compare(a, b))
 	})
+
 	var parts []string
 	for _, d := range digests {
 		parts = append(parts, fmt.Sprintf("%s… on %s", d[:min(12, len(d))], machineList(byDigest[d])))

@@ -22,10 +22,12 @@ import (
 type stringList []string
 
 func (s *stringList) String() string { return strings.Join(*s, ",") }
+
 func (s *stringList) Set(v string) error {
 	if v == "" {
 		return errors.New("path must not be empty")
 	}
+
 	*s = append(*s, v)
 	return nil
 }
@@ -36,15 +38,18 @@ func isQueueInvocation(args []string) (queueURL string, rest []string, ok bool) 
 	if len(args) == 0 {
 		return "", nil, false
 	}
+
 	a := args[0]
 	switch {
 	case a == "--queue" || a == "-queue":
 		if len(args) == 1 {
 			return "", nil, true
 		}
+
 		if args[1] == "-h" || args[1] == "--help" || args[1] == "-help" {
 			return "", []string{"-h"}, true
 		}
+
 		return args[1], args[2:], true
 	case strings.HasPrefix(a, "--queue="):
 		return strings.TrimPrefix(a, "--queue="), args[1:], true
@@ -80,9 +85,11 @@ func cmdQueue(queueURL string, args []string, stdin io.Reader, stdout io.Writer,
 	if queueURL == "" {
 		return fs.fail("--queue URL is required")
 	}
+
 	if *buildID == "" {
 		return fs.fail("--build is required")
 	}
+
 	if !queue.ValidBuildID(*buildID) {
 		return fs.fail("invalid --build %q", *buildID)
 	}
@@ -100,13 +107,16 @@ func cmdQueue(queueURL string, args []string, stdin io.Reader, stdout io.Writer,
 		if fs.NArg() > 0 {
 			return fs.fail("unexpected argument %q with --status", fs.Arg(0))
 		}
+
 		tok := getenv("BUNPO_QUEUE_READ_TOKEN")
 		if tok == "" {
 			tok = getenv("BUNPO_QUEUE_TOKEN")
 		}
+
 		if tok == "" {
 			return fs.fail("BUNPO_QUEUE_READ_TOKEN or BUNPO_QUEUE_TOKEN must be set")
 		}
+
 		client, err := queueapi.NewClient(queueapi.ClientConfig{
 			BaseURL:           queueURL,
 			Token:             tok,
@@ -115,6 +125,7 @@ func cmdQueue(queueURL string, args []string, stdin io.Reader, stdout io.Writer,
 		if err != nil {
 			return err
 		}
+
 		return runQueueStatus(ctx, client, *buildID, *dir, con)
 	}
 
@@ -152,6 +163,7 @@ func cmdQueue(queueURL string, args []string, stdin io.Reader, stdout io.Writer,
 	if tok == "" {
 		return fs.fail("BUNPO_QUEUE_TOKEN must be set")
 	}
+
 	client, err := queueapi.NewClient(queueapi.ClientConfig{
 		BaseURL:           queueURL,
 		Token:             tok,
@@ -170,8 +182,10 @@ func cmdQueue(queueURL string, args []string, stdin io.Reader, stdout io.Writer,
 	if err != nil {
 		return err
 	}
+
 	timings, _, err := readTimings(root)
 	_ = root.Close()
+
 	if err != nil {
 		return err
 	}
@@ -194,10 +208,16 @@ func cmdQueue(queueURL string, args []string, stdin io.Reader, stdout io.Writer,
 
 	opts := reportOptions{format: *format, src: src, prefix: *prefix}
 	verdict, err := queuerunner.Run(ctx, queuerunner.RunConfig{
-		Client:        client,
-		BuildID:       *buildID,
-		MachineIndex:  machineIdx,
-		Config:        queue.Config{Machines: *total, LeaseTTLMS: leaseTTL.Milliseconds(), BuildTimeoutMS: buildTimeout.Milliseconds(), MaxAttempts: *maxAttempts, MaxBatch: *maxBatch},
+		Client:       client,
+		BuildID:      *buildID,
+		MachineIndex: machineIdx,
+		Config: queue.Config{
+			Machines:       *total,
+			LeaseTTLMS:     leaseTTL.Milliseconds(),
+			BuildTimeoutMS: buildTimeout.Milliseconds(),
+			MaxAttempts:    *maxAttempts,
+			MaxBatch:       *maxBatch,
+		},
 		Tests:         ids,
 		PredictionsMS: preds,
 		Dir:           *dir,
@@ -212,6 +232,7 @@ func cmdQueue(queueURL string, args []string, stdin io.Reader, stdout io.Writer,
 		LogInfo: con.info,
 		LogWarn: con.warn,
 	})
+
 	if err != nil {
 		return formatQueueRunError(err)
 	}
@@ -220,6 +241,7 @@ func cmdQueue(queueURL string, args []string, stdin io.Reader, stdout io.Writer,
 		con.success("queue passed", "build %s passed (%d tests)", *buildID, len(ids))
 		return nil
 	}
+
 	return checkFailed("build %s finished with verdict %s", *buildID, verdict)
 }
 
@@ -228,16 +250,20 @@ func formatQueueRunError(err error) error {
 	if errors.As(err, &extraErr) {
 		return checkFailed("%v\nsome runners treat file arguments as patterns; see the guide for your runner", extraErr)
 	}
+
 	var apiErr *queueapi.APIError
 	if errors.As(err, &apiErr) {
 		if apiErr.HTTPStatus == 400 {
 			return err
 		}
+
 		if apiErr.Code == queueapi.ErrCodeAtCapacity {
 			return checkFailed("queue server is at capacity: %s", apiErr.Message)
 		}
+
 		return checkFailed("%v", err)
 	}
+
 	return checkFailed("%v", err)
 }
 
@@ -252,10 +278,12 @@ func runQueueStatus(ctx context.Context, client *queueapi.Client, buildID, dir s
 	if err := removeFile(root, reportName(0)); err != nil {
 		return err
 	}
+
 	existing, err := indexedFiles(root, "report-")
 	if err != nil {
 		return err
 	}
+
 	if len(existing) > 0 {
 		return checkFailed("found other run report(s) in %s (for example %s); clean the directory before running --status", dir, reportName(existing[0]))
 	}
@@ -267,6 +295,7 @@ func runQueueStatus(ctx context.Context, client *queueapi.Client, buildID, dir s
 	if err != nil {
 		return checkFailed("%v", err)
 	}
+
 	st := res.Status
 
 	con.info("build %s: verdict %s (%d passed, %d skipped, %d failed, %d unresolved, %d pending, %d leased)",
@@ -275,9 +304,11 @@ func runQueueStatus(ctx context.Context, client *queueapi.Client, buildID, dir s
 	for _, c := range st.Conflicts {
 		con.warn("init conflict from runner %s: %s", c.RunnerID, c.Reason)
 	}
+
 	if st.ConflictsTruncated {
 		con.warn("more init conflicts occurred past the 8-entry limit")
 	}
+
 	for _, p := range st.Problems {
 		con.warn("%s: %s (attempts: %d)", p.State, p.Test, p.Generation)
 	}
@@ -287,9 +318,11 @@ func runQueueStatus(ctx context.Context, client *queueapi.Client, buildID, dir s
 		if err != nil {
 			return err
 		}
+
 		if err := writeFile(root, reportName(0), data); err != nil {
 			return err
 		}
+
 		con.info("wrote %s (%d files) for bunpo merge", reportName(0), len(res.Report.Tests))
 	}
 
@@ -297,5 +330,6 @@ func runQueueStatus(ctx context.Context, client *queueapi.Client, buildID, dir s
 		con.success("queue passed", "build %s passed (%d tests)", st.BuildID, st.Counts.Total)
 		return nil
 	}
+
 	return checkFailed("build %s verdict is %s", st.BuildID, st.Verdict)
 }

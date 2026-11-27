@@ -26,6 +26,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 		timed   bool
 		ms      int64
 	}
+
 	makeAttempts := func(paths ...string) []queue.LeasedAttemptView {
 		out := make([]queue.LeasedAttemptView, len(paths))
 		for i, p := range paths {
@@ -36,6 +37,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 				Test:       p,
 			}
 		}
+
 		return out
 	}
 
@@ -65,6 +67,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 				{queue.OutcomeError, false, 0},
 			},
 		},
+
 		{
 			name:     "exit 0 junit: failed case still reports failed untimed",
 			attempts: makeAttempts("a.py", "b.py"),
@@ -79,6 +82,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 				{queue.OutcomePassed, true, 80},
 			},
 		},
+
 		{
 			name:     "exit 0 lines: passed timed and failed untimed",
 			attempts: makeAttempts("a.py", "b.py"),
@@ -93,6 +97,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 				{queue.OutcomeFailed, false, 0},
 			},
 		},
+
 		{
 			name:     "non-zero junit with failed sibling: clean sibling untimed, skipped and absent error",
 			attempts: makeAttempts("a.py", "b.py", "c.py", "d.py", "e.py"),
@@ -112,6 +117,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 				{queue.OutcomeError, false, 0},
 			},
 		},
+
 		{
 			name:     "non-zero junit with no failed file: all error, never passed",
 			attempts: makeAttempts("a.py", "b.py"),
@@ -126,6 +132,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 				{queue.OutcomeError, false, 0},
 			},
 		},
+
 		{
 			name:     "non-zero lines with failed sibling: non-failed becomes error",
 			attempts: makeAttempts("a.py", "b.py"),
@@ -140,6 +147,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 				{queue.OutcomeError, false, 0},
 			},
 		},
+
 		{
 			name:     "signaled junit with failed sibling: non-failed becomes error",
 			attempts: makeAttempts("a.py", "b.py"),
@@ -155,6 +163,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 				{queue.OutcomeError, false, 0},
 			},
 		},
+
 		{
 			name:     "unreadable report: all error",
 			attempts: makeAttempts("a.py", "b.py"),
@@ -166,6 +175,7 @@ func TestMapOutcomesAllRows(t *testing.T) {
 				{queue.OutcomeError, false, 0},
 			},
 		},
+
 		{
 			name:     "extra unassigned file in report: all error plus ExtraFilesError",
 			attempts: makeAttempts("a.py", "b.py"),
@@ -194,9 +204,11 @@ func TestMapOutcomesAllRows(t *testing.T) {
 			} else if extra == nil || !slices.Equal(extra.Extra, tc.wantExtra) {
 				t.Fatalf("extra = %v; want %v", extra, tc.wantExtra)
 			}
+
 			if len(got) != len(tc.want) {
 				t.Fatalf("len(results) = %d; want %d", len(got), len(tc.want))
 			}
+
 			for i, w := range tc.want {
 				r := got[i]
 				if r.Outcome != w.outcome || r.Timed != w.timed || r.DurationMS != w.ms {
@@ -209,13 +221,20 @@ func TestMapOutcomesAllRows(t *testing.T) {
 }
 
 func TestFilteredChildEnvStripsTokens(t *testing.T) {
-	in := []string{"PATH=/usr/bin", "BUNPO_QUEUE_TOKEN=secret-write", "BUNPO_QUEUE_READ_TOKEN=secret-read", "bunpo_queue_token=lower", "BUNPO_TESTS_FILE=/old"}
+	in := []string{
+		"PATH=/usr/bin",
+		"BUNPO_QUEUE_TOKEN=secret-write",
+		"BUNPO_QUEUE_READ_TOKEN=secret-read",
+		"bunpo_queue_token=lower",
+		"BUNPO_TESTS_FILE=/old",
+	}
 	got := filteredChildEnv(in, "/new/batch.txt")
 	for _, kv := range got {
 		if strings.Contains(strings.ToUpper(kv), "BUNPO_QUEUE_TOKEN") || strings.Contains(strings.ToUpper(kv), "BUNPO_QUEUE_READ_TOKEN") {
 			t.Fatalf("token leaked into child env: %q", kv)
 		}
 	}
+
 	if !slices.Contains(got, "BUNPO_TESTS_FILE=/new/batch.txt") || !slices.Contains(got, "PATH=/usr/bin") {
 		t.Fatalf("unexpected filtered env: %v", got)
 	}
@@ -230,12 +249,14 @@ func TestDriverCancelsCleanlyWithoutGoroutineLeaks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	client, err := queueapi.NewClient(queueapi.ClientConfig{BaseURL: srv.URL, Token: "write-secret-token-0123456789abcdef", HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	runtime.GC()
 	baseGoroutines := runtime.NumGoroutine()
 	dir := t.TempDir()
@@ -254,13 +275,17 @@ func TestDriverCancelsCleanlyWithoutGoroutineLeaks(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled Run err = %v; want context deadline/canceled", err)
 	}
+
 	srv.CloseClientConnections()
+
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 		runtime.GC()
+
 		if runtime.NumGoroutine() <= baseGoroutines+2 {
 			return
 		}
 	}
+
 	t.Fatalf("possible goroutine leak: before=%d after=%d", baseGoroutines, runtime.NumGoroutine())
 }
 
@@ -270,28 +295,34 @@ func TestDriverChildHelper(t *testing.T) {
 		if err := os.WriteFile(outPath, []byte(testsFile), 0o600); err != nil {
 			os.Exit(2)
 		}
+
 		// Write a valid lines report for every file in the batch so Run finishes cleanly.
 		raw, err := os.ReadFile(testsFile)
 		if err != nil {
 			os.Exit(3)
 		}
+
 		var rep strings.Builder
 		for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 			if line != "" {
 				rep.WriteString(line + " 10\n")
 			}
 		}
+
 		if repPath := os.Getenv("BUNPO_DRIVER_REPORT_PATH"); repPath != "" {
 			if err := os.WriteFile(repPath, []byte(rep.String()), 0o600); err != nil {
 				os.Exit(4)
 			}
 		}
+
 		os.Exit(0)
 	}
+
 	waitFile := os.Getenv("BUNPO_DRIVER_TEST_WAIT")
 	if waitFile == "" {
 		return
 	}
+
 	for ; ; time.Sleep(10 * time.Millisecond) {
 		if _, err := os.Stat(waitFile); err == nil {
 			os.Exit(0)
@@ -308,6 +339,7 @@ func TestRunSameMachineIndexUsesDistinctBatchFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	client, err := queueapi.NewClient(queueapi.ClientConfig{BaseURL: srv.URL, Token: "write-secret-token-0123456789abcdef", HTTPClient: srv.Client()})
@@ -323,6 +355,7 @@ func TestRunSameMachineIndexUsesDistinctBatchFiles(t *testing.T) {
 		reportPath := filepath.Join(sharedDir, "rep-"+string(rune('0'+i))+".lines")
 		t.Setenv("BUNPO_DRIVER_RECORD_BATCH_PATH", recordPath)
 		t.Setenv("BUNPO_DRIVER_REPORT_PATH", reportPath)
+
 		v, err := Run(context.Background(), RunConfig{
 			Client:        client,
 			BuildID:       "same-index-build-" + string(rune('a'+i)),
@@ -344,19 +377,23 @@ func TestRunSameMachineIndexUsesDistinctBatchFiles(t *testing.T) {
 				return rep.Files, err
 			},
 		})
+
 		if err != nil || v != queue.VerdictPassed {
 			t.Fatalf("runner %d: verdict=%q err=%v", i, v, err)
 		}
+
 		got, err := os.ReadFile(recordPath)
 		if err != nil {
 			t.Fatalf("read recorded batch path %d: %v", i, err)
 		}
+
 		batchPaths[i] = string(got)
 	}
 
 	if batchPaths[0] == "" || batchPaths[1] == "" {
 		t.Fatalf("expected non-empty batch paths, got %q and %q", batchPaths[0], batchPaths[1])
 	}
+
 	if batchPaths[0] == batchPaths[1] {
 		t.Fatalf("two runners with same --index and --dir shared batch file %q", batchPaths[0])
 	}

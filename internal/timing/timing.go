@@ -58,6 +58,7 @@ func (s *sampleSlice) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		if _, err := dec.ReadToken(); err != nil {
 			return err
 		}
+
 		*s = nil
 		return nil
 	}
@@ -66,6 +67,7 @@ func (s *sampleSlice) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	if err != nil {
 		return err
 	}
+
 	if tok.Kind() != '[' {
 		return fmt.Errorf("expected array, got %s", tok.Kind())
 	}
@@ -75,12 +77,15 @@ func (s *sampleSlice) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 		if dec.PeekKind() == 'n' {
 			return errors.New("sample cannot be null")
 		}
+
 		var v int64
 		if err := json.UnmarshalDecode(dec, &v); err != nil {
 			return err
 		}
+
 		out = append(out, v)
 	}
+
 	if _, err := dec.ReadToken(); err != nil {
 		return err
 	}
@@ -164,6 +169,7 @@ func Encode(f File) ([]byte, error) {
 		if samples == nil {
 			samples = []int64{}
 		}
+
 		tests[id] = entryEncodeJSON{Samples: samples, LastSeen: e.LastSeen}
 	}
 
@@ -235,10 +241,12 @@ func validID(id string) bool {
 		if part == "" || part == "." || part == ".." {
 			return false
 		}
+
 		if first && len(part) >= 2 && part[1] == ':' &&
 			(('a' <= part[0] && part[0] <= 'z') || ('A' <= part[0] && part[0] <= 'Z')) {
 			return false
 		}
+
 		first = false
 	}
 
@@ -261,6 +269,7 @@ func Median(values []int64) (int64, bool) {
 	} else {
 		sorted = slices.Clone(values)
 	}
+
 	slices.Sort(sorted)
 
 	if sorted[0] < 0 {

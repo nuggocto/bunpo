@@ -90,6 +90,7 @@ func exitCode(name string, err error, con *console) int {
 		if exit.err != nil {
 			con.fail(name, exit.err)
 		}
+
 		return exit.code
 
 	default:
@@ -109,6 +110,7 @@ func (e *exitError) Error() string {
 	if e.err == nil {
 		return fmt.Sprintf("exit status %d", e.code)
 	}
+
 	return e.err.Error()
 }
 
@@ -126,10 +128,12 @@ type flags struct {
 func newFlags(name, synopsis string, con *console) *flags {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(con.w)
+
 	fs.Usage = func() {
 		fmt.Fprintf(con.w, "usage: bunpo %s\n\nFlags:\n", synopsis)
 		fs.PrintDefaults()
 	}
+
 	return &flags{fs, con}
 }
 
@@ -162,5 +166,6 @@ func version() string {
 	if !ok || info.Main.Version == "" {
 		return "(devel)"
 	}
+
 	return info.Main.Version
 }

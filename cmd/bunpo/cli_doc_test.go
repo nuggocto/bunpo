@@ -17,6 +17,7 @@ func TestCLIDocFlagsMatchHelp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	doc := string(docBytes)
 
 	helpFlagRe := regexp.MustCompile(`(?m)^\s*-([a-z][a-z0-9-]*)\b`)
@@ -39,6 +40,7 @@ func TestCLIDocFlagsMatchHelp(t *testing.T) {
 	for _, tc := range cases {
 		covered[tc.args[0]] = true
 	}
+
 	for name := range commands {
 		if !covered[name] {
 			t.Fatalf("command %q is registered in commands map but missing from TestCLIDocFlagsMatchHelp", name)
@@ -57,6 +59,7 @@ func TestCLIDocFlagsMatchHelp(t *testing.T) {
 			for _, m := range helpFlagRe.FindAllStringSubmatch(stderr.String(), -1) {
 				helpFlags = append(helpFlags, m[1])
 			}
+
 			slices.Sort(helpFlags)
 			helpFlags = slices.Compact(helpFlags)
 
@@ -65,6 +68,7 @@ func TestCLIDocFlagsMatchHelp(t *testing.T) {
 			for _, m := range docFlagRe.FindAllStringSubmatch(sec, -1) {
 				docFlags = append(docFlags, m[1])
 			}
+
 			slices.Sort(docFlags)
 			docFlags = slices.Compact(docFlags)
 
@@ -81,9 +85,11 @@ func markdownSection(t *testing.T, doc, heading string) string {
 	if idx < 0 {
 		t.Fatalf("docs/cli.md missing heading %q", heading)
 	}
+
 	rest := doc[idx+len(heading)+1:]
 	if next := strings.Index(rest, "\n##"); next >= 0 {
 		return rest[:next]
 	}
+
 	return rest
 }

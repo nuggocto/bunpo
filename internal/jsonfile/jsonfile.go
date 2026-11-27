@@ -34,6 +34,7 @@ func Decode(kind string, data []byte, maxBytes int, version int64, v Versioned) 
 		if hdrErr := json.Unmarshal(data, &header); hdrErr == nil && header.Version != version {
 			return fmt.Errorf("%w: %s version %d; this build reads version %d", ErrUnsupportedVersion, kind, header.Version, version)
 		}
+
 		return fmt.Errorf("%w: %s: %v", ErrInvalid, kind, err)
 	}
 
@@ -58,6 +59,7 @@ func Require(kind string, members ...Member) error {
 			return fmt.Errorf("%w: %s has no %q member", ErrInvalid, kind, m.Name)
 		}
 	}
+
 	return nil
 }
 

@@ -84,6 +84,7 @@ func Wrap(api http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", spec.cache)
 		w.Header().Set("Content-Type", spec.contentType)
 		w.WriteHeader(http.StatusOK)
+
 		if r.Method == http.MethodGet {
 			_, _ = w.Write(data)
 		}
@@ -94,13 +95,16 @@ func matchRoute(path string) (assetSpec, bool) {
 	if path == "/" {
 		return indexSpec, true
 	}
+
 	if spec, ok := assets[path]; ok {
 		return spec, true
 	}
+
 	if buildID, ok := strings.CutPrefix(path, "/builds/"); ok {
 		if !strings.Contains(buildID, "/") && queue.ValidBuildID(buildID) {
 			return indexSpec, true
 		}
 	}
+
 	return assetSpec{}, false
 }

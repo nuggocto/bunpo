@@ -51,6 +51,7 @@ func newConsole(w io.Writer, getenv func(string) string) *console {
 			c.colors = trueColors
 		}
 	}
+
 	return c
 }
 
@@ -64,6 +65,7 @@ func colorful(w io.Writer, getenv func(string) string) bool {
 	if !ok {
 		return false
 	}
+
 	info, err := f.Stat()
 	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
 		return false
@@ -74,6 +76,7 @@ func colorful(w io.Writer, getenv func(string) string) bool {
 	if runtime.GOOS == "windows" && getenv("WT_SESSION") == "" && getenv("TERM") == "" {
 		return false
 	}
+
 	return true
 }
 
@@ -88,6 +91,7 @@ func (c *console) warn(format string, a ...any) {
 		fmt.Fprintf(c.w, "::warning title=bunpo::%s\n", escapeData(msg))
 		return
 	}
+
 	fmt.Fprintf(c.w, "bunpo: %s %s\n", c.paint(c.colors.warn, "warning:"), msg)
 }
 
@@ -99,6 +103,7 @@ func (c *console) fail(cmd string, err error) {
 		fmt.Fprintf(c.w, "::error title=%s::%s\n", escapeProperty(who), escapeData(err.Error()))
 		return
 	}
+
 	fmt.Fprintf(c.w, "%s: %s %v\n", who, c.paint(c.colors.fail, "error:"), err)
 }
 
@@ -111,6 +116,7 @@ func (c *console) success(label, format string, a ...any) {
 		fmt.Fprintf(c.w, "::notice title=bunpo::%s\n", escapeData(label+": "+msg))
 		return
 	}
+
 	fmt.Fprintf(c.w, "bunpo: %s %s\n", c.paint(c.colors.ok, label+":"), msg)
 }
 
@@ -118,6 +124,7 @@ func (c *console) paint(color, text string) string {
 	if color == "" {
 		return text
 	}
+
 	return color + text + reset
 }
 

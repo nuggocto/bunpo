@@ -55,6 +55,7 @@ var runners = []runner{
 		killPath: "tests/test_zz_kill.py",
 		killBody: "import os, signal\n\ndef test_kill():\n    os.kill(0, signal.SIGKILL)\n",
 	},
+
 	{
 		name: "jest", testDir: "tests", failing: "tests/sub/fails.test.js", reportFile: "junit.xml",
 		holdPath: "tests/00_hold.test.js",
@@ -67,6 +68,7 @@ var runners = []runner{
 			"tests/a.test.js":          jsTest(""),
 		},
 	},
+
 	{
 		name: "vitest", testDir: "tests", failing: "tests/sub/fails.test.js", reportFile: "bunpo-times.txt",
 		holdPath: "tests/00_hold.test.js",
@@ -79,6 +81,7 @@ var runners = []runner{
 			"tests/a.test.js":          jsTest(`import { test } from "vitest";`),
 		},
 	},
+
 	{
 		name: "rspec", testDir: "spec", failing: "spec/sub/fails_spec.rb", reportFile: "junit.xml",
 		holdPath: "spec/00_hold_spec.rb",
@@ -91,6 +94,7 @@ var runners = []runner{
 			"spec/a_spec.rb":           rubyTest(),
 		},
 	},
+
 	{
 		name: "playwright", testDir: "tests", failing: "tests/sub/fails.spec.js", reportFile: "junit.xml",
 		holdPath: "tests/00_hold.spec.js",
@@ -122,6 +126,7 @@ test("hold", async () => {
 }, 25000);
 `
 	}
+
 	return `const fs = require("node:fs");
 test("hold", async () => {
   const m = process.env.BUNPO_KILL_MARKER;
@@ -224,12 +229,14 @@ func run() int {
 			fmt.Fprintln(os.Stderr, "guidecheck:", err)
 			return 1
 		}
+
 		guides[i] = g
 	}
 
 	failed := false
 	if *mode == "all" || *mode == "static" {
 		t0 := time.Now()
+
 		for i, r := range runners {
 			for _, s := range scenarios {
 				if s.decoys && r.decoys == nil {
@@ -243,9 +250,11 @@ func run() int {
 				if problem != nil {
 					result, failed = "FAIL: "+problem.Error(), true
 				}
+
 				fmt.Printf("%-11s %-26s %s\n", r.name, s.name, result)
 			}
 		}
+
 		fmt.Printf("static checks finished in %s\n", time.Since(t0).Round(time.Millisecond))
 	}
 
@@ -256,8 +265,10 @@ func run() int {
 			fmt.Fprintln(os.Stderr, "guidecheck:", err)
 			return 1
 		}
+
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
 		go func() {
 			<-sigCh
 			srv.stop()
@@ -279,6 +290,7 @@ func run() int {
 		// killed-machine lease expiries overlap across all five runners.
 		for i, r := range runners {
 			wg.Add(1)
+
 			go func(idx int, r runner, g guide) {
 				defer wg.Done()
 				var rows []row
@@ -286,9 +298,11 @@ func run() int {
 					if qs.decoys && r.decoys == nil {
 						continue
 					}
+
 					if qs.playwrightSetup && r.name != "playwright" {
 						continue
 					}
+
 					dir := filepath.Join(work, "queue", r.name, strings.ReplaceAll(qs.name, " ", "-"))
 					problem := checkQueue(dir, r, g, qs, path, *fixtures, srv.url)
 					res := "ok"
@@ -296,11 +310,14 @@ func run() int {
 					if problem != nil {
 						res, bad = "FAIL: "+problem.Error(), true
 					}
+
 					rows = append(rows, row{runner: r.name, scenario: qs.name, result: res, failed: bad})
 				}
+
 				results[idx] = rows
 			}(i, r, guides[i])
 		}
+
 		wg.Wait()
 
 		for _, rows := range results {
@@ -308,15 +325,18 @@ func run() int {
 				if row.failed {
 					failed = true
 				}
+
 				fmt.Printf("%-11s %-26s %s\n", row.runner, row.scenario, row.result)
 			}
 		}
+
 		fmt.Printf("queue checks finished in %s\n", time.Since(t0).Round(time.Millisecond))
 	}
 
 	if failed {
 		return 1
 	}
+
 	return 0
 }
 
@@ -341,6 +361,7 @@ func check(dir string, r runner, g guide, s scenario, path, fixtures string) err
 			if code == 0 {
 				return fmt.Errorf("machine %d passed with no test files to find", i)
 			}
+
 			continue
 		}
 
@@ -363,9 +384,11 @@ func check(dir string, r runner, g guide, s scenario, path, fixtures string) err
 		if err != nil {
 			return fmt.Errorf("machine %d: %v\n%s", i, err, output)
 		}
+
 		if !slices.Equal(reported, share) {
 			return fmt.Errorf("machine %d reported %q, want %q\n%s", i, reported, share, output)
 		}
+
 		reports = append(reports, report, filepath.Join(m, ".bunpo", fmt.Sprintf("manifest-%d.json", i)))
 	}
 
@@ -373,6 +396,7 @@ func check(dir string, r runner, g guide, s scenario, path, fixtures string) err
 	if err := prepareSuite(final, r, g, s, fixtures); err != nil {
 		return err
 	}
+
 	for _, f := range reports {
 		if err := copyFile(f, filepath.Join(final, ".bunpo", filepath.Base(f))); err != nil {
 			return err
@@ -395,6 +419,7 @@ func check(dir string, r runner, g guide, s scenario, path, fixtures string) err
 	if code, output := shell(final, "bunpo merge", "", map[string]string{"PATH": path}); code != 0 {
 		return fmt.Errorf("merge exited %d\n%s", code, output)
 	}
+
 	return nil
 }
 
@@ -405,6 +430,7 @@ func prepareSuite(dir string, r runner, g guide, s scenario, fixtures string) er
 	if err := os.CopyFS(dir, os.DirFS(src)); err != nil {
 		return err
 	}
+
 	if err := os.MkdirAll(filepath.Join(dir, ".bunpo"), 0o755); err != nil {
 		return err
 	}
@@ -419,6 +445,7 @@ func prepareSuite(dir string, r runner, g guide, s scenario, fixtures string) er
 	if g.vitestConfig != "" {
 		// Remove the fixture's .js config so Vitest loads the guide's .ts config.
 		_ = os.Remove(filepath.Join(dir, "vitest.config.js"))
+
 		if err := os.WriteFile(filepath.Join(dir, "vitest.config.ts"), []byte(g.vitestConfig), 0o644); err != nil {
 			return err
 		}
@@ -430,6 +457,7 @@ func prepareSuite(dir string, r runner, g guide, s scenario, fixtures string) er
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return err
 			}
+
 			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 				return err
 			}
@@ -439,6 +467,7 @@ func prepareSuite(dir string, r runner, g guide, s scenario, fixtures string) er
 	if s.noTests {
 		return os.RemoveAll(filepath.Join(dir, r.testDir))
 	}
+
 	return nil
 }
 
@@ -498,20 +527,24 @@ func readGuide(path string) (guide, error) {
 	if lq == nil {
 		return guide{}, fmt.Errorf("%s has no Live queue section", path)
 	}
+
 	batch := bashBlock.FindSubmatch(lq[1])
 	qYAML := yamlBlock.FindSubmatch(lq[1])
 	if batch == nil || qYAML == nil {
 		return guide{}, fmt.Errorf("%s: Live queue section must include run-batch.sh and workflow YAML", path)
 	}
+
 	if !bashDefault.Match(qYAML[1]) {
 		return guide{}, fmt.Errorf("%s: Live queue workflow does not set defaults.run.shell to bash", path)
 	}
+
 	qMachine := queueMachineStep.FindSubmatch(qYAML[1])
 	qStatus := queueStatusStep.FindSubmatch(qYAML[1])
 	qMerge := queueMergeStep.FindSubmatch(qYAML[1])
 	if qMachine == nil || qStatus == nil || qMerge == nil {
 		return guide{}, fmt.Errorf("%s: cannot find Live queue machine, status, or merge step", path)
 	}
+
 	g.queueBatchScript = string(batch[1])
 	g.queueMachineScript = dedentBlock(string(qMachine[2]), "          ")
 	g.queueStatusScript = string(qStatus[1])
@@ -524,6 +557,7 @@ func dedentBlock(block, prefix string) string {
 	for line := range strings.Lines(block) {
 		b.WriteString(strings.TrimPrefix(line, prefix))
 	}
+
 	return b.String()
 }
 
@@ -538,6 +572,7 @@ func toolPath(work, bunpo, fixtures string) (string, error) {
 	if err := copyFile(bunpo, filepath.Join(bin, "bunpo")); err != nil {
 		return "", err
 	}
+
 	if err := os.Chmod(filepath.Join(bin, "bunpo"), 0o755); err != nil {
 		return "", err
 	}
@@ -580,6 +615,7 @@ func readShare(manifest string) ([]string, error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, errors.New("no manifest")
 	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -596,6 +632,7 @@ func readReported(path string) ([]string, error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, errors.New("wrote no run report")
 	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -606,6 +643,7 @@ func readReported(path string) ([]string, error) {
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, err
 	}
+
 	return slices.Sorted(maps.Keys(r.Tests)), nil
 }
 
@@ -614,8 +652,10 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
+
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
+
 	return os.WriteFile(dst, data, 0o644)
 }

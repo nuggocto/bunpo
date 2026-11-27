@@ -101,9 +101,11 @@ func writeFile(root *os.Root, name string, data []byte) (err error) {
 	if _, err = f.Write(data); err != nil {
 		return err
 	}
+
 	if err = f.Sync(); err != nil {
 		return err
 	}
+
 	if err = f.Close(); err != nil {
 		return err
 	}
@@ -117,6 +119,7 @@ func removeFile(root *os.Root, name string) error {
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
+
 	return err
 }
 
@@ -152,6 +155,7 @@ func readInventory(r io.Reader) (split.Inventory, error) {
 	if inv.Len() == 0 {
 		return split.Inventory{}, errors.New("the test list on standard input is empty; check the command that lists your test files")
 	}
+
 	return inv, nil
 }
 
@@ -169,6 +173,7 @@ func readList(r io.Reader) ([]string, error) {
 		if trimmed, ok := strings.CutSuffix(line, "\n"); ok {
 			line = strings.TrimSuffix(trimmed, "\r")
 		}
+
 		if line != "" {
 			ids = append(ids, line)
 		}
