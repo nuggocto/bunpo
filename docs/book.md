@@ -770,17 +770,21 @@ deciding from applying:
   batch.
 - Heartbeats fire every `lease_ttl / 3`. On `SIGINT`/`SIGTERM` or a lost lease
   (`held: false`), Unix runners signal the child process group (`SIGTERM`, then
-  `SIGKILL` after 5 s).
+  `SIGKILL` after 5 s). The same 2-minute transient retry budget used for
+  foreground requests covers heartbeats while a batch runs: if heartbeats keep
+  failing transiently past the budget, the runner stops the child the same way,
+  sends no report for that batch, and exits 1 once the child exits.
 - On exit 0, files with passing cases report `passed` (timed), all-skipped
   files report `skipped`, and missing files report `error`. On a normal
   non-zero exit with a JUnit report that includes a failed sibling in the same
   lease, clean files with zero skipped cases report `passed` (untimed) while
   everything else reports `error`. Any unassigned file in the report marks the
   whole batch `error` and exits 1.
-- `--status` prints the verdict, counts, problem tests, and conflicts, and
-  writes `report-0.json` (`machines: 1`) when the build finished with zero
-  unresolved tests and zero conflicts so `bunpo merge` can update
-  `timings.json`.
+- `--status` prints the verdict, counts, problem tests, and conflicts. When the
+  build finished with zero unresolved tests and zero conflicts, it paginates
+  `/tests`, re-checks `/status` once after the last page to confirm the verdict,
+  counts, and zero-conflict state still hold, and only then writes
+  `report-0.json` (`machines: 1`) so `bunpo merge` can update `timings.json`.
 
 ## Limits
 

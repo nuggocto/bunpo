@@ -571,7 +571,7 @@ Additional client rules:
 - Report mentions a file outside the lease: report every file in the lease as `error`, print the same diagnostic as `bunpo record`, and exit `1`.
 - Heartbeat runs at `lease_ttl_ms / 3`. On `SIGINT`/`SIGTERM` or when `heartbeat` returns `held: false`, signal the child process group on Unix (`SIGTERM`, then `SIGKILL` after 5 s; process kill only on Windows). On `SIGINT`/`SIGTERM`, stop heartbeats and report nothing. On lost lease, discard the run and loop to `lease`.
 - On `wait`, sleep `retry_after_ms` plus up to 25% random jitter and ask again.
-- Retry transient HTTP/network/5xx failures with exponential backoff and jitter up to 2 minutes, then exit `1`.
+- Retry transient HTTP/network/5xx failures with exponential backoff and jitter up to 2 minutes, then exit `1`. The same 2-minute retry budget covers heartbeats while a batch runs: if heartbeats keep failing transiently past the budget, stop the child process (`SIGTERM`, then `SIGKILL` after 5 s), send no report for that batch, and exit `1` once the child exits.
 - Exit `0` only when the build verdict is `passed`; `1` when `failed`, `unresolved`, or on runtime error; `2` on bad usage or invalid input.
 
 ### 7.2 `--status` and `report-0.json`
@@ -580,5 +580,5 @@ Additional client rules:
 
 1. Removes any leftover `report-0.json` in `--dir` first. Fails if any other `report-<N>.json` (`N >= 1`) exists in `--dir`.
 2. Fetches `GET /api/v1/builds/{build}`, prints the verdict, counts, failed/unresolved tests, and any `init` conflicts to stderr.
-3. If the build is finished with zero unresolved tests and zero `init` conflicts (`verdict` is `passed` or `failed` with `unresolved == 0 && len(conflicts) == 0`), paginates `GET /api/v1/builds/{build}/tests` (`limit=1000`) and writes `report-0.json` (`index: 0`, `machines: 1`): timed `passed` files keep their `duration_ms`; `failed`, `skipped`, and untimed `passed` files are written as `{timed: false, ms: 0}` so `bunpo merge` keeps them seen without distorting timings.
+3. If the build is finished with zero unresolved tests and zero `init` conflicts (`verdict` is `passed` or `failed` with `unresolved == 0 && len(conflicts) == 0`), paginates `GET /api/v1/builds/{build}/tests` (`limit=1000`), then fetches `GET /api/v1/builds/{build}` once more to confirm the build is still eligible (verdict unchanged, zero unresolved tests, zero conflicts, same test total). Only if that final check passes does it write `report-0.json` (`index: 0`, `machines: 1`): timed `passed` files keep their `duration_ms`; `failed`, `skipped`, and untimed `passed` files are written as `{timed: false, ms: 0}` so `bunpo merge` keeps them seen without distorting timings. If a late conflict appears on a `passed` build mid-paging, it re-fetches `GET /api/v1/builds/{build}` right away and writes no report.
 4. Exits `0` if `verdict == passed`, `1` otherwise, `2` on usage or input error.

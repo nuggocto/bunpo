@@ -249,6 +249,7 @@ const (
 	phaseWaiting
 	phaseRunningCmd
 	phaseStoppingLost
+	phaseStoppingError
 	phaseReadingReports
 	phaseReporting
 	phaseStoppingSignal
@@ -275,9 +276,11 @@ type Machine struct {
 	hbTimerGen uint64
 	fgRetry    retryState
 
-	hbIntervalMS int64
-	hbRetryMS    int64
-	buildStartMS int64
+	hbIntervalMS  int64
+	hbRetryMS     int64
+	hbFailActive  bool
+	hbFailStartMS int64
+	buildStartMS  int64
 
 	curReqID    string
 	curLease    queueapi.LeaseResponse
@@ -285,6 +288,7 @@ type Machine struct {
 	cmdSignaled bool
 	curResults  []queue.ReportResult
 	curExtraErr *ExtraFilesError
+	stopErr     error
 }
 
 // NewMachine initializes a sans-I/O worker state machine.
@@ -373,6 +377,11 @@ func (m *Machine) Step(nowMS int64, ev Event) []Action {
 			actions = append(actions, m.startFreshLease()...)
 			return actions
 
+		case phaseStoppingError:
+			m.curLease = queueapi.LeaseResponse{}
+			m.phase = phaseDone
+			return []Action{{Kind: ActDone, Err: m.stopErr}}
+
 		case phaseStoppingSignal:
 			m.phase = phaseDone
 			return []Action{{Kind: ActDone, Err: context.Canceled}}
@@ -413,7 +422,7 @@ func (m *Machine) handleSignal() []Action {
 	case phaseRunningCmd:
 		m.phase = phaseStoppingSignal
 		actions = append(actions, Action{Kind: ActStopCommand, LeaseID: m.curLease.LeaseID})
-	case phaseStoppingLost:
+	case phaseStoppingLost, phaseStoppingError:
 		// Command stop was already requested; wait for it to exit then finish cancelled.
 		m.phase = phaseStoppingSignal
 	case phaseStoppingSignal:
@@ -467,9 +476,19 @@ func (m *Machine) handleHeartbeatResponse(nowMS int64, resp Response) []Action {
 
 	if resp.Err != nil {
 		if queueapi.IsTransientError(resp.Err) {
+			if !m.hbFailActive {
+				m.hbFailActive = true
+				m.hbFailStartMS = nowMS
+			}
+
+			if nowMS-m.hbFailStartMS >= m.retryCfg.BudgetMS {
+				return m.onHeartbeatBudgetExhausted(resp.Err)
+			}
+
+			nextAt := min(nowMS+m.hbRetryMS, m.hbFailStartMS+m.retryCfg.BudgetMS)
 			return []Action{
 				{Kind: ActLogWarn, Message: fmt.Sprintf("heartbeat for lease %d failed (%v); retrying", m.curLease.LeaseID, resp.Err)},
-				m.setHeartbeatTimer(nowMS + m.hbRetryMS),
+				m.setHeartbeatTimer(nextAt),
 			}
 		}
 
@@ -482,11 +501,42 @@ func (m *Machine) handleHeartbeatResponse(nowMS int64, resp Response) []Action {
 		return actions
 	}
 
+	m.resetHeartbeatRetry()
 	if resp.Heartbeat == nil || !resp.Heartbeat.Held {
 		return m.onLeaseLost()
 	}
 
 	return []Action{m.setHeartbeatTimer(nowMS + m.hbIntervalMS)}
+}
+
+func (m *Machine) resetHeartbeatRetry() {
+	m.hbFailActive = false
+	m.hbFailStartMS = 0
+}
+
+func (m *Machine) onHeartbeatBudgetExhausted(err error) []Action {
+	hbErr := fmt.Errorf("heartbeat retry budget exhausted: %w", err)
+	actions := []Action{
+		{
+			Kind:    ActLogWarn,
+			Message: fmt.Sprintf("heartbeat for lease %d failed past %dms retry budget (%v); stopping batch", m.curLease.LeaseID, m.retryCfg.BudgetMS, err),
+		},
+	}
+	actions = append(actions, m.cancelForeground()...)
+	actions = append(actions, m.cancelHeartbeat()...)
+
+	if m.phase == phaseRunningCmd {
+		m.phase = phaseStoppingError
+		m.stopErr = hbErr
+		actions = append(actions, Action{Kind: ActStopCommand, LeaseID: m.curLease.LeaseID})
+		return actions
+	}
+
+	m.curLease = queueapi.LeaseResponse{}
+	m.curResults = nil
+	m.phase = phaseDone
+	actions = append(actions, Action{Kind: ActDone, Err: hbErr})
+	return actions
 }
 
 func (m *Machine) onLeaseLost() []Action {
@@ -580,6 +630,8 @@ func (m *Machine) handleForegroundResponse(nowMS int64, resp Response) []Action 
 			m.curLease = lease
 			m.curResults = nil
 			m.curExtraErr = nil
+			m.stopErr = nil
+			m.resetHeartbeatRetry()
 			m.phase = phaseRunningCmd
 			return []Action{
 				{Kind: ActStartCommand, LeaseID: lease.LeaseID, Attempts: lease.Attempts, ClearReports: true},
@@ -744,6 +796,7 @@ func (m *Machine) cancelForeground() []Action {
 func (m *Machine) cancelHeartbeat() []Action {
 	m.hbOpID = 0
 	m.hbTimerGen++
+	m.resetHeartbeatRetry()
 	return []Action{{Kind: ActCancelTimer, TimerKind: TimerHeartbeat}}
 }
 
@@ -760,8 +813,13 @@ const (
 	statusPhaseNew statusPhase = iota
 	statusPhaseFetching
 	statusPhasePaging
+	statusPhaseConfirming
 	statusPhaseDone
 )
+
+func statusReportEligible(st queueapi.StatusResponse) bool {
+	return st.Verdict != queue.VerdictRunning && st.Counts.Unresolved == 0 && len(st.Conflicts) == 0
+}
 
 // StatusMachine fetches build status and, when finished with zero unresolved
 // tests and zero init conflicts, paginates /tests into a manifest.RunReport.
@@ -822,7 +880,7 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 			return nil
 		}
 
-		if s.phase == statusPhaseFetching {
+		if s.phase == statusPhaseFetching || s.phase == statusPhaseConfirming {
 			return []Action{s.sendStatus()}
 		}
 
@@ -852,7 +910,7 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 
 		if s.phase == statusPhaseFetching {
 			s.status = *ev.Resp.Status
-			if s.status.Verdict == queue.VerdictRunning || s.status.Counts.Unresolved > 0 || len(s.status.Conflicts) > 0 {
+			if !statusReportEligible(s.status) {
 				st := s.status
 				s.phase = statusPhaseDone
 				return []Action{{Kind: ActDone, Verdict: st.Verdict, Status: &st, HasReport: false}}
@@ -896,10 +954,11 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 					}}
 				}
 
-				st := s.status
-				rep := s.report
-				s.phase = statusPhaseDone
-				return []Action{{Kind: ActDone, Verdict: st.Verdict, Status: &st, Report: &rep, HasReport: true}}
+				// Confirm /status once more after the last page so a late init conflict
+				// on a failed build (which keeps verdict "failed") still suppresses
+				// report-0.json.
+				s.phase = statusPhaseConfirming
+				return []Action{s.sendStatus()}
 			}
 
 			if *page.NextCursor <= s.cursor {
@@ -909,6 +968,17 @@ func (s *StatusMachine) Step(nowMS int64, ev Event) []Action {
 
 			s.cursor = *page.NextCursor
 			return []Action{s.sendListTests()}
+		}
+
+		if s.phase == statusPhaseConfirming {
+			fresh := *ev.Resp.Status
+			s.phase = statusPhaseDone
+			if statusReportEligible(fresh) && fresh.Verdict == s.status.Verdict && fresh.Counts.Total == s.status.Counts.Total {
+				rep := s.report
+				return []Action{{Kind: ActDone, Verdict: fresh.Verdict, Status: &fresh, Report: &rep, HasReport: true}}
+			}
+
+			return []Action{{Kind: ActDone, Verdict: fresh.Verdict, Status: &fresh, HasReport: false}}
 		}
 	}
 
