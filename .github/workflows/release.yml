@@ -125,14 +125,21 @@ jobs:
         run: |
           major=${GITHUB_REF_NAME%%.*}
           releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
-          highest=$(
-            printf '%s\n%s\n' "$releases" "$GITHUB_REF_NAME" \
-              | grep -E "^${major}\.[0-9]+\.[0-9]+$" \
-              | sort -V \
-              | tail -1
-          )
-          if [ "$GITHUB_REF_NAME" = "$highest" ]; then
+          # This release is still a prerelease here, so add it to the list.
+          stable=$(printf '%s\n%s\n' "$releases" "$GITHUB_REF_NAME" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)
+          # "latest" is the newest release of any major; the major tag only
+          # follows its own major, so a v0 backport after v1 still moves v0.
+          newest=$(printf '%s\n' "$stable" | tail -1)
+          newest_in_major=$(printf '%s\n' "$stable" | grep -E "^${major}\." | tail -1)
+
+          if [ "$GITHUB_REF_NAME" = "$newest" ]; then
             gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+          else
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest=false
+            echo "Leaving latest unchanged because $newest is newer than $GITHUB_REF_NAME"
+          fi
+
+          if [ "$GITHUB_REF_NAME" = "$newest_in_major" ]; then
             # git/ref (singular) matches exactly; git/refs/tags/v0 would also
             # list v0.0.1 and report a v0 tag that does not exist.
             if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$major" >/dev/null 2>&1; then
@@ -141,6 +148,5 @@ jobs:
               gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$major" -f sha="$GITHUB_SHA"
             fi
           else
-            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest=false
-            echo "Leaving latest and $major unchanged because $highest is newer than $GITHUB_REF_NAME"
+            echo "Leaving $major unchanged because $newest_in_major is newer than $GITHUB_REF_NAME"
           fi
