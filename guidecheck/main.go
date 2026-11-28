@@ -209,6 +209,11 @@ func run() int {
 		return 1
 	}
 
+	if err := checkFixturesDir(*fixtures); err != nil {
+		fmt.Fprintln(os.Stderr, "guidecheck:", err)
+		return 1
+	}
+
 	work, err := os.MkdirTemp("", "bunpo-guidecheck")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "guidecheck:", err)
@@ -561,9 +566,45 @@ func dedentBlock(block, prefix string) string {
 	return b.String()
 }
 
+// checkFixturesDir verifies dir is a real directory (not a symlink) owned by
+// the current user and not writable by group or others.
+func checkFixturesDir(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("fixtures directory %q: %w", dir, err)
+	}
+
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to use fixtures directory %q: must not be a symlink", dir)
+	}
+
+	if !fi.IsDir() {
+		return fmt.Errorf("refusing to use fixtures directory %q: not a directory", dir)
+	}
+
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("refusing to use fixtures directory %q: cannot determine owner", dir)
+	}
+
+	if int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("refusing to use fixtures directory %q: owned by uid %d, want %d", dir, st.Uid, os.Getuid())
+	}
+
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("refusing to use fixtures directory %q: mode %04o is writable by group or others", dir, fi.Mode().Perm())
+	}
+
+	return nil
+}
+
 // toolPath builds a PATH with bunpo, pytest, and a "bundle" that runs the
 // RSpec installed by generate.sh, ahead of the system PATH.
 func toolPath(work, bunpo, fixtures string) (string, error) {
+	if err := checkFixturesDir(fixtures); err != nil {
+		return "", err
+	}
+
 	bin := filepath.Join(work, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		return "", err

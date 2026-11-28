@@ -39,7 +39,20 @@ npm_install() {
 	npm install --no-audit --no-fund --no-save --silent "$@"
 }
 
-mkdir -p "$work"
+# Refuse to use a symlink, a directory owned by another user, or one writable
+# by group or others, because tools installed into /tmp/bunpo-fixtures are run.
+if [ ! -e "$work" ] && [ ! -L "$work" ]; then
+	mkdir -m 700 "$work"
+fi
+if [ -L "$work" ] || [ ! -d "$work" ] || [ ! -O "$work" ]; then
+	echo "refusing to use $work: must be a real directory owned by the current user" >&2
+	exit 1
+fi
+mode=$(stat -c '%a' "$work" 2>/dev/null || stat -f '%Lp' "$work")
+if (( (8#$mode & 8#022) != 0 )); then
+	echo "refusing to use $work: mode $mode is writable by group or others" >&2
+	exit 1
+fi
 
 prepare pytest
 python3 -m venv "$work/.venv"
