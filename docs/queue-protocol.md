@@ -553,7 +553,7 @@ Auth: none. Returns `200 OK` with `{"ok":true}` and no build, version, or enviro
 
 ### 7.1 Outcome mapping per file in a lease
 
-Let `exit` be the test command's exit status. "Signaled" means the process did not exit normally.
+Let `exit` be the test command's exit status. "Signaled" means the process did not exit normally, or exited with a status above `128`: a shell reports a child killed by signal `n` as `128 + n`, and treating those statuses as signaled errs on the side of retrying sibling files rather than trusting a partial run.
 
 | Command exit | File in report | Outcome |
 | --- | --- | --- |

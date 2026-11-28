@@ -778,8 +778,10 @@ deciding from applying:
   files report `skipped`, and missing files report `error`. On a normal
   non-zero exit with a JUnit report that includes a failed sibling in the same
   lease, clean files with zero skipped cases report `passed` (untimed) while
-  everything else reports `error`. Any unassigned file in the report marks the
-  whole batch `error` and exits 1.
+  everything else reports `error`. Exit statuses above 128 count as signaled
+  because a shell reports a child killed by signal `n` as `128 + n`, and
+  retrying sibling files is the safe direction. Any unassigned file in the
+  report marks the whole batch `error` and exits 1.
 - `--status` prints the verdict, counts, problem tests, and conflicts. When the
   build finished with zero unresolved tests and zero conflicts, it paginates
   `/tests`, re-checks `/status` once after the last page to confirm the verdict,

@@ -59,5 +59,7 @@ func processSignaled(ps *os.ProcessState) bool {
 	}
 
 	code := ps.ExitCode()
+	// Shells report a child killed by signal n as exit status 128+n; treating
+	// exit codes above 128 as signaled errs on the side of retrying sibling files.
 	return code < 0 || code > 128
 }
