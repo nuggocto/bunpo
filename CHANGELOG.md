@@ -3,11 +3,21 @@
 All notable changes to Bunpō are recorded here. Release binaries and checksums
 start at `v0.0.3` on [GitHub Releases](https://github.com/nuggocto/bunpo/releases).
 
-## [Unreleased]
+## [v0.1.3] - 2026-11-28
 
 ### Fixed
 
 - Both live-queue servers now read the `cursor` and `limit` parameters of `GET /api/v1/builds/{build}/tests` the same way: plain decimal digits, with `cursor` from 0 to 20,000. Before, `bunpo-server` accepted spellings such as `007` or `+5` that the Cloudflare Worker rejected, and the Worker answered an empty page for a cursor too large for `bunpo-server`, which rejected it.
+- Bound transient heartbeat retries in `bunpo --queue` to the same 2-minute retry budget used for foreground requests: if heartbeats keep failing transiently past the budget while a batch runs, the runner stops the test command (`SIGTERM`, then `SIGKILL` after 5 s), sends no report for that batch, and exits 1 once the command exits. A successful heartbeat resets the budget.
+- Re-check `GET /api/v1/builds/{build}` once after the last `/tests` page in `bunpo --queue --status` before writing `report-0.json`, so a late `init` conflict on a finished `failed` build suppresses the report even though the verdict stays `failed`.
+- Serialize release promotion in `.github/workflows/release.yml` and compare against existing stable releases for the same major before marking a release `latest` or moving the major tag (`v0`), so concurrent or re-run workflows cannot move `latest` or `v0` backwards.
+- Replace the placeholder tokens in the systemd example in `docs/self-hosting.md` with commands that create `/etc/bunpo/env` at mode `0640` (`root:bunpo`) first and fill it from the step-1 tokens. If you copied the old systemd example verbatim, rotate both tokens using [Token rotation](docs/self-hosting.md#token-rotation).
+- Verify ownership, non-symlink status, and non-group/world-writable permissions (`0700` when created) for `/tmp/bunpo-fixtures` in `internal/junit/testdata/generate.sh` and `guidecheck`.
+
+### Changed
+
+- Remove the unused `go mod download` step from `Dockerfile` and build with `GOPROXY=off GOFLAGS=-mod=readonly`, keeping `bunpo-server` container builds offline and standard-library-only.
+- Document in `docs/queue-protocol.md` and `docs/book.md` that test command exit statuses above `128` count as signaled (matching how shells report a child killed by signal `n` as `128 + n`), so sibling files are retried rather than trusted as clean passes.
 
 ## [v0.1.2] - 2026-11-26
 
@@ -154,7 +164,7 @@ First release with cross-compiled binaries, checksums, GitHub Action, runner gui
 - Table-driven tests, 2,000-seed property tests, a brute-force optimal solver oracle verifying the 4/3 makespan bound, fuzzing for timing decoding, and a 50,000-test benchmark.
 - Go 1.27 module with pinned `staticcheck` and `govulncheck` tools, GitHub Actions CI, specification (`PROJECT.md`), and developer guide (`docs/book.md`).
 
-[Unreleased]: https://github.com/nuggocto/bunpo/compare/v0.1.2...HEAD
+[v0.1.3]: https://github.com/nuggocto/bunpo/compare/v0.1.2...v0.1.3
 [v0.1.2]: https://github.com/nuggocto/bunpo/compare/v0.1.1...v0.1.2
 [v0.1.1]: https://github.com/nuggocto/bunpo/compare/v0.1.0...v0.1.1
 [v0.1.0]: https://github.com/nuggocto/bunpo/compare/v0.0.7...v0.1.0
