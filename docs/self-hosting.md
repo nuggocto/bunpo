@@ -139,17 +139,14 @@ queue.example.com {
 
 ### systemd service
 
-Create a dedicated user and a `0640` environment file owned by `root:bunpo` at `/etc/bunpo/env` (readable by `bunpo`, writable only by `root`):
+Create a dedicated user and a `0640` environment file owned by `root:bunpo` at `/etc/bunpo/env` (readable by `bunpo`, writable only by `root`), filled from the `BUNPO_QUEUE_TOKEN` and `BUNPO_QUEUE_READ_TOKEN` values generated in step 1 so they match your CI secrets:
 
 ```sh
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin bunpo
 sudo install -d -m 0750 -o root -g bunpo /etc/bunpo
-sudo tee /etc/bunpo/env >/dev/null <<'EOF'
-BUNPO_QUEUE_TOKEN=replace-with-64-hex-chars
-BUNPO_QUEUE_READ_TOKEN=replace-with-different-64-hex-chars
-EOF
-sudo chmod 0640 /etc/bunpo/env
-sudo chown root:bunpo /etc/bunpo/env
+sudo install -m 0640 -o root -g bunpo /dev/null /etc/bunpo/env
+printf 'BUNPO_QUEUE_TOKEN=%s\nBUNPO_QUEUE_READ_TOKEN=%s\n' \
+  "$BUNPO_QUEUE_TOKEN" "$BUNPO_QUEUE_READ_TOKEN" | sudo tee /etc/bunpo/env >/dev/null
 ```
 
 Install `/etc/systemd/system/bunpo-server.service`:
